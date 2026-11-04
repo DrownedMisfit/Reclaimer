@@ -1,0 +1,37 @@
+.venv/
+__pycache__/
+*.pyc
+*.tmp
+
+# datos/: se sube lo pequeño y valioso (lo aprendido de tu estilo, copias de seguridad de proyectos…);
+# lo que se regenera solo o se descarga al instalar, no (GitHub no admite tanto peso)
+datos/cache/
+datos/modelos/
+datos/voz_separada/
+datos/temporal/
+datos/registros/
+
+# Lo que crea el programa al usarlo: exportaciones, audio extraído, pruebas
+Exportados/
+Audio extraído/
+_pruebas_tmp/
+x/
+*.lnk
+*.log
+
+# Motor de IA: su Python y los modelos se descargan al instalar (INSTALAR_MOTOR_IA.bat)
+motor_ia/.venv/
+motor_ia/alineador_es/
+motor_ia/modelos/
+motor_ia/miopen/
+
+# Videos y audios sueltos (los de las pruebas, en tests/assets, sí se suben)
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.mp3
+*.m4a
+!tests/assets/**
+datos/sesion_abierta.lock

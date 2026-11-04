@@ -1,0 +1,8 @@
+PySide6>=6.7
+numpy>=1.26
+faster-whisper>=1.1
+opencv-contrib-python-headless>=4.9
+# Leer el texto de las miniaturas («🎨 Mi estilo»). Instalar SIN dependencias para que no meta un
+# segundo OpenCV encima del de arriba:  pip install --no-deps rapidocr-onnxruntime pyclipper shapely six pyyaml pillow
+rapidocr-onnxruntime>=1.4
+onnxruntime>=1.17
