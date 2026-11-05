@@ -111,6 +111,36 @@ def main():
     back = ed.doc["layers"][-1]
     assert len(ed.doc["layers"]) == n0 and abs(back["x"] - x0) < 0.5 and abs(back["y"] - y0) < 0.5, (back["x"], x0)
     print("✓ Ctrl+X quita la imagen elegida y Ctrl+V la devuelve a su sitio")
+    # 3c) clic derecho en la lista de capas y en el lienzo: el menú de la capa (no solo «¿Qué hace esto?»)
+    from PySide6.QtGui import QContextMenuEvent
+    from editoria.ui import help as H
+    H.install(app)
+    menus = []
+    real_menu = ed.layer_menu
+
+    def espia(lay_):
+        m = real_menu(lay_)
+        m.exec = lambda *a, **k: menus.append([a.text() for a in m.actions() if a.text()])
+        return m
+    ed.layer_menu = espia
+    row = ed.layers.count() - 1
+    rect = ed.layers.visualItemRect(ed.layers.item(row))
+    QCoreApplication.sendEvent(ed.layers.viewport(), QContextMenuEvent(QContextMenuEvent.Mouse, rect.center()))
+    assert menus and any("Eliminar" in t for t in menus[-1]) and any("Cortar" in t for t in menus[-1]), menus
+    assert any("Qué hace esto" in t for t in menus[-1]), "la ayuda sigue al final"
+    target = ed.layer(ed.layers.item(row).data(Qt.UserRole))
+    vp = ed.canvas.viewport()
+    c = ed.canvas.mapFromScene(ed.canvas._box(target).boundingRect().center())
+    QCoreApplication.sendEvent(vp, QContextMenuEvent(QContextMenuEvent.Mouse, c, vp.mapToGlobal(c)))
+    assert len(menus) == 2 and any("Eliminar" in t for t in menus[-1]), menus
+    ed.layer_menu = real_menu
+    m = ed.layer_menu(target)
+    n_antes = len(ed.doc["layers"])
+    next(a for a in m.actions() if "Eliminar" in a.text()).trigger()
+    assert len(ed.doc["layers"]) == n_antes - 1 and ed.layer(target["id"]) is None
+    ed.undo()
+    assert len(ed.doc["layers"]) == n_antes
+    print(f"✓ clic derecho en una capa (lista y lienzo): {len(menus[0])} opciones; «Eliminar» funciona y se deshace")
     # 4) ⇱ Mejorar resolución: barra de 0 a 100 %
     small = os.path.join(out, "pequena.png")
     Image.fromarray((np.random.default_rng(2).random((180, 320, 3)) * 255).astype(np.uint8)).save(small)

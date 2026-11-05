@@ -143,7 +143,28 @@ class _MaterialList(QListWidget):
 
 
 class Canvas(QGraphicsView):
-    """El lienzo: dibuja la miniatura y permite mover, escalar y girar capas con el ratón."""
+    """El lienzo: dibuja la miniatura y permite mover, escalar y girar capas con el ratón. Clic derecho en una
+    capa: su menú (cortar, copiar, orden, llenar, quitar fondo, mejorar, cara graciosa, eliminar…)."""
+
+    def mouseDoubleClickEvent(self, e):
+        if self.tool or e.button() != Qt.LeftButton:
+            return super().mouseDoubleClickEvent(e)
+        lay = self.editor.layer(self._hit(self.mapToScene(e.position().toPoint())))
+        if lay is not None and lay["kind"] == "text" and not lay.get("locked"):
+            self.editor.edit_text(lay)
+            return
+        super().mouseDoubleClickEvent(e)
+
+    def contextMenuEvent(self, e):
+        if self.tool:                                  # (con un pincel activo, el clic derecho no hace nada)
+            return
+        pt = self.mapToScene(e.pos())
+        hit = self._hit(pt)
+        if hit and hit != self.sel:
+            self.sel = hit
+            self.selected.emit(hit)
+        self.viewport().update()
+        self.editor.layer_menu(self.editor.layer(hit) if hit else None).exec(e.globalPos())
     selected = Signal(str)          # id de la capa elegida ("" = ninguna)
     committed = Signal(str)         # terminó un arrastre: guardar en el historial
     zoomChanged = Signal(float)     # el zoom (1 = la miniatura entera a la vista)
@@ -165,6 +186,8 @@ class Canvas(QGraphicsView):
         self.brush = 30                   # radio del pincel (píxeles del lienzo)
         self._stroke: list = []
         self._hover = None
+        self._crop_prev: dict | None = None    # ⬚ recortando con un lado: la imagen entera y el recorte al vuelo
+        self.multi: set[str] = set()            # Mayús+clic / Ctrl+A: varias capas elegidas (se mueven y borran juntas)
         self.liq_mode = "inflar"          # ≈ Licuar: inflar | encoger | empujar | restaurar
         self.liq_strength = 0.5
         self._liq_timer = QTimer(self)    # inflar/encoger mientras se mantiene pulsado (como en Photoshop)
@@ -210,6 +233,16 @@ class Canvas(QGraphicsView):
         self.zoomChanged.emit(self.zoom)
 
     def wheelEvent(self, e):
+        if e.modifiers() & Qt.AltModifier:                      # Alt + rueda: agrandar / achicar lo elegido
+            lay = self.editor.layer(self.sel)
+            delta = e.angleDelta().y() or e.angleDelta().x()     # (con Alt, Windows manda la rueda «de lado»)
+            if lay is not None and not lay.get("locked") and delta:
+                lay["scale"] = round(max(0.02, float(lay["scale"]) * 1.06 ** (delta / 120.0)), 4)
+                self.viewport().update()
+                self.editor.on_live_change()
+                self.committed.emit("Tamaño (rueda)")
+            e.accept()
+            return
         if e.modifiers() & Qt.ControlModifier:                 # Ctrl + rueda: acercar / alejar donde está el ratón
             steps = e.angleDelta().y() / 120.0
             self.set_zoom(self.zoom * (1.2 ** steps), e.position())
@@ -227,11 +260,9 @@ class Canvas(QGraphicsView):
         for lay in d["layers"]:                                 # lo que se sale del encuadre, en tenue
             if not lay.get("visible", True):
                 continue
-            img, _w, _h = T.render_layer(lay)
             p.save()
             p.setOpacity(float(lay.get("opacity", 1.0)) * 0.28)
-            p.setTransform(T.layer_transform(lay, img), True)
-            p.drawImage(0, 0, img)
+            self._draw_layer(p, lay)
             p.restore()
         p.save()
         p.setClipRect(QRectF(0, 0, d["w"], d["h"]))
@@ -239,18 +270,83 @@ class Canvas(QGraphicsView):
         for lay in d["layers"]:
             if not lay.get("visible", True):
                 continue
-            img, _w, _h = T.render_layer(lay)
             p.save()
             p.setOpacity(float(lay.get("opacity", 1.0)))
-            p.setTransform(T.layer_transform(lay, img), True)
-            p.drawImage(0, 0, img)
+            self._draw_layer(p, lay)
             p.restore()
         p.restore()
         p.setPen(QPen(QColor("#333"), 0))
         p.drawRect(QRectF(0, 0, d["w"], d["h"]))
 
+    def _draw_layer(self, p: QPainter, lay: dict):
+        cp = self._crop_prev
+        if cp is not None and cp["id"] == lay["id"]:            # ⬚ recortando: sin volver a procesar la imagen
+            p.setTransform(cp["t"], True)
+            p.setClipRect(self._crop_rect(cp))
+            p.drawImage(0, 0, cp["img"])
+            return
+        img, _w, _h = T.render_layer(lay)
+        p.setTransform(T.layer_transform(lay, img), True)
+        p.drawImage(0, 0, img)
+
+    # ------------------------------------------------------------- ⬚ recortar con los lados
+    @staticmethod
+    def _crop_rect(cp: dict) -> QRectF:
+        x0, y0, x1, y1 = cp["crop"]
+        return QRectF(cp["px"] + x0 * cp["fw"], cp["py"] + y0 * cp["fh"], (x1 - x0) * cp["fw"], (y1 - y0) * cp["fh"])
+
+    def _crop_start(self, lay: dict, side: str) -> dict:
+        """La imagen entera (sin recorte) colocada justo debajo de la capa: se prepara UNA vez al empezar."""
+        full = copy.deepcopy(lay)
+        full["crop"] = [0.0, 0.0, 1.0, 1.0]
+        full["x"] = full["y"] = 0.0
+        fimg, fw, fh = T.render_layer(full)
+        px, py = (fimg.width() - fw) / 2, (fimg.height() - fh) / 2
+        c = [float(v) for v in (lay.get("crop") or [0, 0, 1, 1])]
+        o = T.layer_transform(full, fimg).map(QPointF(px + (c[0] + c[2]) / 2 * fw, py + (c[1] + c[3]) / 2 * fh))
+        full["x"], full["y"] = float(lay["x"]) - o.x(), float(lay["y"]) - o.y()   # (lo visible, donde está)
+        t = T.layer_transform(full, fimg)
+        inv, _ok = t.inverted()
+        return {"id": lay["id"], "side": side, "img": fimg, "fw": fw, "fh": fh, "px": px, "py": py, "t": t,
+                "inv": inv, "crop": c, "c0": list(c)}
+
+    def _crop_move(self, cp: dict, pt: QPointF):
+        q = cp["inv"].map(pt)
+        u = min(1.0, max(0.0, (q.x() - cp["px"]) / max(1.0, cp["fw"])))
+        v = min(1.0, max(0.0, (q.y() - cp["py"]) / max(1.0, cp["fh"])))
+        x0, y0, x1, y1 = cp["crop"]
+        m = 0.02                                                # (nunca menos del 2 %)
+        s = cp["side"]
+        if s == "l":
+            x0 = min(u, x1 - m)
+        elif s == "r":
+            x1 = max(u, x0 + m)
+        elif s == "t":
+            y0 = min(v, y1 - m)
+        else:
+            y1 = max(v, y0 + m)
+        cp["crop"] = [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
+
+    def _crop_end(self, lay: dict, cp: dict):
+        x0, y0, x1, y1 = cp["crop"]
+        c = cp["t"].map(QPointF(cp["px"] + (x0 + x1) / 2 * cp["fw"], cp["py"] + (y0 + y1) / 2 * cp["fh"]))
+        lay["crop"] = cp["crop"]
+        lay["x"], lay["y"] = round(c.x(), 2), round(c.y(), 2)
+
+    @staticmethod
+    def _side_points(corners: list) -> dict:
+        p0, p1, p2, p3 = corners[:4]
+        return {"t": (p0 + p1) / 2, "r": (p1 + p2) / 2, "b": (p2 + p3) / 2, "l": (p3 + p0) / 2}
+
+    def _crop_allowed(self, lay: dict | None) -> bool:
+        return bool(lay) and lay["kind"] == "image" and not lay.get("locked") and not self.warp_mode \
+            and not T.warp_of(lay)
+
     def _box(self, lay: dict) -> QPolygonF:
         """Rectángulo (girado) del contenido de la capa, en coordenadas del lienzo."""
+        cp = self._crop_prev
+        if cp is not None and cp["id"] == lay["id"]:            # (recortando: el recuadro sigue al ratón)
+            return cp["t"].map(QPolygonF(self._crop_rect(cp)))
         img, cw, ch = T.render_layer(lay)
         t = T.layer_transform(lay, img)
         x0, y0 = (img.width() - cw) / 2, (img.height() - ch) / 2
@@ -296,6 +392,12 @@ class Canvas(QGraphicsView):
                 p.drawLine(QPointF(g[1], 0), QPointF(g[1], d["h"]))
             else:
                 p.drawLine(QPointF(0, g[1]), QPointF(d["w"], g[1]))
+        for oid in self.multi - {self.sel}:               # las otras elegidas (Mayús+clic): recuadro discontinuo
+            o = self.editor.layer(oid)
+            if o is not None and o.get("visible", True):
+                p.setPen(QPen(QColor("#e8742f"), 1.5 * k, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawPolygon(self._box(o))
         lay = self.editor.layer(self.sel)
         if lay is None or not lay.get("visible", True):
             return
@@ -317,6 +419,15 @@ class Canvas(QGraphicsView):
         p.setBrush(QColor("white"))
         for c in h["corners"]:
             p.drawRect(QRectF(c.x() - HANDLE * k / 2, c.y() - HANDLE * k / 2, HANDLE * k, HANDLE * k))
+        if self._crop_allowed(lay) and not self.multi - {lay["id"]}:   # ⬚ recortar: un rectángulo en cada lado
+            rot = float(lay.get("rotation", 0))
+            for side, c in self._side_points(h["corners"]).items():
+                p.save()
+                p.translate(c)
+                p.rotate(rot)
+                w_, h_ = (HANDLE * 1.9 * k, HANDLE * 0.62 * k) if side in "tb" else (HANDLE * 0.62 * k, HANDLE * 1.9 * k)
+                p.drawRect(QRectF(-w_ / 2, -h_ / 2, w_, h_))
+                p.restore()
         top_mid = (h["corners"][0] + h["corners"][1]) / 2
         p.drawLine(top_mid, h["rot"])
         p.drawEllipse(h["rot"], HANDLE * k * 0.6, HANDLE * k * 0.6)
@@ -402,17 +513,54 @@ class Canvas(QGraphicsView):
                 self._drag = {"mode": "rot", "lay": lay, "c": h["center"], "r0": lay["rotation"],
                               "a0": math.degrees(math.atan2(pt.y() - h["center"].y(), pt.x() - h["center"].x()))}
                 return
-            for c in ([] if self.warp_mode else h["corners"]):
-                if (pt - c).manhattanLength() < tol * 1.6:
+            # esquinas (tamaño) y centros de los lados (⬚ recortar): gana el asa más cercana al ratón
+            cands = [((pt - c).manhattanLength(), "scale", None)
+                     for c in ([] if self.warp_mode else h["corners"]) if (pt - c).manhattanLength() < tol * 1.6]
+            if self._crop_allowed(lay):
+                cands += [((pt - c).manhattanLength(), "crop", side)
+                          for side, c in self._side_points(h["corners"]).items()
+                          if (pt - c).manhattanLength() < tol * 1.5]
+            if cands:
+                _dist, kind, side = min(cands, key=lambda x: x[0])
+                if kind == "crop":
+                    self._crop_prev = self._crop_start(lay, side)
+                    self._drag = {"mode": "crop", "lay": lay}
+                else:
                     d0 = math.hypot(pt.x() - h["center"].x(), pt.y() - h["center"].y()) or 1
                     self._drag = {"mode": "scale", "lay": lay, "c": h["center"], "s0": lay["scale"], "d0": d0}
-                    return
+                return
         hit = self._hit(pt)
+        if e.modifiers() & Qt.ShiftModifier and e.button() == Qt.LeftButton:   # Mayús+clic: varias a la vez
+            if hit:
+                if self.sel:
+                    self.multi.add(self.sel)
+                if hit in self.multi and len(self.multi) > 1:
+                    self.multi.discard(hit)
+                    hit = next(iter(self.multi))
+                else:
+                    self.multi.add(hit)
+            self.sel = hit
+            self.selected.emit(hit)
+            self.viewport().update()
+            return
+        if hit not in self.multi:
+            self.multi.clear()
         self.sel = hit
         self.selected.emit(hit)
         lay = self.editor.layer(hit)
         if lay is not None and not lay.get("locked") and e.button() == Qt.LeftButton:
-            self._drag = {"mode": "move", "lay": lay, "p0": pt, "x0": lay["x"], "y0": lay["y"]}
+            if e.modifiers() & Qt.AltModifier:              # Alt+arrastrar: se arrastra una copia
+                lay = self.editor.duplicate_here(lay)
+                self.multi.clear()
+            group = [lay] if lay["id"] not in self.multi else \
+                [l for l in self.doc["layers"] if l["id"] in self.multi and not l.get("locked")]
+            others = [self._box(o).boundingRect() for o in self.doc["layers"]
+                      if o.get("visible", True) and o not in group]
+            bb = self._box(lay).boundingRect()
+            for g in group[1:]:
+                bb = bb.united(self._box(g).boundingRect())
+            self._drag = {"mode": "move", "lay": lay, "p0": pt, "x0": lay["x"], "y0": lay["y"],
+                          "group": [(g, g["x"], g["y"]) for g in group], "bb": bb, "others": others}
         self.viewport().update()
 
     def mouseMoveEvent(self, e):
@@ -451,23 +599,41 @@ class Canvas(QGraphicsView):
             self.viewport().update()
             return
         if d is None:
+            self._hover_cursor(pt)
             return
         lay = d["lay"]
         doc = self.doc
         self._guides = []
+        if d["mode"] == "crop":                          # (solo se recalcula el recuadro: fluido)
+            self._crop_move(self._crop_prev, pt)
+            self.viewport().update()
+            return
         if d["mode"] == "move":
-            x = d["x0"] + pt.x() - d["p0"].x()
-            y = d["y0"] + pt.y() - d["p0"].y()
-            snap = 10 / max(self.transform().m11(), 1e-6)
-            for target in (doc["w"] / 2, doc["w"] / 3, doc["w"] * 2 / 3):
-                if abs(x - target) < snap:
-                    x = target
-                    self._guides.append(("v", target))
-            for target in (doc["h"] / 2, doc["h"] / 3, doc["h"] * 2 / 3):
-                if abs(y - target) < snap:
-                    y = target
-                    self._guides.append(("h", target))
-            lay["x"], lay["y"] = round(x, 1), round(y, 1)
+            dx, dy = pt.x() - d["p0"].x(), pt.y() - d["p0"].y()
+            if not e.modifiers() & Qt.ControlModifier:     # guías inteligentes (Ctrl = moverla sin que se pegue)
+                snap = 8 / max(self.transform().m11(), 1e-6)
+                bb, W, H = d["bb"], doc["w"], doc["h"]
+                tx = [0.0, W / 3, W / 2, W * 2 / 3, W] + [v for r in d["others"]
+                                                          for v in (r.left(), r.center().x(), r.right())]
+                ty = [0.0, H / 3, H / 2, H * 2 / 3, H] + [v for r in d["others"]
+                                                          for v in (r.top(), r.center().y(), r.bottom())]
+                for axis, edges, targets in (("v", (bb.left(), bb.center().x(), bb.right()), tx),
+                                             ("h", (bb.top(), bb.center().y(), bb.bottom()), ty)):
+                    off = dx if axis == "v" else dy
+                    best = None
+                    for e_ in edges:
+                        for t in targets:
+                            gap = t - (e_ + off)
+                            if abs(gap) < snap and (best is None or abs(gap) < abs(best[0])):
+                                best = (gap, t)
+                    if best is not None:
+                        if axis == "v":
+                            dx += best[0]
+                        else:
+                            dy += best[0]
+                        self._guides.append((axis, best[1]))
+            for g, gx, gy in d.get("group") or [(lay, d["x0"], d["y0"])]:
+                g["x"], g["y"] = round(gx + dx, 1), round(gy + dy, 1)
         elif d["mode"] == "warp":
             # dónde cae el ratón en la capa SIN deformar → cuánto se separa esa esquina de su sitio
             img, cw, ch = T.render_layer(lay)
@@ -514,11 +680,38 @@ class Canvas(QGraphicsView):
             self.editor.brush_stroke(pts, self.tool == "restore")
             self.viewport().update()
             return
+        if self._drag is not None and self._drag.get("mode") == "crop":
+            lay, cp = self._drag["lay"], self._crop_prev
+            self._drag = None
+            changed = cp is not None and cp["crop"] != cp["c0"]
+            if changed:
+                self._crop_end(lay, cp)              # (aquí, y solo aquí, se procesa la imagen recortada)
+            self._crop_prev = None
+            if changed:
+                self.committed.emit("Recortar")
+            self.viewport().update()
+            return
         if self._drag is not None:
             self._drag = None
             self._guides = []
             self.committed.emit("Mover / tamaño / giro")
             self.viewport().update()
+
+    def _hover_cursor(self, pt: QPointF):
+        """Encima de un lado de lo elegido: la flecha de recortar."""
+        if self.tool:
+            return
+        lay = self.editor.layer(self.sel)
+        cur = Qt.ArrowCursor
+        if self._crop_allowed(lay) and lay.get("visible", True):
+            h = self._handles(lay)
+            for side, c in self._side_points(h["corners"]).items():
+                if (pt - c).manhattanLength() < HANDLE * h["k"] * 1.5:
+                    ang = (float(lay.get("rotation", 0)) + (90 if side in "tb" else 0)) % 180
+                    cur = Qt.SizeHorCursor if ang < 45 or ang > 135 else Qt.SizeVerCursor
+                    break
+        if self.cursor().shape() != cur:
+            self.setCursor(cur)
 
     # ------------------------------------------------------------- soltar imágenes
     def _acepta(self, mime) -> bool:
@@ -566,8 +759,9 @@ class Canvas(QGraphicsView):
         moves = {Qt.Key_Left: (-step, 0), Qt.Key_Right: (step, 0), Qt.Key_Up: (0, -step), Qt.Key_Down: (0, step)}
         if e.key() in moves and not lay.get("locked"):
             dx, dy = moves[e.key()]
-            lay["x"] += dx
-            lay["y"] += dy
+            for g in self.editor.selected_layers():
+                g["x"] += dx
+                g["y"] += dy
             self.viewport().update()
             self.committed.emit("Mover")
         elif e.key() in (Qt.Key_Delete, Qt.Key_Backspace):
@@ -709,6 +903,7 @@ class ThumbnailEditor(QMainWindow):
         self._cutouts: dict = {}          # fotograma → máscara del personaje (para no recortar dos veces)
 
         self.canvas = Canvas(self)
+        self.canvas.setProperty("own_menu", True)          # (clic derecho: el menú de la capa, con la ayuda al final)
         self.canvas.selected.connect(self._on_select)
         self.canvas.committed.connect(self.commit)
         self._build_toolbar()
@@ -735,6 +930,10 @@ class ThumbnailEditor(QMainWindow):
                         ("Ctrl+D", self.duplicate)):
             QShortcut(QKeySequence(seq), self, activated=fn, context=Qt.WidgetWithChildrenShortcut)
         QShortcut(QKeySequence("Escape"), self.canvas, activated=self.select_tool, context=Qt.WidgetShortcut)
+        for w in (self.canvas, self.layers):
+            QShortcut(QKeySequence.SelectAll, w, activated=self.select_all, context=Qt.WidgetShortcut)   # Ctrl+A
+            for seq, d in (("Ctrl+PgUp", 1), ("Ctrl+PgDown", -1), ("Ctrl+Shift+PgUp", 999), ("Ctrl+Shift+PgDown", -999)):
+                QShortcut(QKeySequence(seq), w, activated=lambda d=d: self.arrange(d), context=Qt.WidgetShortcut)
         QShortcut(QKeySequence("Ctrl+0"), self.canvas, activated=lambda: self.canvas.set_zoom(1.0),
                   context=Qt.WidgetShortcut)
         for w in (self.canvas, self.layers):
@@ -866,6 +1065,18 @@ class ThumbnailEditor(QMainWindow):
                                     "alrededor se estira con ello. El tamaño del círculo, en el panel derecho.")
         tb.addSeparator()
         from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QMenu, QToolButton
+        self.tpl_btn = QToolButton()
+        self.tpl_btn.setText("📐 Plantillas")
+        self.tpl_btn.setToolTip("Guarda una miniatura como plantilla y reutiliza su composición en otra")
+        self.tpl_btn.setPopupMode(QToolButton.InstantPopup)
+        tpl_menu = QMenu(self.tpl_btn)
+        tpl_menu.aboutToShow.connect(lambda: self._templates_menu(tpl_menu))
+        self.tpl_btn.setMenu(tpl_menu)
+        tb.addWidget(self.tpl_btn)
+        self.act_short = tb.addAction("📱 Pasar a Short", self.to_short)
+        self.act_short.setToolTip("Crea la miniatura vertical del Short a partir de esta de YouTube (luego la ajustas)")
+        tb.addSeparator()
         self.guides_combo = QComboBox()
         for label, key in (("▦ Sin guías", ""), ("▦ Centro", "centro"), ("▦ Tercios", "tercios"),
                            ("▦ Cuartos", "cuartos"), ("▦ Lo que tapa YouTube", "youtube")):
@@ -1388,6 +1599,8 @@ class ThumbnailEditor(QMainWindow):
 
     def refresh_all(self):
         self._loading = True
+        if hasattr(self, "act_short"):
+            self.act_short.setVisible(self.doc["format"] == "youtube")
         bg = self.doc.get("bg") or {}
         self.bg_type.setCurrentIndex(max(0, self.bg_type.findData(bg.get("type", "color"))))
         self.bg_c1.set_color(bg.get("c1", bg.get("color", "#101014")))
@@ -1416,6 +1629,7 @@ class ThumbnailEditor(QMainWindow):
         self.layers.currentRowChanged.connect(self._layer_row)
         self.layers.model().rowsMoved.connect(lambda *_a: self._layers_dragged())
         self.layers.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.layers.setProperty("own_menu", True)          # (su menú lleva «❓ ¿Qué hace esto?» al final)
         self.layers.customContextMenuRequested.connect(self._layers_menu)
         QShortcut(QKeySequence(Qt.Key_Delete), self.layers, activated=self.delete_layer,
                   context=Qt.WidgetShortcut)
@@ -1497,24 +1711,70 @@ class ThumbnailEditor(QMainWindow):
         self.layers.setItemWidget(it, w)
 
     def _layers_menu(self, pos):
-        from PySide6.QtWidgets import QMenu
         it = self.layers.itemAt(pos)
-        if it is None:
-            return
-        self.layers.setCurrentItem(it)
-        lay = self.layer(it.data(Qt.UserRole))
-        if lay is None:
-            return
+        lay = self.layer(it.data(Qt.UserRole)) if it is not None else None
+        if it is not None:
+            self.layers.setCurrentItem(it)
+        self.layer_menu(lay).exec(self.layers.viewport().mapToGlobal(pos))
+
+    def layer_menu(self, lay: dict | None):
+        """Clic derecho en una capa (en la lista o en el lienzo): todo lo que se puede hacer con ella."""
+        from PySide6.QtWidgets import QMenu
+        from .help import add_help_action
         m = QMenu(self)
-        m.addAction("Ocultar" if lay.get("visible", True) else "Mostrar", self.toggle_visible)
-        m.addAction("Desbloquear" if lay.get("locked") else "Bloquear", self.toggle_lock)
-        m.addAction("Duplicar", self.duplicate)
+        if lay is None:                                     # en un hueco: solo pegar
+            m.addAction("📋 Pegar\tCtrl+V", self.paste)
+            add_help_action(m, "miniatura", self)
+            return m
+        self.canvas.sel = lay["id"]
+        locked = bool(lay.get("locked"))
+
+        def act(menu, text, fn, enabled=True):
+            a = menu.addAction(text, fn)
+            a.setEnabled(enabled)
+            return a
+        act(m, "✂ Cortar\tCtrl+X", self.cut_layer, not locked)
+        act(m, "⧉ Copiar\tCtrl+C", self.copy_layer)
+        act(m, "📋 Pegar\tCtrl+V", self.paste)
+        act(m, "⧉ Duplicar\tCtrl+D", self.duplicate)
         m.addSeparator()
-        m.addAction("Poner delante", lambda: self.arrange(1))
-        m.addAction("Poner detrás", lambda: self.arrange(-1))
+        orden = m.addMenu("Orden")
+        L = self.doc["layers"]
+        i = L.index(lay)
+        act(orden, "⤒ Al frente del todo", lambda: self.arrange(len(L)), i < len(L) - 1)
+        act(orden, "↑ Poner delante", lambda: self.arrange(1), i < len(L) - 1)
+        act(orden, "↓ Poner detrás", lambda: self.arrange(-1), i > 0)
+        act(orden, "⤓ Al fondo del todo", lambda: self.arrange(-len(L)), i > 0)
+        act(m, "↔ Voltear (espejo)", lambda: self._set(lay, "Voltear", flip=not lay.get("flip")), not locked)
+        act(m, "👁 Ocultar" if lay.get("visible", True) else "👁 Mostrar", self.toggle_visible)
+        act(m, "🔓 Desbloquear" if locked else "🔒 Bloquear", self.toggle_lock)
+        if lay["kind"] == "image":
+            m.addSeparator()
+            act(m, "⛶ Llenar el lienzo", lambda: self.fill_canvas(lay), not locked)
+            act(m, "🌫 Fondo desenfocado detrás", lambda: self.blur_background(lay))
+            act(m, "✂ Quitar fondo", self.cutout_auto, not locked)
+            img = QImage(lay["path"])
+            mejor = m.addMenu("⇱ Mejorar resolución")
+            for f in (2, 4):
+                act(mejor, f"×{f}", lambda _=False, f=f: self.upscale_image(f),
+                    not locked and self.job is None and img.width() * img.height() * f * f <= self.MAX_UPSCALE_PX)
+            try:
+                from ..ai import funny_faces as FF
+                caras = m.addMenu("😜 Cara graciosa")
+                for key, label, _tip in FF.PRESETS:
+                    act(caras, label, lambda _=False, k=key: self.funny_face(k), not locked)
+            except Exception:  # noqa: BLE001
+                pass
+        if lay.get("warp") or lay.get("liquify"):
+            m.addSeparator()
+            if lay.get("warp"):
+                act(m, "◇ Quitar deformación", self.reset_warp, not locked)
+            if lay.get("liquify"):
+                act(m, "≈ Quitar licuado", self.liquify_reset, not locked)
         m.addSeparator()
-        m.addAction("🗑 Eliminar", self.delete_layer)
-        m.exec(self.layers.viewport().mapToGlobal(pos))
+        act(m, "🗑 Eliminar\tSupr", self.delete_layer, not locked)
+        add_help_action(m, "miniatura", self)
+        return m
 
     def _layer_icon(self, lay: dict) -> QIcon:
         """Miniatura de la capa (sobre un damero, para que se vea lo transparente)."""
@@ -1883,6 +2143,7 @@ class ThumbnailEditor(QMainWindow):
     # ----------------------------------------------------------- ↖ Seleccionar (ratón normal)
     def select_tool(self):
         """Deja cualquier herramienta (Licuar, Deformar, pinceles, recuadro) y vuelve al ratón normal."""
+        self.canvas.multi.clear()
         self.act_liq.setChecked(False)
         self.act_warp.setChecked(False)
         self.canvas.warp_mode = False
@@ -2073,6 +2334,16 @@ class ThumbnailEditor(QMainWindow):
 
     def delete_layer(self):
         lay = self.cur()
+        if lay and len(self.selected_layers()) > 1:          # varias elegidas (Mayús+clic): todas
+            ids = {l["id"] for l in self.selected_layers()}
+            self.doc["layers"] = [l for l in self.doc["layers"] if l["id"] not in ids]
+            self.canvas.sel = ""
+            self.canvas.multi.clear()
+            self._last_label = ""
+            self.commit("Borrar")
+            self.canvas.viewport().update()
+            self._fill_props()
+            return
         if lay and not lay.get("locked"):
             self.doc["layers"].remove(lay)
             self.canvas.sel = ""
@@ -2080,6 +2351,188 @@ class ThumbnailEditor(QMainWindow):
             self.commit("Borrar")
             self.canvas.viewport().update()
             self._fill_props()
+
+    def selected_layers(self) -> list[dict]:
+        """Las capas elegidas que se pueden tocar: las de Mayús+clic, o la elegida."""
+        ids = set(self.canvas.multi) | ({self.canvas.sel} if self.canvas.sel else set())
+        if self.canvas.sel and self.canvas.sel not in self.canvas.multi:
+            ids = {self.canvas.sel}
+        return [l for l in self.doc["layers"] if l["id"] in ids and not l.get("locked")]
+
+    def edit_text(self, lay: dict):
+        """Doble clic en un texto del lienzo: el cuadro para escribirlo, con todo el texto elegido."""
+        self.canvas.sel = lay["id"]
+        self._fill_props()
+        ed = getattr(self, "_text_edit", None)
+        try:
+            if ed is not None:
+                ed.setFocus()
+                ed.selectAll()
+        except RuntimeError:
+            pass
+
+    def select_all(self):
+        """Ctrl+A: todas las capas visibles (para moverlas o borrarlas juntas)."""
+        ids = [l["id"] for l in self.doc["layers"] if l.get("visible", True) and not l.get("locked")]
+        if not ids:
+            return
+        self.canvas.multi = set(ids)
+        self.canvas.sel = ids[-1]
+        self.canvas.selected.emit(ids[-1])
+        self.canvas.viewport().update()
+        self.statusBar().showMessage(f"{len(ids)} capas elegidas · arrastra para moverlas juntas · Supr las borra", 5000)
+
+    def duplicate_here(self, lay: dict) -> dict:
+        """Alt+arrastrar: una copia justo encima (en el mismo sitio); se arrastra la copia."""
+        c = T.clone(lay)
+        c["x"], c["y"] = lay["x"], lay["y"]
+        L = self.doc["layers"]
+        L.insert(L.index(lay) + 1, c)
+        self.canvas.sel = c["id"]
+        return c
+
+    # ----------------------------------------------------------- 🌫 fondo desenfocado detrás
+    def blur_background(self, lay: dict | None = None):
+        """La misma imagen, llenando la miniatura, desenfocada y oscura, DETRÁS de lo elegido: el sujeto resalta."""
+        lay = lay or self.cur()
+        if not lay or lay["kind"] != "image":
+            return
+        bg = copy.deepcopy(lay)
+        bg["id"] = __import__("uuid").uuid4().hex[:10]
+        bg["name"] = "Fondo desenfocado"
+        for k in ("mask", "liquify", "warp"):
+            bg.pop(k, None)
+        for k in ("outline", "shadow", "glow"):
+            if isinstance(bg.get(k), dict):
+                bg[k]["on"] = False
+        bg["locked"] = False
+        bg["opacity"] = 1.0
+        bg["adj"] = dict(bg.get("adj") or {}, blur=0.4, exposure=-0.45, saturation=-0.1, vignette=0.45)
+        _img, cw, ch = T.render_layer(bg)
+        d = self.doc
+        bg.update(scale=round(max(d["w"] / max(1, cw), d["h"] / max(1, ch)) * 1.02, 4), x=d["w"] / 2, y=d["h"] / 2,
+                  rotation=0.0)
+        L = d["layers"]
+        L.insert(L.index(lay), bg)
+        self._last_label = ""
+        self.commit("Fondo desenfocado")
+        self.canvas.viewport().update()
+        self._fill_props()
+
+    # ----------------------------------------------------------- 📐 plantillas propias
+    @staticmethod
+    def templates_dir() -> str:
+        from ..core.paths import app_data_dir
+        d = os.path.join(str(app_data_dir()), "plantillas_miniatura")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def templates(self, fmt: str | None = None) -> list[tuple[str, str]]:
+        """[(nombre, ruta)] de las plantillas guardadas de ese formato, las últimas primero."""
+        fmt = fmt or self.doc["format"]
+        out = []
+        for f in sorted(os.listdir(self.templates_dir()), key=lambda n: -os.path.getmtime(
+                os.path.join(self.templates_dir(), n))):
+            if f.endswith(".json"):
+                try:
+                    t = json.load(open(os.path.join(self.templates_dir(), f), encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if t.get("format") == fmt:
+                    out.append((t.get("name") or f[:-5], os.path.join(self.templates_dir(), f)))
+        return out
+
+    def save_template(self, name: str) -> str:
+        import re
+        name = name.strip() or "Plantilla"
+        slug = re.sub(r"[^\w\- ]+", "", name).strip()[:60] or "plantilla"
+        path = os.path.join(self.templates_dir(), f"{slug}.json")
+        json.dump({"name": name, "format": self.doc["format"], "doc": self.doc}, open(path, "w", encoding="utf-8"),
+                  ensure_ascii=False)
+        try:
+            T.render(self.doc, 320 / self.doc["w"]).save(path[:-5] + ".png")
+        except Exception:  # noqa: BLE001 - sin vista previa, la plantilla sirve igual
+            pass
+        self.statusBar().showMessage(f"📐 Plantilla «{name}» guardada", 5000)
+        return path
+
+    def use_template(self, path: str) -> int:
+        """La composición de la plantilla en esta miniatura (las imágenes que ya no existen se saltan)."""
+        t = json.load(open(path, encoding="utf-8"))
+        doc = t["doc"]
+        layers, faltan = [], 0
+        for l in doc.get("layers", []):
+            if l.get("kind") == "image" and not os.path.exists(l.get("path", "")):
+                faltan += 1
+                continue
+            c = copy.deepcopy(l)
+            c["id"] = __import__("uuid").uuid4().hex[:10]
+            layers.append(c)
+        self.doc["layers"] = layers
+        if doc.get("bg"):
+            self.doc["bg"] = copy.deepcopy(doc["bg"])
+        self.canvas.sel = ""
+        self.canvas.multi.clear()
+        self._last_label = ""
+        self.commit("Usar plantilla")
+        self.canvas.viewport().update()
+        self._fill_props()
+        self.statusBar().showMessage(f"📐 Plantilla «{t.get('name', '')}»" + (
+            f" ({faltan} imagen(es) ya no estaban en tu PC)" if faltan else "") + " · Ctrl+Z la quita", 6000)
+        return len(layers)
+
+    def _templates_menu(self, menu):
+        from PySide6.QtWidgets import QInputDialog
+        menu.clear()
+        menu.addAction("💾 Guardar esta miniatura como plantilla…", lambda: (
+            lambda r: self.save_template(r[0]) if r[1] and r[0].strip() else None)(
+            QInputDialog.getText(self, "Plantilla", "Nombre de la plantilla:")))
+        menu.addSeparator()
+        ts = self.templates()
+        if not ts:
+            a = menu.addAction("(todavía no hay plantillas de este formato)")
+            a.setEnabled(False)
+        for name, path in ts[:30]:
+            png = path[:-5] + ".png"
+            a = menu.addAction(QIcon(png) if os.path.exists(png) else QIcon(), name, lambda p=path: self.use_template(p))
+            a.setToolTip("Usar esta composición (Ctrl+Z la quita)")
+        menu.addSeparator()
+        menu.addAction("📂 Abrir la carpeta de plantillas", lambda: os.startfile(self.templates_dir()))   # noqa: S606
+
+    # ----------------------------------------------------------- 📱 de YouTube a Short
+    def to_short(self, ask: bool = True) -> bool:
+        """La miniatura de YouTube recolocada en vertical (1080×1920) como punto de partida para la del Short."""
+        if self.doc["format"] != "youtube" or not self.doc["layers"]:
+            return False
+        p = self.ctrl.project
+        if ask and p.thumbnails.get("short") and p.thumbnails["short"].get("layers"):
+            r = QMessageBox.question(self, "Pasar a Short", "Ya tienes una miniatura de Short. ¿La cambio por la "
+                                                             "versión vertical de esta? (Ctrl+Z en el Short la recupera)")
+            if r != QMessageBox.StandardButton.Yes:
+                return False
+        W, H = self.doc["w"], self.doc["h"]
+        sh = T.new_doc("short")
+        SW, SH = sh["w"], sh["h"]
+        sh["bg"] = copy.deepcopy(self.doc.get("bg") or sh["bg"])
+        k = SW / W
+        for lay in self.doc["layers"]:
+            c = copy.deepcopy(lay)
+            bb = self.canvas._box(lay).boundingRect()
+            if bb.width() >= W * 0.9 and bb.height() >= H * 0.9:    # un fondo: que llene el vertical
+                f = max(SW / max(1.0, bb.width()), SH / max(1.0, bb.height()))
+                c.update(scale=round(float(c["scale"]) * f, 4), x=SW / 2, y=SH / 2)
+            else:                                                    # lo demás, en la franja central
+                c.update(scale=round(float(c["scale"]) * k, 4), x=round(float(c["x"]) * k, 1),
+                         y=round(SH / 2 + (float(c["y"]) - H / 2) * k, 1))
+            sh["layers"].append(c)
+        old = p.thumbnails.get("short")
+        p.thumbnails["short"] = sh
+        self.fmt.setCurrentIndex(self.fmt.findData("short"))          # (abre la del Short)
+        if old and old.get("layers"):
+            self.history = [json.dumps(old), json.dumps(sh)]
+            self.pos = 1
+        self.statusBar().showMessage("📱 Versión Short creada a partir de la de YouTube: recoloca lo que haga falta", 7000)
+        return True
 
     def delete_all(self):
         keep = [l for l in self.doc["layers"] if l.get("locked")]
@@ -2618,6 +3071,7 @@ class ThumbnailEditor(QMainWindow):
         f = QFormLayout(box)
         ed = QPlainTextEdit(lay["text"])
         ed.setFixedHeight(64)
+        self._text_edit = ed                       # (doble clic en el texto del lienzo → aquí, para escribir)
         ed.textChanged.connect(lambda: self._set(lay, "Texto", text=ed.toPlainText(), name=ed.toPlainText()[:20]))
         f.addRow(ed)
         from .spellcheck import attach as _spell
@@ -2775,6 +3229,11 @@ class ThumbnailEditor(QMainWindow):
             b_fill.setToolTip("Agranda la imagen hasta cubrir toda la miniatura y la centra (lo que sobra queda fuera)")
             b_fill.clicked.connect(lambda: self.fill_canvas(lay))
             f.addRow(b_fill)
+            b_blur = QPushButton("🌫 Fondo desenfocado detrás")
+            b_blur.setToolTip("Pone esta misma imagen llenando la miniatura, desenfocada y oscura, DETRÁS de ella: "
+                              "el sujeto resalta (mejor si ya le quitaste el fondo)")
+            b_blur.clicked.connect(lambda: self.blur_background(lay))
+            f.addRow(b_blur)
         rot = QDoubleSpinBox()
         rot.setRange(-360, 360)
         rot.setSuffix("°")

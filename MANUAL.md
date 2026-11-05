@@ -1096,3 +1096,18 @@ y Ayuda → Diagnóstico dice qué eligió (fila «Equipo»).
 - **⛶ Llenar el lienzo** (panel de la derecha, «Posición»): la imagen elegida cubre toda la miniatura.
 - **Ctrl+X** quita lo elegido; **Ctrl+V** lo vuelve a poner en el mismo sitio.
 - **⇱ Mejorar ×2 / ×4**: barra de 0 a 100 % (en el panel y abajo, aunque elijas otra capa).
+
+## 🖼 Miniatura: más cómoda (05/11/2026)
+- **Clic derecho en una capa** (en «Capas» o en el lienzo): cortar, copiar, pegar, duplicar, orden, voltear,
+  ocultar, bloquear, llenar el lienzo, fondo desenfocado, quitar fondo, mejorar ×2/×4, cara graciosa, quitar
+  deformación/licuado y eliminar (y «❓ ¿Qué hace esto?» al final).
+- **⬚ Recortar con los lados**: el rectángulo del centro de cada lado recorta por ahí (el otro lado no se mueve).
+  Va fluido: la imagen se procesa una sola vez, al soltar.
+- **Guías inteligentes**: al mover, se pega a los bordes y centros de las otras capas y del lienzo (Ctrl = sin pegarse).
+- **Alt+arrastrar** = arrastrar una copia · **Alt+rueda** = agrandar/achicar lo elegido.
+- **Varias capas**: Mayús+clic (o Ctrl+A todas); se mueven, se empujan con las flechas y se borran juntas. Esc suelta.
+- **Doble clic en un texto** del lienzo: a escribirlo. **Ctrl+RePág / Ctrl+AvPág**: adelante / atrás (con Mayús, del todo).
+- **🌫 Fondo desenfocado detrás** (panel «Posición» o clic derecho): la misma imagen, llenando la miniatura,
+  desenfocada y oscura, detrás del sujeto.
+- **📐 Plantillas** (barra de arriba): guardar una miniatura como plantilla y reutilizar su composición.
+- **📱 Pasar a Short** (barra, en la de YouTube): crea la vertical a partir de la de YouTube.
