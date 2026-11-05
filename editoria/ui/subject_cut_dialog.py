@@ -150,6 +150,9 @@ class SubjectCutDialog(QDialog):
         self.quality.addItem("Máxima (más lenta)", "max")
         if motor_ia.SAM_FAST_MODEL.exists():
             self.quality.addItem("Rápida (~2× más rápido)", "fast")
+            from ..core import hw
+            if hw.equipo()["poca_vram"]:             # gráfica de poca memoria: la ligera de entrada
+                self.quality.setCurrentIndex(self.quality.count() - 1)
         self.quality.setToolTip("Máxima: el modelo grande de SAM 2.1 a 1280 px con bordes finos.\n"
                                 "Rápida: el modelo mediano a 854 px (ideal para clips largos o para probar).")
         row2.addWidget(self.quality)
@@ -202,7 +205,7 @@ class SubjectCutDialog(QDialog):
                 "caja": [box.left(), box.top(), box.right(), box.bottom()] if box else None,
                 "modelo": str(motor_ia.SAM_FAST_MODEL if fast else motor_ia.SAM_MODEL),
                 "config": motor_ia.SAM_FAST_CONFIG if fast else motor_ia.SAM_CONFIG, "ancho": 854 if fast else 1280,
-                "bordes": self.fine.isChecked()}
+                "bordes": self.fine.isChecked(), "ahorro": _ahorro()}
 
     def preview(self):
         from .task_window import manager
@@ -276,3 +279,9 @@ class SubjectCutDialog(QDialog):
 
         manager().start("✂ Recortar sujeto (IA)", work, done, lambda msg: ctrl.message.emit("✗ " + msg))
         self.accept()
+
+
+def _ahorro() -> bool:
+    """Gráfica con poca memoria: el recorte guarda su información en la RAM, no en la tarjeta."""
+    from ..core import hw
+    return bool(hw.equipo()["poca_vram"])

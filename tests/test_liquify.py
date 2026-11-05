@@ -169,6 +169,36 @@ def test_editor(out):
         assert not ed.funny_face("boca") and "ninguna cara" in ed.statusBar().currentMessage()
     finally:
         FF.faces = FF_faces
+    # ✋ Estirar con el ratón: lo que hay en el círculo llega donde se suelta (en pasos pequeños, sin desgarros)
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+    ed.liquify_reset()
+    ed.act_stretch.trigger()
+    assert ed.canvas.tool == "liquify" and ed.canvas.liq_mode == "empujar"
+    assert ed.act_stretch.isChecked() and not ed.act_liq.isChecked() and not ed.act_select.isChecked()
+    lay = ed.cur()
+    img, cw, ch = T.render_layer(lay)
+    t = T.layer_transform(lay, img)
+    ox, oy = (img.width() - cw) / 2, (img.height() - ch) / 2
+    a_s, b_s = t.map(QPointF(ox + 710, oy + 300)), t.map(QPointF(ox + 860, oy + 300))   # del ojo izq. a 150 px
+
+    def ev(kind, scene_pt, buttons):
+        vp = ed.canvas.mapFromScene(scene_pt)
+        return QMouseEvent(kind, QPointF(vp), QPointF(ed.canvas.viewport().mapToGlobal(vp)),
+                           Qt.LeftButton, buttons, Qt.NoModifier)
+    ed.canvas.brush = 60
+    ed.canvas.mousePressEvent(ev(QEvent.MouseButtonPress, a_s, Qt.LeftButton))
+    for i in range(1, 5):                                   # 4 movimientos grandes (un arrastre rápido)
+        ed.canvas.mouseMoveEvent(ev(QEvent.MouseMove, a_s + (b_s - a_s) * (i / 4), Qt.LeftButton))
+    ed.canvas.mouseReleaseEvent(ev(QEvent.MouseButtonRelease, b_s, Qt.NoButton))
+    res = T.qimage_to_rgba(T.render_layer(ed.cur())[0])
+    px, py = (res.shape[1] - 1280) // 2, (res.shape[0] - 720) // 2
+    near_b = white_px(res, (840 + px, 285 + py, 880 + px, 315 + py))
+    left_a = white_px(res, (700 + px, 290 + py, 720 + px, 310 + py))
+    assert near_b > 400 and left_a < 100, (near_b, left_a)
+    ed.act_liq.trigger()                                    # «≈ Licuar» después de Estirar vuelve a inflar
+    assert ed.canvas.liq_mode == "inflar" and ed.act_liq.isChecked() and not ed.act_stretch.isChecked()
+    print("✓ ✋ Estirar: el ojo agarrado llegó donde se soltó el ratón (también con un arrastre rápido)")
     ed.toggle_liquify(False)
     assert ed.canvas.tool is None
     print("✓ «👀 Ojos saltones» de un clic (Ctrl+Z lo deshace), aviso si no hay cara, «↺ Quitar licuado»")

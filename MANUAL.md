@@ -1028,6 +1028,38 @@ Un Ctrl+Z lo deshace. La lista se pone al día sola al editar.
   **empujar** o **restaurar** (mantén pulsado para más). Tamaño y fuerza en el panel derecho. **Caras
   graciosas de un clic** sobre la cara más grande de una imagen: 👀 Ojos saltones, 👄 Bocota, 🗿 Cabezón,
   😁 Sonrisota, 🥴 Cara estirada, 🤏 Carita. Cada clic o trazo se deshace con Ctrl+Z; «↺ Quitar licuado» lo quita.
+- **Capas** (columna entre el panel izquierdo y el lienzo, siempre a la vista): arriba = delante, con miniatura;
+  arrastra para cambiar el orden. **🗑 Eliminar** quita lo seleccionado y **Eliminar todo** quita todas las capas
+  (las bloqueadas se quedan; Ctrl+Z las recupera). **↖ Seleccionar** (o Esc) vuelve al ratón normal.
+- **✋ Estirar** (junto a «≈ Licuar»): agarra lo que hay dentro del círculo y llévalo con el ratón; lo de alrededor se
+  estira con ello (si deja estela, agranda el círculo).
+- En la capa elegida de la lista: **👁 ocultar** y **🗑 eliminar**; clic derecho = más opciones. Al elegir otra
+  imagen, la herramienta activa (Licuar, Estirar, Deformar, pinceles) se apaga: vuelve el ratón normal.
+- **Ctrl+C / Ctrl+V** en el lienzo o en «Capas»: copia lo elegido (con sus efectos) y lo pega encima. También pega
+  una imagen copiada en otro programa.
+- **Arrastrar y soltar**: imágenes o carpetas del Explorador o del escritorio sobre «Material» (entran también en
+  «Medios»), o sobre el lienzo (caen donde las sueltas; de un video, un fotograma).
+- **⇱ Mejorar ×2 / ×4** (panel de la imagen): agranda con IA (EDSR / FSRCNN de OpenCV, en tu PC). Dice si una
+  imagen se ve borrosa (agrandada más de ×1.3).
+- **🔎 PNG → «Sin marca de agua»** (encendido): quita de Google los bancos de imágenes que ponen marca de agua
+  (Shutterstock, iStock, pngtree…) y avisa si usas una de ellos.
+- El selector de color ya no sale teñido del color elegido, y los diálogos de Qt salen en español.
+- **Efectos más rápidos** (contorno, sombra, brillo): una imagen grande que se ve pequeña se calcula a su tamaño
+  visible (un logo de 4200 px a ×0.17: de ~10 s a ~0,25 s por cambio). Sus valores tienen **barrita + número**
+  a la derecha (se escribe o se arrastra; se aplica al parar). La sombra y el brillo tienen además «Opacidad».
+- **🪄 Combinar con lo de abajo** (panel de la imagen): «Integrar» le da la luz, las sombras, el tono y el grano de
+  lo que tiene debajo (unos ojos encima de una cara dejan de parecer pegados); «Fundir», además, la mezcla como
+  impresa en la piel. Sale como capa nueva; la original queda oculta debajo. «Fuerza» = cuánto.
+- **🔍 Zoom**: Ctrl + rueda sobre el lienzo (donde está el ratón), o − 100 % + en la barra (100 % = encajar,
+  Ctrl+0). Lo que se sale del encuadre se ve en tenue. Botón del medio del ratón = moverse.
+- **▦ Guías** (barra): centro, tercios, cuartos, o «Lo que tapa YouTube» (la duración en los videos; la barra, los
+  botones y el título en los Shorts). No salen al exportar.
+- **📁 Carpetas** (en «Material»): tus carpetas de material (Fuego, Ojos, Agua…) en orden de abecedario, cada una
+  con su portada. «＋ Carpeta» crea una; suelta imágenes encima (se copian dentro). Doble clic = entrar, «⬅» =
+  volver. Clic derecho en una imagen: «⭐ Poner como principal» (la portada) o «🗑 Eliminar» (a la Papelera).
+  «🔗 Vincular…» (o soltar una carpeta del Explorador) muestra una carpeta tuya del disco en su sitio, carpeta
+  dentro de carpeta, sin copiar ni borrar nada en ella («Quitar de la lista» la deja como estaba). Sugiere las
+  carpetas de imágenes que encuentra en tus discos.
 - **Medios comunes**: lo que importas en 🎬 YouTube, 🎵 Edits o 📱 Shorts aparece también en las otras pestañas (sin
   tocar su línea de tiempo).
 - **🎨 Mi estilo**: arrastra carpetas o imágenes a las listas, o usa «Carpeta…» / «Imágenes…».
@@ -1047,3 +1079,20 @@ Un Ctrl+Z lo deshace. La lista se pone al día sola al editar.
   librerías (lo hace solo al ver una NVIDIA); si no, el procesador en int8, que en Intel y AMD ya va muy optimizado.
 - **Motor de IA avanzada**: PyTorch CUDA en NVIDIA, ROCm en AMD.
 - Ayuda → Diagnóstico: con qué tarjeta exporta y dónde transcribe.
+
+## 🪶 Equipos modestos y gráficas de 4 GB (05/11/2026)
+
+Reclaimer mide el equipo una vez (RAM, núcleos, memoria de la gráfica) y elige solo lo ligero; todo se cambia a mano
+y Ayuda → Diagnóstico dice qué eligió (fila «Equipo»).
+- **Menos de 12 GB de RAM o 4 núcleos o menos**: transcripción «Rápido» y vista previa a media calidad (copias
+  ligeras) de entrada.
+- **Gráfica con menos de 6 GB**: el recorte con IA usa el modelo «Rápida» y guarda lo que recuerda de cada fotograma
+  en la RAM (no en la tarjeta); con NVIDIA, Whisper en modo int8+float16 (la mitad de memoria). Separar voz, si la
+  tarjeta se queda sin memoria, sigue con el procesador en vez de fallar. En NVIDIA antiguas (GTX 10/16) el recorte
+  usa float16 en vez de bf16.
+
+## 🖼 Miniatura: arrastrar, llenar, Ctrl+X y barra de mejora (05/11/2026)
+- **Arrastra** cualquier imagen de «Material» (también los «🔎 PNG») al lienzo: se pone donde la sueltes.
+- **⛶ Llenar el lienzo** (panel de la derecha, «Posición»): la imagen elegida cubre toda la miniatura.
+- **Ctrl+X** quita lo elegido; **Ctrl+V** lo vuelve a poner en el mismo sitio.
+- **⇱ Mejorar ×2 / ×4**: barra de 0 a 100 % (en el panel y abajo, aunque elijas otra capa).

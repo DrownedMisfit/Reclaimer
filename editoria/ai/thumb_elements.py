@@ -21,6 +21,25 @@ import numpy as np
 from ..core.paths import cache_dir
 
 MIN_SIDE = 400
+# Bancos de imágenes que ponen MARCA DE AGUA en lo que se ve sin pagar: «Sin marca de agua» los quita de la búsqueda
+# (y si aun así se usa una imagen de ellos, se avisa).
+WATERMARK_SITES = ("shutterstock.com", "istockphoto.com", "gettyimages.com", "stock.adobe.com", "depositphotos.com",
+                   "dreamstime.com", "123rf.com", "alamy.com", "pngtree.com", "vectorstock.com", "canstockphoto.com",
+                   "bigstockphoto.com", "pikbest.com", "lovepik.com")
+
+
+def no_watermark_query() -> str:
+    """Lo que se añade a la búsqueda de Google para no ver esos bancos (« -site:… -site:…»)."""
+    return "".join(f" -site:{s}" for s in WATERMARK_SITES)
+
+
+def watermark_site(url: str) -> str | None:
+    """Si la imagen viene de un banco con marca de agua, su nombre (p. ej. «pngtree.com»); si no, None."""
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower() if url.startswith("http") else ""
+    if host == "ftcdn.net" or host.endswith(".ftcdn.net"):     # (las imágenes de Adobe Stock se sirven desde ahí)
+        return "stock.adobe.com"
+    return next((s for s in WATERMARK_SITES if host == s or host.endswith("." + s)), None)
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0 Safari/537.36"}
 

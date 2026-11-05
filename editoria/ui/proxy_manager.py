@@ -21,7 +21,9 @@ class ProxyManager(QObject):
         self.ctrl = ctrl
         self.settings = QSettings("EditorIA", "EditorIA")
         self.job: BackgroundJob | None = None
-        self.level = str(self.settings.value("reproduccion/proxy", "full"))
+        from ..core import hw
+        por_defecto = "half" if hw.equipo()["modesto"] else "full"   # (PC modesto: copias ligeras de entrada)
+        self.level = str(self.settings.value("reproduccion/proxy", por_defecto))
         if self.level not in proxies.LEVELS:
             self.level = "full"
         self.auto = str(self.settings.value("reproduccion/copias_auto", "true")).lower() == "true"

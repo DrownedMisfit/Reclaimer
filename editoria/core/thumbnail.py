@@ -169,7 +169,8 @@ def adjust(rgb: np.ndarray, adj: dict) -> np.ndarray:
 
 
 # ------------------------------------------------------------------- contenido
-def _image_content(lay: dict) -> np.ndarray:
+def _image_content(lay: dict, k: float = 1.0) -> np.ndarray:
+    """El contenido de una capa de imagen (recorte, ajustes, máscara). k < 1: ya reducido (ver shrink_k)."""
     img = QImage(lay["path"])
     if img.isNull():
         return np.zeros((10, 10, 4), np.uint8)
@@ -177,6 +178,10 @@ def _image_content(lay: dict) -> np.ndarray:
     h, w = rgba.shape[:2]
     x0, y0, x1, y1 = lay.get("crop") or [0, 0, 1, 1]
     rgba = rgba[int(y0 * h):max(int(y0 * h) + 1, int(y1 * h)), int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))]
+    ch, cw = rgba.shape[:2]
+    size = (max(1, round(cw * k)), max(1, round(ch * k)))
+    if k < 1:
+        rgba = cv2.resize(rgba, size, interpolation=cv2.INTER_AREA)
     rgb = adjust(rgba[..., :3].astype(np.float32) / 255.0, lay.get("adj"))
     alpha = rgba[..., 3].astype(np.float32) / 255.0
     if lay.get("mask"):
@@ -185,6 +190,8 @@ def _image_content(lay: dict) -> np.ndarray:
             mm = qimage_to_rgba(m)[..., 0].astype(np.float32) / 255.0
             mm = cv2.resize(mm, (img.width(), img.height()), interpolation=cv2.INTER_LINEAR)
             mm = mm[int(y0 * h):max(int(y0 * h) + 1, int(y1 * h)), int(x0 * w):max(int(x0 * w) + 1, int(x1 * w))]
+            if k < 1:
+                mm = cv2.resize(mm, size, interpolation=cv2.INTER_AREA)
             alpha = alpha * mm
     out = np.dstack([rgb * 255, alpha * 255]).astype(np.uint8)
     return out
@@ -288,6 +295,23 @@ def _vector_content(lay: dict, pad: int) -> np.ndarray:
     return qimage_to_rgba(img)
 
 
+def _blur(a: np.ndarray, sigma: float) -> np.ndarray:
+    """Desenfoque gaussiano rápido: con sigma grande se hace en pequeño y se amplía (no se nota: es borroso)."""
+    if sigma <= 6:
+        return cv2.GaussianBlur(a, (0, 0), sigma)
+    f = sigma / 6.0
+    h, w = a.shape[:2]
+    small = cv2.resize(a, (max(1, int(w / f)), max(1, int(h / f))), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), 6.0)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _ring(alpha: np.ndarray, r: int) -> np.ndarray:
+    """Lo que queda a ≤ r píxeles de lo visible (el contorno), con la distancia: igual de rápido con r grande."""
+    dist = cv2.distanceTransform((alpha <= 0.5).astype(np.uint8), cv2.DIST_L2, 3)
+    return np.clip(r + 1.0 - dist, 0.0, 1.0)
+
+
 def _effects(rgba: np.ndarray, lay: dict, scale: float) -> tuple[np.ndarray, int]:
     """Contorno (imágenes recortadas), brillo y sombra a partir de la transparencia. Devuelve (imagen, margen)."""
     sh, gl, ol = lay["shadow"], lay["glow"], lay["outline"]
@@ -319,19 +343,17 @@ def _effects(rgba: np.ndarray, lay: dict, scale: float) -> tuple[np.ndarray, int
     out = canvas
     if lay["kind"] == "image" and ol.get("on"):     # contorno tipo «pegatina» alrededor del sujeto recortado
         r = max(1, int(ol["width"] / max(scale, 1e-3)))
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-        ring = cv2.dilate((alpha > 0.5).astype(np.uint8), k).astype(np.float32)
-        ring = cv2.GaussianBlur(ring, (3, 3), 0)
+        ring = _ring(alpha, r).astype(np.float32)
         out = comp(col(ol["color"]), ring, out)
         alpha = out[..., 3].copy()
     if gl.get("on"):
         r = max(1, int(gl["radius"] / max(scale, 1e-3)))
-        g = cv2.GaussianBlur(alpha, (0, 0), r) * float(gl.get("opacity", 0.7)) * 1.6
+        g = _blur(alpha, r) * float(gl.get("opacity", 0.7)) * 1.6
         out = comp(col(gl["color"]), np.clip(g, 0, 1), out)
     if sh.get("on"):
         b = max(1, int(sh["blur"] / max(scale, 1e-3)))
         dx, dy = int(sh["dx"] / max(scale, 1e-3)), int(sh["dy"] / max(scale, 1e-3))
-        s = cv2.GaussianBlur(alpha, (0, 0), b)
+        s = _blur(alpha, b)
         s = np.roll(np.roll(s, dy, axis=0), dx, axis=1) * float(sh.get("opacity", 0.6))
         out = comp(col(sh["color"]), np.clip(s, 0, 1), out)
     return np.clip(out * 255, 0, 255).astype(np.uint8), pad
@@ -356,17 +378,43 @@ def _base_key(lay: dict) -> str:
     return hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def shrink_k(lay: dict) -> float:
+    """Cuánto se reduce una imagen ANTES de dibujarla y de calcular sus efectos: una foto de 4200 px que se ve a ×0.17
+    no se procesa a 4200 px (contorno + brillo + sombra tardaban ~10 s por cada cambio). Por saltos (½, ¼, ⅛…), para
+    no recalcular con cada pequeño cambio de tamaño, y siempre con ≥ 1,25 veces la resolución con que se ve."""
+    if lay["kind"] != "image":
+        return 1.0
+    need = float(lay.get("scale", 1.0)) * 1.25
+    if need >= 1.0:
+        return 1.0
+    return min(1.0, 2.0 ** math.ceil(math.log2(max(need, 1 / 32))))
+
+
+def image_k(img: QImage) -> float:
+    """La reducción con que se dibujó la imagen de una capa (1 = a tamaño original)."""
+    try:
+        return float(img.text("k") or 1.0)
+    except ValueError:
+        return 1.0
+
+
+def layer_scale(lay: dict, img: QImage) -> float:
+    """La escala real de la imagen de la capa en el lienzo (la de la capa, contando la reducción)."""
+    return float(lay.get("scale", 1.0)) / image_k(img)
+
+
 def render_layer(lay: dict) -> tuple[QImage, float, float]:
-    """(imagen de la capa con sus efectos, ancho y alto «útiles» sin márgenes) — en píxeles de contenido;
-    la escala y la rotación se aplican al colocarla."""
+    """(imagen de la capa con sus efectos, ancho y alto «útiles» sin márgenes) — en píxeles de esa imagen (que puede
+    venir reducida: image_k); la escala y la rotación se aplican al colocarla (layer_transform)."""
     k = _key(lay)
     if k in _cache:
         return _cache[k]
-    scale = float(lay.get("scale", 1.0))
-    bk = _base_key(lay)
+    shrink = shrink_k(lay)
+    scale = float(lay.get("scale", 1.0)) / shrink
+    bk = _base_key(lay) + f"|{shrink}"
     rgba = _base_cache.get(bk)
     if rgba is None:
-        rgba = _image_content(lay) if lay["kind"] == "image" else _vector_content(lay, 0)
+        rgba = _image_content(lay, shrink) if lay["kind"] == "image" else _vector_content(lay, 0)
         if len(_base_cache) > 40:
             _base_cache.clear()
         _base_cache[bk] = rgba
@@ -376,6 +424,7 @@ def render_layer(lay: dict) -> tuple[QImage, float, float]:
     core_h, core_w = rgba.shape[:2]
     rgba, _pad = _effects(rgba, lay, scale)
     img = rgba_to_qimage(rgba)
+    img.setText("k", repr(shrink))
     if len(_cache) > 200:
         _cache.clear()
     _cache[k] = (img, core_w, core_h)
@@ -385,7 +434,7 @@ def render_layer(lay: dict) -> tuple[QImage, float, float]:
 def layer_transform(lay: dict, img: QImage, warp: bool = True) -> QTransform:
     """De píxeles de la imagen de la capa a píxeles del lienzo (centro en x, y). Con ◇ Deformar, antes la
     perspectiva de sus 4 esquinas (warp=False: sin ella, para saber dónde estaría la capa sin deformar)."""
-    s = float(lay.get("scale", 1.0))
+    s = layer_scale(lay, img)
     t = QTransform()
     t.translate(float(lay["x"]), float(lay["y"]))
     t.rotate(float(lay.get("rotation", 0)))
@@ -436,6 +485,21 @@ def paint_background(p: QPainter, doc: dict):
         p.fillRect(r, QBrush(g))
     else:
         p.fillRect(r, QColor(bg.get("color", "#101014")))
+
+
+def render_alone(doc: dict, lay: dict) -> QImage:
+    """Una sola capa, en su sitio, sobre transparente y al tamaño de la miniatura (para 🪄 Combinar)."""
+    out = QImage(int(doc["w"]), int(doc["h"]), QImage.Format_ARGB32_Premultiplied)
+    out.fill(Qt.transparent)
+    img, _w, _h = render_layer(lay)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    p.setOpacity(float(lay.get("opacity", 1.0)))
+    p.setTransform(layer_transform(lay, img))
+    p.drawImage(0, 0, img)
+    p.end()
+    return out
 
 
 def render(doc: dict, scale: float = 1.0) -> QImage:

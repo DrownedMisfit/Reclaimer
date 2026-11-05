@@ -345,7 +345,9 @@ class VoicePanel(QWidget):
         self.chk_literal.setChecked(ok and str(s.value("transcripcion/literal", True)).lower() in ("true", "1"))
         if not ok:
             self.chk_literal.setToolTip(self.chk_literal.toolTip() + f"\n\nNo disponible: {why}")
-        idx = self.model_combo.findData(s.value("transcripcion/modelo", "equilibrado"))
+        from ..core import hw
+        por_defecto = "rapido" if hw.equipo()["modesto"] else "equilibrado"   # (PC modesto: el modelo ligero)
+        idx = self.model_combo.findData(s.value("transcripcion/modelo", por_defecto))
         self.model_combo.setCurrentIndex(max(0, idx))
         idx = self.lang_combo.findData(s.value("transcripcion/idioma", "es"))
         self.lang_combo.setCurrentIndex(max(0, idx))

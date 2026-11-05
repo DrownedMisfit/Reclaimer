@@ -136,7 +136,91 @@ def whisper_device() -> tuple[str, str]:
             os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
         have = lambda pat: any(glob.glob(os.path.join(d, pat)) for d in dirs)   # noqa: E731
         if have("cublas64_12.dll") and have("cudnn_ops64_9.dll"):
-            _whisper_dev = ("cuda", "float16")
+            _whisper_dev = ("cuda", "int8_float16" if equipo()["poca_vram"] else "float16")
     except Exception:  # noqa: BLE001 - cualquier duda: el procesador
         pass
     return _whisper_dev
+
+
+# ---------------------------------------------------------------- el equipo: ¿modesto? ¿gráfica de 4 GB?
+# El usuario: «¿está optimizado para tarjetas de 4 GB y PCs de bajos recursos? … hazlo». Reclaimer mide el equipo
+# una vez (se guarda en datos/cache/equipo.json) y elige solo los ajustes ligeros; todo se puede cambiar a mano.
+# Para simular otro equipo (pruebas): RECLAIMER_EQUIPO="ram=8,nucleos=4,vram=4".
+_equipo: dict | None = None
+
+
+def _ram_gb() -> float:
+    import ctypes
+
+    class _MS(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong)]
+    try:
+        m = _MS()
+        m.dwLength = ctypes.sizeof(_MS)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+        return round(m.ullTotalPhys / 1024 ** 3, 1)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _vram_gb() -> float:
+    """Memoria de la gráfica más grande (el registro de Windows la da bien en NVIDIA, AMD e Intel; 0 = no se sabe)."""
+    import subprocess
+    cmd = ("Get-ItemProperty 'HKLM:\\SYSTEM\\ControlSet001\\Control\\Class\\"
+           "{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue | "
+           "ForEach-Object { $_.'HardwareInformation.qwMemorySize' }")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        vals = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+        return round(max(vals) / 1024 ** 3, 1) if vals else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def equipo() -> dict:
+    """{"ram": GB, "nucleos": n, "vram": GB (0 = no se sabe), "modesto": bool, "poca_vram": bool}."""
+    global _equipo
+    if _equipo is not None:
+        return _equipo
+    import json
+    import os
+    sim = os.environ.get("RECLAIMER_EQUIPO", "")
+    if sim:
+        d = {k.strip(): float(v) for k, v in (x.split("=") for x in sim.split(",") if "=" in x)}
+        e = {"ram": d.get("ram", 16.0), "nucleos": int(d.get("nucleos", 8)), "vram": d.get("vram", 8.0)}
+    else:
+        from .paths import cache_dir
+        f = cache_dir("equipo") / "equipo.json"
+        e = None
+        try:
+            e = json.loads(f.read_text(encoding="utf-8"))
+            if e.get("nucleos") != (os.cpu_count() or 0):   # (otro PC con los mismos datos): medir de nuevo
+                e = None
+        except Exception:  # noqa: BLE001
+            e = None
+        if e is None:
+            e = {"ram": _ram_gb(), "nucleos": os.cpu_count() or 0, "vram": _vram_gb()}
+            try:
+                f.write_text(json.dumps(e), encoding="utf-8")
+            except OSError:
+                pass
+    e["modesto"] = (0 < e["ram"] < 12) or (0 < e["nucleos"] <= 4)
+    e["poca_vram"] = 0 < e["vram"] < 6
+    _equipo = e
+    return e
+
+
+def resumen_equipo() -> str:
+    e = equipo()
+    vram = f"gráfica {e['vram']:g} GB" if e["vram"] else "gráfica: no se sabe cuánta memoria"
+    modo = []
+    if e["modesto"]:
+        modo.append("modo ligero (transcripción «Rápido», vista previa a media calidad)")
+    if e["poca_vram"]:
+        modo.append("IA con poca memoria de gráfica (recorte «Rápido», menos memoria en la tarjeta)")
+    return f"{e['ram']:g} GB de RAM · {e['nucleos']} núcleos · {vram} → " + ("; ".join(modo) or "modo normal")

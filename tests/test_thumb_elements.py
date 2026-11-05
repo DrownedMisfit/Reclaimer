@@ -126,6 +126,24 @@ def test_editor(out):
     ed.material.itemClicked.emit(mat[0])                    # clic en «Material» = otra vez al lienzo
     assert len(ed.doc["layers"]) == n + 2 and ed.doc["layers"][-1].get("element")
     print("✓ 🔎 PNG: «Usar en la miniatura» → bajada, fondo blanco quitado y añadida; también queda en «Material»")
+    # «Sin marca de agua»: quita los bancos de imágenes de la búsqueda y avisa si aun así se usa uno
+    assert ed.png_nowm.isChecked(), "encendido por defecto"
+    q = E.no_watermark_query()
+    assert "-site:pngtree.com" in q and "-site:shutterstock.com" in q
+    assert E.watermark_site("https://png.pngtree.com/fuego.png") == "pngtree.com"
+    assert E.watermark_site("https://static.vecteezy.com/fuego.png") is None
+    real_fetch = E.fetch
+    E.fetch = lambda url: real_fetch(data_url(os.path.join(out, "pegatina.png")))
+    try:
+        n2 = len(ed.doc["layers"])
+        ed.use_png("https://png.pngtree.com/fuego.png")
+        t0 = time.time()
+        while len(ed.doc["layers"]) == n2 and time.time() - t0 < 10:
+            pump(app, 0.1)
+        assert "⚠ Viene de pngtree.com" in ed.png_status.text(), ed.png_status.text()
+    finally:
+        E.fetch = real_fetch
+    print("✓ «Sin marca de agua»: fuera pngtree, Shutterstock, iStock…; y aviso si se usa una de esos bancos")
     # ✨ propuestas desde TU imagen (la del lienzo), sin meter nada por su cuenta
     ed.prop_text.setPlainText("El estudio está en decadencia")
     ed.make_proposals()

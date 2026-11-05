@@ -98,3 +98,12 @@ def lazy_refresh(widget, fn):
             return False
 
     return _Lazy()
+
+
+def pick_color(initial, parent=None, title: str = "Color", alpha: bool = False) -> QColor:
+    """Selector de color. Se abre sobre la VENTANA, no sobre el botón: el botón de color pinta su fondo del color
+    elegido con una hoja de estilo, y un diálogo hijo suyo la heredaba (salía todo rojo, con el rojo elegido)."""
+    from PySide6.QtWidgets import QColorDialog
+    opts = QColorDialog.ColorDialogOption.ShowAlphaChannel if alpha else QColorDialog.ColorDialogOption(0)
+    win = parent.window() if parent is not None else None
+    return QColorDialog.getColor(QColor(initial), win, title, opts)

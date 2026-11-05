@@ -28,7 +28,8 @@ class _ColorButton(QPushButton):
         self.setStyleSheet(f"background: {self.color}; color: {fg}; border: 1px solid #555;")
 
     def _pick(self):
-        c = QColorDialog.getColor(QColor(self.color), self, "Elige el color")
+        from .common import pick_color
+        c = pick_color(self.color, self, "Elige el color")
         if c.isValid():
             self.color = c.name()
             self._paint()

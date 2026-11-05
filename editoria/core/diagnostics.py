@@ -141,6 +141,7 @@ def report(ctrl=None, check_gpu: bool = True) -> list[tuple[str, str]]:
         from . import hw
         rows.append(("Exportar con la tarjeta gráfica", f"✓ {hw.label()}" if gpu_encoder_ok() else
                      "✗ no disponible (exporta con «Procesador»)"))
+        rows.append(("Equipo", hw.resumen_equipo()))
         dev, ctype = hw.whisper_device()
         rows.append(("Transcribir (Whisper)", "tarjeta NVIDIA (CUDA)" if dev == "cuda" else f"procesador ({ctype})"))
     try:

@@ -33,7 +33,8 @@ class ColorButton(QPushButton):
                            f" border-radius: 4px; }}")
 
     def _pick(self):
-        c = QColorDialog.getColor(QColor(self._color), self, self._title)
+        from .common import pick_color
+        c = pick_color(self._color, self, self._title)
         if c.isValid():
             self.set_color(c.name().upper())
             self.color_changed.emit(self._color)

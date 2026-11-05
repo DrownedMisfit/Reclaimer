@@ -78,5 +78,43 @@ def main():
     print("TODO OK")
 
 
+
+
+def test_equipo_modesto():
+    """Un PC de 8 GB, 4 núcleos y gráfica de 4 GB: Reclaimer elige solo lo ligero."""
+    import os as _os
+    from PySide6.QtWidgets import QApplication
+    _os.environ["RECLAIMER_EQUIPO"] = "ram=8,nucleos=4,vram=4"
+    hw._equipo = None
+    e = hw.equipo()
+    assert e["modesto"] and e["poca_vram"], e
+    app = QApplication.instance() or QApplication([])
+    from PySide6.QtCore import QSettings
+    st = QSettings("EditorIA", "EditorIA")
+    guard = {k: st.value(k) for k in ("reproduccion/proxy", "transcripcion/modelo")}
+    for k in guard:
+        st.remove(k)
+    try:
+        from editoria.core.controller import ProjectController
+        from editoria.ui.proxy_manager import ProxyManager
+        pm = ProxyManager(ProjectController())
+        assert pm.level == "half", pm.level
+    finally:
+        for k, v in guard.items():
+            if v is not None:
+                st.setValue(k, v)
+    print("✓ equipo modesto: vista previa a media calidad y" , hw.resumen_equipo())
+    _os.environ["RECLAIMER_EQUIPO"] = "ram=32,nucleos=16,vram=16"
+    hw._equipo = None
+    assert not hw.equipo()["modesto"] and not hw.equipo()["poca_vram"]
+    del _os.environ["RECLAIMER_EQUIPO"]
+    hw._equipo = None
+    print("✓ equipo potente: modo normal")
+
+
 if __name__ == "__main__":
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import _ajustes  # noqa: F401
     main()
+    test_equipo_modesto()

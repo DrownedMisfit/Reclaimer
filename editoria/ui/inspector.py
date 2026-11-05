@@ -848,7 +848,8 @@ class InspectorPanel(QWidget):
 
             def pick():
                 cur = QColor(str(self._cur_text().get(key, FACTORY[key])))
-                c = QColorDialog.getColor(cur, self, "Color", QColorDialog.ShowAlphaChannel * 0)
+                from .common import pick_color
+                c = pick_color(cur, self, "Color")
                 if c.isValid():
                     self._set_text(**{key: c.name().upper()})
             b.clicked.connect(pick)

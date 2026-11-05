@@ -60,16 +60,21 @@ def _grid(n: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def stroke(lay: dict, mode: str, cx: float, cy: float, radius: float, strength: float,
-           aspect: float = 16 / 9, move: tuple[float, float] = (0.0, 0.0)):
+           aspect: float = 16 / 9, move: tuple[float, float] = (0.0, 0.0), core: float = 0.0):
     """Un toque del pincel en (cx, cy) (fracciones del contenido). radius: fracción del ALTO del contenido.
-    aspect: ancho / alto del contenido (para que el pincel sea redondo). move: lo que se arrastró (fracciones)."""
+    aspect: ancho / alto del contenido (para que el pincel sea redondo). move: lo que se arrastró (fracciones).
+    core: parte del radio (0–1) que va entera, sin suavizar (✋ Estirar: 0.5, lo agarrado sigue al ratón)."""
     f0 = field(lay)
     dx, dy = f0 if f0 is not None else (np.zeros((N, N), np.float32), np.zeros((N, N), np.float32))
     n = dx.shape[0]
     U, V = _grid(n)
     du, dv = (U - cx) * aspect, (V - cy)
     d2 = (du * du + dv * dv) / max(radius * radius, 1e-8)
-    fall = np.clip(1.0 - d2, 0.0, 1.0) ** 2                       # suave: 1 en el centro, 0 en el borde
+    if core > 0:                # núcleo firme: esa parte va entera con el ratón; de ahí al borde, suave
+        t = np.clip((np.sqrt(d2) - core) / max(1.0 - core, 1e-6), 0.0, 1.0)
+        fall = 1.0 - t * t * (3.0 - 2.0 * t)
+    else:
+        fall = np.clip(1.0 - d2, 0.0, 1.0) ** 2                   # suave: 1 en el centro, 0 en el borde
     s = float(strength)
     if mode == "restaurar":
         k = 1.0 - np.clip(s * fall, 0.0, 1.0)

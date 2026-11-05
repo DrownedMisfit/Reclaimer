@@ -164,7 +164,8 @@ class SilhouetteTeachDialog(QDialog):
             job = {"modo": "imagen", "ffmpeg": media_tools.ffmpeg(), "video": marks["video"], "t0": marks["t0"],
                    "fps": marks["fps"], "salida": out, "a": 0.0, "b": 0.0, "puntos": marks["puntos"],
                    "caja": marks["caja"], "modelo": str(motor_ia.SAM_FAST_MODEL if fast else motor_ia.SAM_MODEL),
-                   "config": motor_ia.SAM_FAST_CONFIG if fast else motor_ia.SAM_CONFIG, "ancho": 960, "bordes": True}
+                   "config": motor_ia.SAM_FAST_CONFIG if fast else motor_ia.SAM_CONFIG, "ancho": 960, "bordes": True,
+                   "ahorro": __import__("editoria.core.hw", fromlist=["x"]).equipo()["poca_vram"]}
             path = motor_ia.run("recortar.py", job, progress, cancelled)
             m = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             try:

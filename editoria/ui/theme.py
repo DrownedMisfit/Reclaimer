@@ -273,6 +273,11 @@ def load_fonts() -> list[str]:
 def apply_dark_theme(app: QApplication) -> None:
     if not getattr(app, "_fonts_loaded", False):
         app._fonts_loaded = load_fonts()
+    if not hasattr(app, "_qt_es"):            # los diálogos de Qt (color, archivos, Aceptar/Cancelar…) en español
+        from PySide6.QtCore import QLibraryInfo, QTranslator
+        app._qt_es = QTranslator(app)
+        if app._qt_es.load("qtbase_es", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+            app.installTranslator(app._qt_es)
     if not hasattr(app, "_wheel_guard"):
         app._wheel_guard = _WheelGuard(app)
         app.installEventFilter(app._wheel_guard)
