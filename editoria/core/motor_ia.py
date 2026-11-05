@@ -1,5 +1,6 @@
 """
-◈ Motor de IA avanzada (F:\\Reclaimer\\motor_ia): un Python aparte con PyTorch para la tarjeta gráfica (ROCm, AMD)
+◈ Motor de IA avanzada (F:\\Reclaimer\\motor_ia): un Python aparte con PyTorch para la tarjeta gráfica (CUDA en
+NVIDIA, ROCm en AMD; sin ninguna, el procesador)
 y los modelos pesados (SAM 2.1 para recortar sujetos, Demucs para separar diálogos). Va aparte del programa para
 que un fallo o un cierre del modelo nunca se lleve a Reclaimer por delante.
 
@@ -32,13 +33,15 @@ INSTALLER = ROOT / "INSTALAR_MOTOR_IA.bat"
 def status() -> dict:
     """Cómo está el motor: {"installed", "torch", "gpu" (sí/no), "name", "amd" (hay tarjeta AMD en el PC)}.
     Tarda unos segundos (arranca su Python): llamar en segundo plano."""
-    out = {"installed": PYTHON.exists(), "torch": "", "gpu": False, "name": "", "amd": False,
-           "sam": SAM_MODEL.exists()}
+    out = {"installed": PYTHON.exists(), "torch": "", "gpu": False, "name": "", "amd": False, "nvidia": False,
+           "vendor": "", "sam": SAM_MODEL.exists()}
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
                            capture_output=True, text=True, timeout=60,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        out["amd"] = any(w in r.stdout for w in ("Radeon", "AMD"))
+        out["nvidia"] = "NVIDIA" in r.stdout
+        out["amd"] = not out["nvidia"] and any(w in r.stdout for w in ("Radeon", "AMD"))
+        out["vendor"] = "nvidia" if out["nvidia"] else "amd" if out["amd"] else ""
     except (OSError, subprocess.SubprocessError):
         pass
     if not out["installed"]:

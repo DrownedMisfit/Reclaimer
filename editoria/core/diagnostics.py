@@ -116,10 +116,9 @@ def _run(args: list[str], timeout: float = 20) -> subprocess.CompletedProcess | 
 
 
 def gpu_encoder_ok() -> bool:
-    """¿La tarjeta AMD puede codificar video (h264_amf)? Prueba real de 0.1 s."""
-    r = _run([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=s=256x144:d=0.1",
-              "-c:v", "h264_amf", "-f", "null", "-"], timeout=30)
-    return r is not None and r.returncode == 0
+    """¿La tarjeta gráfica puede codificar video (NVIDIA NVENC, AMD AMF o Intel Quick Sync)? Prueba real."""
+    from . import hw
+    return hw.video_encoder("h264") is not None
 
 
 def report(ctrl=None, check_gpu: bool = True) -> list[tuple[str, str]]:
@@ -139,8 +138,11 @@ def report(ctrl=None, check_gpu: bool = True) -> list[tuple[str, str]]:
     rows.append(("FFmpeg", first.replace("ffmpeg version ", "").split(" Copyright")[0] or "no encontrado"))
     rows.append(("Ruta de FFmpeg", ff))
     if check_gpu:
-        rows.append(("Exportar con la tarjeta AMD", "✓ disponible" if gpu_encoder_ok() else
+        from . import hw
+        rows.append(("Exportar con la tarjeta gráfica", f"✓ {hw.label()}" if gpu_encoder_ok() else
                      "✗ no disponible (exporta con «Procesador»)"))
+        dev, ctype = hw.whisper_device()
+        rows.append(("Transcribir (Whisper)", "tarjeta NVIDIA (CUDA)" if dev == "cuda" else f"procesador ({ctype})"))
     try:
         import onnxruntime as ort
         rows.append(("IA local (onnxruntime)", f"{ort.__version__} · {', '.join(ort.get_available_providers())}"))

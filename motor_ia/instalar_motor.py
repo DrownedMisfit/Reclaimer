@@ -28,6 +28,8 @@ ROCM_SDK = [f"{ROCM}/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl", f"{ROCM}/rocm_
 ROCM_TORCH = [f"{ROCM}/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
               f"{ROCM}/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
               f"{ROCM}/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl"]
+CUDA_TORCH = ["torch==2.9.1", "torchvision==0.24.1", "torchaudio==2.9.1", "--index-url",
+              "https://download.pytorch.org/whl/cu128"]      # NVIDIA (controlador 570 o más nuevo)
 CPU_TORCH = ["torch==2.9.1", "torchvision==0.24.1", "torchaudio==2.9.1", "--index-url",
              "https://download.pytorch.org/whl/cpu"]
 SAM2 = "git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4"
@@ -50,13 +52,22 @@ def run(args: list[str], env: dict | None = None) -> bool:
     return r.returncode == 0
 
 
-def has_amd() -> bool:
+def gpu_vendor() -> str:
+    """«nvidia», «amd» o "" según las tarjetas del PC (con las dos, NVIDIA: suele ser la potente)."""
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command",
                             "(Get-CimInstance Win32_VideoController).Name"], capture_output=True, text=True, timeout=60)
-        return any(w in r.stdout for w in ("Radeon", "AMD"))
     except (OSError, subprocess.SubprocessError):
-        return False
+        return ""
+    if "NVIDIA" in r.stdout:
+        return "nvidia"
+    if any(w in r.stdout for w in ("Radeon", "AMD")):
+        return "amd"
+    return ""
+
+
+def has_amd() -> bool:
+    return gpu_vendor() == "amd"
 
 
 def py_ok(code: str) -> bool:
@@ -100,16 +111,26 @@ def main() -> int:
         if not run([sys.executable, "-m", "venv", str(VENV)]):
             return 1
     run([str(PY), "-m", "pip", "install", "--upgrade", "pip"], env)
-    amd = has_amd()
+    vendor = gpu_vendor()
+    amd = vendor == "amd"
+    otra = {"nvidia": "import torch; assert torch.version.cuda", "amd": "import torch; assert torch.version.hip"}
+    if vendor and py_ok("import torch") and not py_ok(otra[vendor]):
+        say("· PyTorch está instalado para otra tarjeta: se instala el de la tuya…")   # (el PC cambió de tarjeta)
+        run([str(PY), "-m", "pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"], env)
     if not py_ok("import torch"):
-        if amd:
+        if vendor == "nvidia":
+            say("2/5 · Tarjeta NVIDIA: instalando PyTorch para la gráfica (CUDA, varios GB)…")
+            if not run([str(PY), "-m", "pip", "install", "--no-cache-dir"] + CUDA_TORCH, env):
+                say("✗ No se pudo instalar PyTorch para NVIDIA. Mira instalar.log.")
+                return 1
+        elif amd:
             say("2/5 · Tarjeta AMD: instalando PyTorch para la gráfica (ROCm, varios GB)…")
             if not (run([str(PY), "-m", "pip", "install", "--no-cache-dir"] + ROCM_SDK, env)
                     and run([str(PY), "-m", "pip", "install", "--no-cache-dir"] + ROCM_TORCH, env)):
                 say("✗ No se pudo instalar PyTorch para AMD. Mira instalar.log.")
                 return 1
         else:
-            say("2/5 · Sin tarjeta AMD: instalando PyTorch para el procesador…")
+            say("2/5 · Sin tarjeta NVIDIA ni AMD: instalando PyTorch para el procesador…")
             if not run([str(PY), "-m", "pip", "install"] + CPU_TORCH, env):
                 return 1
     else:
@@ -136,6 +157,9 @@ def main() -> int:
     elif amd:
         say("⚠ Instalado, pero la tarjeta AMD no se detecta: irá por el procesador (más lento).\n"
             "  Actualiza el controlador AMD Adrenalin a la versión 26.2.2 o más nueva y vuelve a ejecutar esto.")
+    elif vendor == "nvidia":
+        say("⚠ Instalado, pero la tarjeta NVIDIA no se detecta: irá por el procesador (más lento).\n"
+            "  Actualiza el controlador de NVIDIA (570 o más nuevo) y vuelve a ejecutar esto.")
     else:
         say("✓ Listo (irá por el procesador).")
     shutil.rmtree(CACHE, ignore_errors=True)       # la caché de descargas no hace falta guardarla

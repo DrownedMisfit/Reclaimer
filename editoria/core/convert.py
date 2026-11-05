@@ -2,7 +2,7 @@
 🔁 Convertir videos y audios (menú «Convertir»): a MP4 (H.264 + AAC, se abre en todas partes) o a MP3.
 
   · MP4: si el video ya es H.264/H.265 con audio AAC (o sin audio), solo se cambia el «envoltorio»: instantáneo y
-    sin perder nada. Si no, se recodifica (tarjeta gráfica AMD; si falla, el procesador) con buena calidad.
+    sin perder nada. Si no, se recodifica (tarjeta gráfica NVIDIA, AMD o Intel; si falla, el procesador) con buena calidad.
     Un audio pedido como «MP4» sale como .m4a (AAC).
   · MP3: 320 kbps.
 Nunca toca el original: el resultado va a la carpeta que elijas, con el mismo nombre (y «(2)» si ya existe).
@@ -42,8 +42,10 @@ def convert(path: str, fmt: str, folder: str, duration: float = 0.0, progress=No
     os.makedirs(folder, exist_ok=True)
     ext, outargs = plan(path, fmt)
     out = _free_name(folder, os.path.splitext(os.path.basename(path))[0], ext)
-    tries = [["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", "16M", "-maxrate", "24M"],
-             ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]] if "{venc}" in outargs else [[]]
+    from . import hw
+    gpu = hw.video_encoder("h264")
+    tries = ([hw.quality_args(gpu)] if gpu else []) + [["-c:v", "libx264", "-preset", "medium", "-crf", "18"]] \
+        if "{venc}" in outargs else [[]]
     last = ""
     for venc in tries:
         args = []

@@ -108,7 +108,9 @@ def _load():
     if _model is None:
         from faster_whisper import WhisperModel
         from .transcription import models_dir
-        _model = WhisperModel(MODEL, device="cpu", compute_type="int8", cpu_threads=THREADS,
+        from ..core.hw import whisper_device
+        device, ctype = whisper_device()
+        _model = WhisperModel(MODEL, device=device, compute_type=ctype, cpu_threads=THREADS,
                               download_root=str(models_dir()))
     return _model
 

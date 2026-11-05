@@ -61,7 +61,9 @@ def _load(name: str):
         from faster_whisper import WhisperModel
         threads = max(1, (os.cpu_count() or 4) // 2)
         _loaded.clear()  # solo un modelo en memoria a la vez
-        _loaded[name] = WhisperModel(name, device="cpu", compute_type="int8",
+        from ..core.hw import whisper_device
+        device, ctype = whisper_device()        # NVIDIA lista → la tarjeta; si no, procesador (int8)
+        _loaded[name] = WhisperModel(name, device=device, compute_type=ctype,
                                      cpu_threads=threads, download_root=str(models_dir()))
     return _loaded[name]
 

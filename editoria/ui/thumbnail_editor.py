@@ -74,6 +74,11 @@ class Canvas(QGraphicsView):
         self.brush = 30                   # radio del pincel (píxeles del lienzo)
         self._stroke: list = []
         self._hover = None
+        self.liq_mode = "inflar"          # ≈ Licuar: inflar | encoger | empujar | restaurar
+        self.liq_strength = 0.5
+        self._liq_timer = QTimer(self)    # inflar/encoger mientras se mantiene pulsado (como en Photoshop)
+        self._liq_timer.setInterval(40)
+        self._liq_timer.timeout.connect(self._liq_tick)
 
     # ------------------------------------------------------------- dibujo
     @property
@@ -139,6 +144,12 @@ class Canvas(QGraphicsView):
                 p.setPen(QPen(QColor("white"), 1.2 * k))
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(self._hover, self.brush, self.brush)
+        if self.tool == "liquify" and self._hover is not None:
+            p.setPen(QPen(QColor("white"), 1.2 * k))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(self._hover, self.brush, self.brush)
+            p.setPen(QPen(QColor(0, 0, 0, 160), 1.0 * k, Qt.DotLine))
+            p.drawEllipse(self._hover, self.brush + 1.5 * k, self.brush + 1.5 * k)
         if self.tool == "box" and self._drag and self._drag.get("mode") == "box":
             p.setPen(QPen(QColor("#e8742f"), 2 * k, Qt.DashLine))
             p.setBrush(QColor(232, 116, 47, 40))
@@ -183,6 +194,19 @@ class Canvas(QGraphicsView):
 
     def mousePressEvent(self, e):
         pt = self.mapToScene(e.position().toPoint())
+        if self.tool == "liquify" and e.button() == Qt.LeftButton:
+            lay = self.editor.layer(self.sel)
+            if lay is None or lay.get("locked"):
+                self.sel = self._hit(pt)
+                self.selected.emit(self.sel)
+                lay = self.editor.layer(self.sel)
+            if lay is not None and not lay.get("locked"):
+                c = self.content_point(lay, pt)
+                self._drag = {"mode": "liquify", "lay": lay, "last": c, "pos": c}
+                if self.liq_mode != "empujar":
+                    self._liq_tick()
+                    self._liq_timer.start()
+            return
         if self.tool and e.button() == Qt.LeftButton:
             if self.tool == "box":
                 self._drag = {"mode": "box", "p0": pt, "p1": pt}
@@ -224,6 +248,17 @@ class Canvas(QGraphicsView):
             self._hover = pt
             if d is not None:
                 self._stroke.append(pt)
+            self.viewport().update()
+            return
+        if self.tool == "liquify":
+            self._hover = pt
+            if d is not None and d.get("mode") == "liquify":
+                c = self.content_point(d["lay"], pt)
+                if self.liq_mode == "empujar":
+                    last = d["last"]
+                    self.editor.liquify_dab(d["lay"], c, (c["fx"] - last["fx"], c["fy"] - last["fy"]))
+                    d["last"] = c
+                d["pos"] = c
             self.viewport().update()
             return
         if self.tool == "box" and d is not None:
@@ -273,6 +308,11 @@ class Canvas(QGraphicsView):
         self.editor.on_live_change()
 
     def mouseReleaseEvent(self, e):
+        if self.tool == "liquify" and self._drag is not None and self._drag.get("mode") == "liquify":
+            self._liq_timer.stop()
+            self._drag = None
+            self.editor.liquify_done()
+            return
         if self.tool == "box" and self._drag is not None:
             r = QRectF(self._drag["p0"], self._drag["p1"]).normalized()
             self._drag = None
@@ -290,6 +330,20 @@ class Canvas(QGraphicsView):
             self._guides = []
             self.committed.emit("Mover / tamaño / giro")
             self.viewport().update()
+
+    def content_point(self, lay: dict, pt: QPointF) -> dict:
+        """Punto del lienzo → fracción del contenido de la capa (0–1) y radio del pincel (fracción del alto)."""
+        img, cw, ch = T.render_layer(lay)
+        inv, _ok = T.layer_transform(lay, img).inverted()
+        q = inv.map(pt)
+        cw, ch = max(1.0, cw), max(1.0, ch)
+        return {"fx": (q.x() - (img.width() - cw) / 2) / cw, "fy": (q.y() - (img.height() - ch) / 2) / ch,
+                "r": self.brush / max(float(lay.get("scale", 1.0)) * ch, 1e-6), "aspect": cw / ch}
+
+    def _liq_tick(self):
+        d = self._drag
+        if d and d.get("mode") == "liquify" and self.liq_mode != "empujar":
+            self.editor.liquify_dab(d["lay"], d["pos"], (0.0, 0.0))
 
     def keyPressEvent(self, e):
         lay = self.editor.layer(self.sel)
@@ -575,6 +629,10 @@ class ThumbnailEditor(QMainWindow):
                                  "como «Distorsionar» en Photoshop o «Corner Pin» en Resolve).")
         self.act_unwarp = tb.addAction("↺", self.reset_warp)
         self.act_unwarp.setToolTip("Quitar la deformación de lo elegido")
+        self.act_liq = tb.addAction("≈ Licuar", self.toggle_liquify)          # como «Licuar» de Photoshop
+        self.act_liq.setCheckable(True)
+        self.act_liq.setToolTip("Licuar: pinta sobre lo elegido para inflar, encoger o empujar (ojos saltones, "
+                                "bocota…). Modos, tamaño, fuerza y caras graciosas de un clic en el panel derecho.")
         spacer = QWidget()
         spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding, spacer.sizePolicy().verticalPolicy())
         tb.addWidget(spacer)
@@ -1224,11 +1282,130 @@ class ThumbnailEditor(QMainWindow):
         """◇ Deformar: en lo elegido, las 4 esquinas se mueven cada una por su lado (perspectiva libre)."""
         on = self.act_warp.isChecked() if on is None else on
         self.act_warp.setChecked(on)
+        if on and self.canvas.tool == "liquify":
+            self.toggle_liquify(False)
         self.canvas.warp_mode = on
         self.canvas.viewport().update()
         self.statusBar().showMessage("◇ Deformar: arrastra cada esquina naranja a donde quieras · «↺» la quita"
                                      if on else "Clic = elegir · arrastrar = mover · esquinas = tamaño · círculo = "
                                                 "girar", 8000)
+
+    # ----------------------------------------------------------- ≈ Licuar
+    def toggle_liquify(self, on: bool | None = None):
+        on = self.act_liq.isChecked() if on is None else on
+        self.act_liq.setChecked(on)
+        if on and self.act_warp.isChecked():
+            self.act_warp.setChecked(False)
+            self.canvas.warp_mode = False
+        self.canvas.tool = "liquify" if on else None
+        self.canvas.setCursor(Qt.BlankCursor if on else Qt.ArrowCursor)
+        self.canvas.viewport().update()
+        self.statusBar().showMessage("≈ Licuar: pinta sobre lo elegido · modo, tamaño y fuerza en el panel derecho"
+                                     if on else "Clic = elegir · arrastrar = mover · esquinas = tamaño · círculo = "
+                                                "girar", 8000)
+        self._fill_props()
+
+    def set_liq_mode(self, mode: str):
+        self.canvas.liq_mode = mode
+        if self.canvas.tool != "liquify":
+            self.toggle_liquify(True)
+
+    def liquify_dab(self, lay: dict, c: dict, move: tuple[float, float]):
+        """Un toque del pincel ≈ Licuar (lo llama el lienzo mientras se pinta)."""
+        from ..core import liquify as L
+        mode, s = self.canvas.liq_mode, float(self.canvas.liq_strength)
+        k = {"inflar": 0.12, "encoger": 0.12, "restaurar": 0.3}.get(mode)
+        strength = min(1.0, 0.4 + 0.6 * s) if mode == "empujar" else k * s
+        L.stroke(lay, mode, c["fx"], c["fy"], c["r"], strength, c["aspect"], move)
+        self.canvas.viewport().update()
+
+    def liquify_done(self):
+        self._last_label = ""
+        self.commit("Licuar")
+        self.canvas.viewport().update()
+        self._fill_props()
+
+    def liquify_reset(self):
+        from ..core import liquify as L
+        lay = self.cur()
+        if lay and lay.get("liquify") and not lay.get("locked"):
+            L.clear(lay)
+            self._last_label = ""
+            self.commit("Quitar licuado")
+            self.canvas.viewport().update()
+            self._fill_props()
+
+    def funny_face(self, preset: str) -> bool:
+        """😜 Cara graciosa de un clic sobre la cara más grande de lo elegido (un paso de deshacer)."""
+        from ..ai import funny_faces as FF
+        from PySide6.QtWidgets import QApplication
+        lay = self.cur()
+        if lay is None or lay.get("locked") or lay["kind"] != "image":
+            self.statusBar().showMessage("Elige una imagen con una cara.", 5000)
+            return False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok = FF.apply(lay, preset, T._image_content(lay))
+        except Exception as ex:  # noqa: BLE001 - sin modelo de caras (sin internet la 1.ª vez)
+            ok = False
+            self.statusBar().showMessage(f"No pude buscar la cara: {ex}"[:160], 8000)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not ok:
+            self.statusBar().showMessage("No encontré ninguna cara en esta imagen.", 6000)
+            return False
+        self._last_label = ""
+        self.commit(dict((k, n) for k, n, _t in FF.PRESETS).get(preset, "Cara graciosa")[2:])
+        self.canvas.viewport().update()
+        self._fill_props()
+        return True
+
+    def _liquify_props(self, lay):
+        from PySide6.QtWidgets import QButtonGroup
+        from ..ai import funny_faces as FF
+        box = QGroupBox("≈ Licuar")
+        g = QGridLayout(box)
+        grp = QButtonGroup(box)
+        tips = {"inflar": "Inflar: agranda lo que hay bajo el pincel (mantén pulsado para más)",
+                "encoger": "Encoger: achica lo que hay bajo el pincel",
+                "empujar": "Empujar: arrastra y la imagen te sigue",
+                "restaurar": "Restaurar: devuelve a su forma lo que pintes"}
+        for i, (mode, label) in enumerate((("inflar", "⊕ Inflar"), ("encoger", "⊖ Encoger"),
+                                           ("empujar", "➜ Empujar"), ("restaurar", "↺ Restaurar"))):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setToolTip(tips[mode])
+            b.setChecked(self.canvas.tool == "liquify" and self.canvas.liq_mode == mode)
+            b.clicked.connect(lambda _=False, m=mode: self.set_liq_mode(m))
+            grp.addButton(b)
+            g.addWidget(b, i // 2, i % 2)
+        size = QSpinBox()
+        size.setRange(5, 400)
+        size.setSuffix(" px")
+        size.setValue(self.canvas.brush)
+        size.setToolTip("Tamaño del pincel (radio, en píxeles de la miniatura)")
+        size.valueChanged.connect(lambda v: setattr(self.canvas, "brush", v))
+        force = QSlider(Qt.Horizontal)
+        force.setRange(5, 100)
+        force.setValue(int(self.canvas.liq_strength * 100))
+        force.setToolTip("Fuerza del pincel")
+        force.valueChanged.connect(lambda v: setattr(self.canvas, "liq_strength", v / 100))
+        g.addWidget(QLabel("Tamaño"), 2, 0)
+        g.addWidget(size, 2, 1)
+        g.addWidget(QLabel("Fuerza"), 3, 0)
+        g.addWidget(force, 3, 1)
+        if lay["kind"] == "image":
+            for i, (key, label, tip) in enumerate(FF.PRESETS):
+                b = QPushButton(label)
+                b.setToolTip(tip + " (busca la cara más grande de la imagen; Ctrl+Z lo deshace)")
+                b.clicked.connect(lambda _=False, k=key: self.funny_face(k))
+                g.addWidget(b, 4 + i // 2, i % 2)
+        off = QPushButton("↺ Quitar licuado")
+        off.setToolTip("Devuelve lo elegido a su forma original")
+        off.setEnabled(bool(lay.get("liquify")))
+        off.clicked.connect(self.liquify_reset)
+        g.addWidget(off, 8, 0, 1, 2)
+        self.props_lay.addWidget(box)
 
     def reset_warp(self):
         lay = self.cur()
@@ -1372,6 +1549,8 @@ class ThumbnailEditor(QMainWindow):
                      "✂ Recortando lo que marcaste…")
 
     def set_brush(self, mode: str | None):
+        if hasattr(self, "act_liq"):
+            self.act_liq.setChecked(False)
         self.canvas.tool = mode
         self.canvas.setCursor(Qt.BlankCursor if mode else Qt.ArrowCursor)
         if mode:
@@ -1561,6 +1740,7 @@ class ThumbnailEditor(QMainWindow):
             self._shape_props(lay)
         else:
             self._image_props(lay)
+        self._liquify_props(lay)
         self._common_props(lay)
         self._effect_props(lay)
         self._loading = False

@@ -299,6 +299,8 @@ def _effects(rgba: np.ndarray, lay: dict, scale: float) -> tuple[np.ndarray, int
     if sh.get("on"):
         pad += int((sh["blur"] * 2 + max(abs(sh["dx"]), abs(sh["dy"]))) / max(scale, 1e-3))
     h, w = rgba.shape[:2]
+    if not ((lay["kind"] == "image" and ol.get("on")) or gl.get("on") or sh.get("on")):   # sin efectos: rápido
+        return np.pad(rgba, ((pad, pad), (pad, pad), (0, 0))), pad
     canvas = np.zeros((h + 2 * pad, w + 2 * pad, 4), np.float32)
     canvas[pad:pad + h, pad:pad + w] = rgba.astype(np.float32) / 255.0
     alpha = canvas[..., 3].copy()
@@ -336,10 +338,20 @@ def _effects(rgba: np.ndarray, lay: dict, scale: float) -> tuple[np.ndarray, int
 
 
 _cache: dict[str, tuple[QImage, float, float]] = {}
+_base_cache: dict[str, np.ndarray] = {}     # contenido SIN licuar (el pincel «≈ Licuar» solo rehace lo último)
 
 
 def _key(lay: dict) -> str:
     skip = {"x", "y", "rotation", "opacity", "visible", "locked", "name", "flip", "warp"}   # (se aplican al colocar)
+    data = {k: v for k, v in lay.items() if k not in skip}
+    return hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _base_key(lay: dict) -> str:
+    """Clave del contenido sin licuar ni efectos que se ponen después (sombra, borde, resplandor)."""
+    skip = {"x", "y", "rotation", "opacity", "visible", "locked", "name", "flip", "warp", "liquify"}
+    if lay["kind"] == "image":                       # (en texto y formas el contorno es parte del dibujo)
+        skip |= {"shadow", "outline", "glow", "scale"}
     data = {k: v for k, v in lay.items() if k not in skip}
     return hashlib.md5(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -351,10 +363,16 @@ def render_layer(lay: dict) -> tuple[QImage, float, float]:
     if k in _cache:
         return _cache[k]
     scale = float(lay.get("scale", 1.0))
-    if lay["kind"] == "image":
-        rgba = _image_content(lay)
-    else:
-        rgba = _vector_content(lay, 0)
+    bk = _base_key(lay)
+    rgba = _base_cache.get(bk)
+    if rgba is None:
+        rgba = _image_content(lay) if lay["kind"] == "image" else _vector_content(lay, 0)
+        if len(_base_cache) > 40:
+            _base_cache.clear()
+        _base_cache[bk] = rgba
+    if lay.get("liquify"):
+        from . import liquify
+        rgba = liquify.apply(rgba, lay)
     core_h, core_w = rgba.shape[:2]
     rgba, _pad = _effects(rgba, lay, scale)
     img = rgba_to_qimage(rgba)

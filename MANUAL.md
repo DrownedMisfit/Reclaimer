@@ -22,7 +22,7 @@ Doble clic en **`INICIAR.bat`**.
 2. **Montar**: arrastra clips desde la biblioteca a la timeline (o doble clic = se añade en el cabezal).
 3. **Editar**: mueve clips arrastrándolos, recorta arrastrando sus bordes, corta con **S**.
 4. **Proteger**: 🔒 en una pista o **Ctrl+L** en un clip = bloqueado (nadie, ni la IA, podrá tocarlo).
-5. **Exportar**: **Ctrl+E** → elige preset → Exportar (usa tu GPU AMD por defecto).
+5. **Exportar**: **Ctrl+E** → elige preset → Exportar (usa tu tarjeta gráfica por defecto: NVIDIA, AMD o Intel).
 
 ## 📖 Guía paso a paso (F1)
 
@@ -154,7 +154,7 @@ de tiempo más pequeña.
   estabilización se pueden borrar con aviso (cuesta rehacerlos). Lo que usan tus miniaturas o proyectos (recortes,
   fotogramas de miniaturas, sonidos generados) no se borra desde aquí; los modelos y las copias de seguridad solo
   se muestran (📂 abre su carpeta).
-- **Diagnóstico**: versión y ruta de FFmpeg, si la tarjeta AMD puede exportar, IA local, espacio libre, archivos del
+- **Diagnóstico**: versión y ruta de FFmpeg, con qué tarjeta exporta (NVIDIA, AMD o Intel) y dónde transcribe, IA local, espacio libre, archivos del
   proyecto que faltan y tamaño del historial. «📋 Copiar informe» por si algo falla.
 - El **historial de deshacer** se guarda comprimido (y sin duplicar): un proyecto largo ya no se come la memoria.
 
@@ -561,7 +561,7 @@ Eliges **para dónde es** con un clic y listo:
 **Más rápido**: el video se parte por los cortes del montaje y se hacen **varios trozos a la vez** (hasta 8,
 según tu procesador); el sonido se hace entero una vez y al final se juntan sin volver a comprimir. Solo se
 corta donde no queda nada a medias (ni transiciones ni textos que crucen el corte); si no se puede, se exporta
-de una vez como antes. Con la tarjeta AMD se usa además VBAQ (menos bloques en lo oscuro y en el movimiento).
+de una vez como antes. Con la tarjeta gráfica se usa además la cuantización adaptativa de cada marca (VBAQ en AMD, AQ en NVIDIA, look-ahead en Intel): menos bloques en lo oscuro y en el movimiento.
 
 - **Calidad → «Máxima calidad»**: la tarjeta analiza cada fotograma antes de comprimirlo. Tarda casi el doble y, a
   estos bitrates, casi no se nota (YouTube y TikTok vuelven a comprimir). Apagada por defecto.
@@ -621,7 +621,7 @@ tramos arrastrando sin volver a activarlo (se recuerda).
 zoom (décimas «11.2s», segundos «45s», minutos «2m 30s», horas «1h 05m»).
 
 ## ⚡ Copias ligeras más rápidas
-- **Copias ligeras** (para reproducir fluido): con tu tarjeta gráfica AMD y todas las de un video de una sola pasada,
+- **Copias ligeras** (para reproducir fluido): con tu tarjeta gráfica y todas las de un video de una sola pasada,
   unas 3 veces más rápido (un video de 38 min: de ~13 min a ~4). La barra dice cuánto falta.
 
 ## ✂ Ritmo de corte de los edits (más pausado) y ⚡ Ráfaga
@@ -706,14 +706,14 @@ mejores candidatos se miran de cerca. 2–5 ejemplos en momentos distintos = má
 Demucs v4 (Meta, MIT) separa las voces de la música del juego y del ambiente: clic derecho en un clip → ✨ IA →
 «🗣 Separar los diálogos…», o en el edit musical «Opción de sonido → Solo los diálogos». Se guarda por archivo.
 
-**Motor de IA**: `F:\Reclaimer\motor_ia` (un Python aparte con PyTorch para AMD/ROCm, los modelos en
+**Motor de IA**: `F:\Reclaimer\motor_ia` (un Python aparte con PyTorch para la gráfica: CUDA en NVIDIA, ROCm en AMD; los modelos en
 `motor_ia\modelos`). Si algo del motor falla, Reclaimer sigue funcionando.
 - **Instalar / reparar**: Ayuda → «🧠 Motor de IA…» → «Instalar»/«Reparar», o doble clic en
-  `motor_ia\INSTALAR_MOTOR_IA.bat` (hace falta Python 3.12). Detecta tu tarjeta: AMD → PyTorch ROCm (usa la
-  gráfica); si no, la versión para procesador. Instala SAM 2.1 y Demucs con las versiones probadas y descarga los
+  `motor_ia\INSTALAR_MOTOR_IA.bat` (hace falta Python 3.12). Detecta tu tarjeta: NVIDIA → PyTorch CUDA, AMD → PyTorch
+  ROCm (usan la gráfica); si no, la versión para procesador. Si cambias de tarjeta, «Reparar» instala la versión de la nueva. Instala SAM 2.1 y Demucs con las versiones probadas y descarga los
   modelos. Se puede repetir cuando quieras (lo que ya está no se repite). Registro: `motor_ia\instalar.log`.
-- Si la tarjeta AMD deja de detectarse (p. ej. tras un cambio de controlador), Reclaimer te avisa al arrancar.
-  Hace falta AMD Adrenalin 26.2.2 o más nuevo.
+- Si la tarjeta deja de detectarse (p. ej. tras un cambio de controlador), Reclaimer te avisa al arrancar.
+  Hace falta AMD Adrenalin 26.2.2 o más nuevo, o el controlador de NVIDIA 570 o más nuevo.
 - **✂ Recortar sujeto — Calidad**: «Máxima» (modelo grande, 1280 px, bordes finos) o «Rápida» (modelo mediano,
   854 px: ~2 veces más rápido).
 
@@ -1024,6 +1024,10 @@ Un Ctrl+Z lo deshace. La lista se pone al día sola al editar.
   pulsar «Editar» (u otra página) todo vuelve como estaba. La miniatura se guarda con el proyecto.
 - **◇ Deformar** (barra del taller): arrastra cada esquina de lo elegido a donde quieras (perspectiva libre, como
   «Distorsionar» de Photoshop). «↺» la quita; Ctrl+Z la deshace. Se exporta igual que se ve.
+- **≈ Licuar** (barra del taller, como «Licuar» de Photoshop): pinta sobre lo elegido para **inflar**, **encoger**,
+  **empujar** o **restaurar** (mantén pulsado para más). Tamaño y fuerza en el panel derecho. **Caras
+  graciosas de un clic** sobre la cara más grande de una imagen: 👀 Ojos saltones, 👄 Bocota, 🗿 Cabezón,
+  😁 Sonrisota, 🥴 Cara estirada, 🤏 Carita. Cada clic o trazo se deshace con Ctrl+Z; «↺ Quitar licuado» lo quita.
 - **Medios comunes**: lo que importas en 🎬 YouTube, 🎵 Edits o 📱 Shorts aparece también en las otras pestañas (sin
   tocar su línea de tiempo).
 - **🎨 Mi estilo**: arrastra carpetas o imágenes a las listas, o usa «Carpeta…» / «Imágenes…».
@@ -1033,3 +1037,13 @@ Un Ctrl+Z lo deshace. La lista se pone al día sola al editar.
   Clic derecho en una → «Usar en la miniatura»: se baja la imagen grande, se comprueba y, si trae un fondo liso
   (blanco, negro), se le quita. Abajo dice qué es («PNG transparente · 1600×1200»).
 - **✨ Propuestas** salen de tu imagen («🖼 Usar una imagen mía…» o la que tengas en el lienzo) y siempre son 3.
+
+## 🖥 Intel, NVIDIA y AMD (04/11/2026)
+
+- **Exportar, Convertir y las copias ligeras** usan la tarjeta gráfica que tenga el equipo: **NVIDIA** (NVENC),
+  **AMD** (AMF) o **Intel** (Quick Sync), con los ajustes de calidad de cada una. Se elige sola (con NVIDIA + gráficos
+  Intel, la NVIDIA). Sin ninguna, el procesador. La ventana Exportar dice cuál usa.
+- **Transcribir**: con una NVIDIA, Whisper va en la tarjeta (CUDA, mucho más rápido) si `INSTALAR.bat` instaló sus
+  librerías (lo hace solo al ver una NVIDIA); si no, el procesador en int8, que en Intel y AMD ya va muy optimizado.
+- **Motor de IA avanzada**: PyTorch CUDA en NVIDIA, ROCm en AMD.
+- Ayuda → Diagnóstico: con qué tarjeta exporta y dónde transcribe.

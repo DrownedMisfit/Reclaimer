@@ -80,9 +80,17 @@ def _filter_path(path: str) -> str:
 ENCODERS = {
     ("h264", "cpu"): "libx264",
     ("hevc", "cpu"): "libx265",
-    ("h264", "gpu"): "h264_amf",
-    ("hevc", "gpu"): "hevc_amf",
 }
+
+
+def video_encoder(codec: str, where: str) -> str:
+    """«gpu» = la tarjeta de este equipo (NVIDIA NVENC, AMD AMF o Intel Quick Sync); sin ninguna, el procesador."""
+    if where == "gpu":
+        from ..core import hw
+        enc = hw.video_encoder(codec)
+        if enc:
+            return enc
+    return ENCODERS[(codec, "cpu")]
 
 PRESETS = {
     "YouTube 1080p": (1920, 1080, 24),
@@ -135,7 +143,7 @@ class ExportOptions:
     height: int = 1080
     fps: float = 30.0
     codec: str = "h264"        # h264 | hevc
-    encoder: str = "gpu"       # cpu | gpu (AMD AMF)
+    encoder: str = "gpu"       # cpu | gpu (NVIDIA, AMD o Intel: la que tenga el equipo)
     bitrate_mbps: float = 16.0
     audio_kbps: int = 320
     subtitles: bool = True     # incrustar los subtítulos (si están activados en el proyecto)
@@ -877,7 +885,7 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
         f.write(";\n".join(filters))
 
     codec = "h264" if opts.target in TARGETS else opts.codec     # los destinos: siempre H.264 (se ve en todos lados)
-    encoder = ENCODERS[(codec, opts.encoder)]
+    encoder = video_encoder(codec, opts.encoder)
     br = opts.bitrate_mbps
     gop = max(1, int(round(opts.fps / 2)))       # un fotograma clave cada medio segundo (lo que pide YouTube)
     args += ["-/filter_complex", script_path, "-map", "[vout]"] + ([] if opts.video_only else ["-map", "[aout]"]) + [
@@ -889,13 +897,9 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
         args += ["-preset", "medium", "-profile:v", "high", "-bf", "2", "-flags", "+cgop"]
     elif encoder == "libx265":
         args += ["-preset", "medium", "-tag:v", "hvc1"]
-    elif encoder in ("h264_amf", "hevc_amf"):
-        # VBAQ: menos bloques en lo oscuro y en el movimiento. «Equilibrado» va ~2 veces más rápido que «calidad» +
-        # pre-codificado (que era el freno de los videos largos); a 20–24 Mbps casi no se nota (YouTube y TikTok
-        # lo vuelven a comprimir). «Máxima calidad» sigue disponible.
-        q = ["-quality", "quality", "-preencode", "true"] if opts.max_quality else ["-quality", "balanced"]
-        args += q + ["-rc", "vbr_peak", "-vbaq", "true"] + (["-profile:v", "high"] if encoder == "h264_amf"
-                                                            else ["-tag:v", "hvc1"])
+    else:                                        # tarjeta gráfica: cada marca con sus ajustes (core/hw.py)
+        from ..core import hw
+        args += hw.export_args(encoder, opts.max_quality)
     if opts.video_only:
         args += ["-an", opts.path]
         return args, total

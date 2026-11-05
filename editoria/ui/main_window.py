@@ -2365,7 +2365,7 @@ class MainWindow(QMainWindow):
                                          f"{q.current['progress'] * 100:.0f} %", 3000)
 
     def open_motor(self):
-        """◈ Cómo está el motor de IA (PyTorch en la tarjeta AMD, SAM 2.1, Demucs) e instalar / reparar."""
+        """◈ Cómo está el motor de IA (PyTorch en la tarjeta NVIDIA o AMD, SAM 2.1, Demucs) e instalar / reparar."""
         from PySide6.QtWidgets import QApplication as _QA
         from ..core import motor_ia
         _QA.setOverrideCursor(Qt.WaitCursor)
@@ -2377,10 +2377,11 @@ class MainWindow(QMainWindow):
             text = "El motor de IA no está instalado (hace falta para ✂ Recortar sujeto y 🗣 Separar diálogos)."
         elif st["gpu"]:
             text = f"✓ El motor de IA funciona con tu tarjeta gráfica: {st['name']}.\nPyTorch {st['torch']}."
-        elif st["amd"]:
-            text = ("⚠ El motor está instalado pero tu tarjeta AMD NO se detecta: la IA irá por el procesador "
-                    "(mucho más lenta).\nActualiza el controlador AMD Adrenalin (26.2.2 o más nuevo) y pulsa "
-                    "«Reparar».")
+        elif st["vendor"]:
+            marca, drv = (("NVIDIA", "de NVIDIA (570 o más nuevo)") if st["vendor"] == "nvidia"
+                          else ("AMD", "AMD Adrenalin (26.2.2 o más nuevo)"))
+            text = (f"⚠ El motor está instalado pero tu tarjeta {marca} NO se detecta: la IA irá por el procesador "
+                    f"(mucho más lenta).\nActualiza el controlador {drv} y pulsa «Reparar».")
         else:
             text = f"✓ El motor de IA está instalado (irá por el procesador). PyTorch {st['torch']}."
         if st["installed"] and not st["sam"]:
@@ -2399,7 +2400,7 @@ class MainWindow(QMainWindow):
             os.startfile(str(motor_ia.ROOT))    # noqa: S606 - abrir la carpeta en el Explorador
 
     def _check_motor_soon(self):
-        """Al arrancar (sin prisa): si hay motor y tarjeta AMD pero la IA no la ve, se avisa."""
+        """Al arrancar (sin prisa): si hay motor y tarjeta NVIDIA o AMD pero la IA no la ve, se avisa."""
         import threading
         from ..core import motor_ia
         if not motor_ia.PYTHON.exists() or os.environ.get("EDITORIA_DATOS"):
@@ -2407,8 +2408,9 @@ class MainWindow(QMainWindow):
 
         def work():
             st = motor_ia.status()
-            if st["installed"] and st["amd"] and not st["gpu"]:
-                self._motor_warning.emit("⚠ La IA no detecta tu tarjeta AMD (irá por el procesador, más lenta). "
+            if st["installed"] and st["vendor"] and not st["gpu"]:
+                marca = "NVIDIA" if st["vendor"] == "nvidia" else "AMD"
+                self._motor_warning.emit(f"⚠ La IA no detecta tu tarjeta {marca} (irá por el procesador, más lenta). "
                                          "Ayuda → «◈ Motor de IA…» para ver qué pasa.")
         threading.Thread(target=work, daemon=True).start()
 

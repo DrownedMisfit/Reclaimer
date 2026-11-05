@@ -30,22 +30,15 @@ _HW: bool | None = None
 
 
 def hw_encoder() -> bool:
-    """¿Hay codificador de video por hardware AMD (AMF)? Se comprueba una vez (una prueba de 2 fotogramas)."""
-    global _HW
-    if _HW is None:
-        try:
-            r = media_tools.run_quiet([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-                                       "color=s=256x144:d=0.1", "-c:v", "h264_amf", "-f", "null", "-"], timeout=20)
-            _HW = r.returncode == 0
-        except Exception:  # noqa: BLE001
-            _HW = False
-    return _HW
+    """¿Hay codificador de video por hardware (NVIDIA, AMD o Intel)? Se comprueba una vez (core/hw.py)."""
+    from . import hw
+    return hw.video_encoder("h264") is not None
 
 
-def _video_args(hw: bool) -> list[str]:
-    if hw:      # la tarjeta gráfica: ~3× más rápido y casi sin usar el procesador (sigues editando fluido)
-        return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "26", "-qp_p", "28",
-                "-g", "15", "-pix_fmt", "yuv420p"]
+def _video_args(hw_on: bool) -> list[str]:
+    if hw_on:   # la tarjeta gráfica: ~3× más rápido y casi sin usar el procesador (sigues editando fluido)
+        from . import hw
+        return hw.proxy_args(hw.video_encoder("h264")) + ["-g", "15", "-pix_fmt", "yuv420p"]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-g", "15", "-keyint_min", "15",
             "-pix_fmt", "yuv420p", "-threads", "4"]
 

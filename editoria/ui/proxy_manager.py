@@ -77,7 +77,7 @@ class ProxyManager(QObject):
         if not todo:
             return
         label = " y ".join(dict.fromkeys(proxies.LEVELS[t[4]][0].lower() for t in todo))
-        # Por video: todas sus copias de UNA pasada (se lee una vez; con la gráfica AMD, ~3× más rápido)
+        # Por video: todas sus copias de UNA pasada (se lee una vez; con la tarjeta gráfica, ~3× más rápido)
         groups: dict[str, list] = {}
         for mid, path, h, dur, lv in todo:
             groups.setdefault(mid, [path, h, dur, []])[3].append(lv)

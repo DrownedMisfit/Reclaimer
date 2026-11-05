@@ -59,7 +59,12 @@ class ExportDialog(QDialog):
         self.codec.addItem("H.264 (máxima compatibilidad)", "h264")
         self.codec.addItem("H.265 / HEVC (menos peso, misma calidad)", "hevc")
         self.encoder = QComboBox()
-        self.encoder.addItem("Tarjeta gráfica AMD (rápido)", "gpu")
+        from ..core import hw
+        marca = hw.label()
+        self.encoder.addItem(f"Tarjeta gráfica {marca} (rápido)" if marca else "Tarjeta gráfica (rápido)", "gpu")
+        if not marca:
+            self.encoder.setItemData(0, "Este equipo no tiene un codificador de video por tarjeta gráfica que funcione: "
+                                        "se usará el procesador.", Qt.ToolTipRole)
         self.encoder.addItem("Procesador (más lento, muy compatible)", "cpu")
         self.bitrate = QDoubleSpinBox()
         self.bitrate.setRange(1, 200)
