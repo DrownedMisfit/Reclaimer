@@ -178,4 +178,4 @@ class CaptionView(QWidget):
         mid = self.media_of()
         idxs = [w.index for w in cue.words]
         if mid and idxs:
-            self.ctrl.edit_words(mid, idxs, " ".join(text.split()))
+            self.ctrl.edit_words(mid, idxs, " ".join(text.split()), label="Corregir subtítulo")

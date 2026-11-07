@@ -114,6 +114,19 @@ def shape_layer(doc: dict, shape: str = "rect") -> dict:
     return lay
 
 
+def blur_area_layer(doc: dict, shape: str = "rect", x: float | None = None, y: float | None = None,
+                    w: float | None = None, h: float | None = None) -> dict:
+    """🌫 Zona borrosa: un círculo o un cuadrado que desenfoca lo que hay DEBAJO (no tiene relleno propio)."""
+    ellipse = shape == "ellipse"
+    lay = shape_layer(doc, "ellipse" if ellipse else "rect")
+    lay.update(name="🌫 Borroso (círculo)" if ellipse else "🌫 Borroso (cuadrado)", blur_area={"radius": 18},
+               radius=0, w=int(round(w if w is not None else doc["w"] * 0.25)),
+               h=int(round(h if h is not None else doc["h"] * 0.25)))
+    lay["x"] = float(x if x is not None else doc["w"] / 2)
+    lay["y"] = float(y if y is not None else doc["h"] / 2)
+    return lay
+
+
 def clone(lay: dict) -> dict:
     c = copy.deepcopy(lay)
     c["id"] = uuid.uuid4().hex[:10]
@@ -295,6 +308,18 @@ def _vector_content(lay: dict, pad: int) -> np.ndarray:
     return qimage_to_rgba(img)
 
 
+def blur_rgba(rgba: np.ndarray, sigma: float) -> np.ndarray:
+    """🌫 Desenfoque de una imagen con transparencia (sin halos oscuros: se hace con el color premultiplicado)."""
+    if sigma < 0.3:
+        return rgba
+    a = rgba[..., 3].astype(np.float32) / 255.0
+    rgb = rgba[..., :3].astype(np.float32) * a[..., None]
+    rgb = _blur(rgb, sigma)
+    a2 = _blur(a, sigma)
+    rgb = rgb / np.maximum(a2, 1e-4)[..., None]
+    return np.dstack([np.clip(rgb, 0, 255), np.clip(a2 * 255.0, 0, 255)]).astype(np.uint8)
+
+
 def _blur(a: np.ndarray, sigma: float) -> np.ndarray:
     """Desenfoque gaussiano rápido: con sigma grande se hace en pequeño y se amplía (no se nota: es borroso)."""
     if sigma <= 6:
@@ -371,7 +396,7 @@ def _key(lay: dict) -> str:
 
 def _base_key(lay: dict) -> str:
     """Clave del contenido sin licuar ni efectos que se ponen después (sombra, borde, resplandor)."""
-    skip = {"x", "y", "rotation", "opacity", "visible", "locked", "name", "flip", "warp", "liquify"}
+    skip = {"x", "y", "rotation", "opacity", "visible", "locked", "name", "flip", "warp", "liquify", "blur"}
     if lay["kind"] == "image":                       # (en texto y formas el contorno es parte del dibujo)
         skip |= {"shadow", "outline", "glow", "scale"}
     data = {k: v for k, v in lay.items() if k not in skip}
@@ -403,9 +428,29 @@ def layer_scale(lay: dict, img: QImage) -> float:
     return float(lay.get("scale", 1.0)) / image_k(img)
 
 
+_blank_cache: dict[tuple, QImage] = {}
+
+
+def _zone_blank(lay: dict) -> tuple[QImage, float, float]:
+    """Imagen transparente del tamaño de la zona borrosa (solo para saber su sitio y su recuadro)."""
+    W = max(1, int(round(float(lay.get("w", 200)))))
+    H = max(1, int(round(float(lay.get("h", 100)))))
+    img = _blank_cache.get((W, H))
+    if img is None:
+        if len(_blank_cache) > 50:
+            _blank_cache.clear()
+        img = QImage(W, H, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        img.setText("k", "1.0")
+        _blank_cache[(W, H)] = img
+    return img, float(W), float(H)
+
+
 def render_layer(lay: dict) -> tuple[QImage, float, float]:
     """(imagen de la capa con sus efectos, ancho y alto «útiles» sin márgenes) — en píxeles de esa imagen (que puede
     venir reducida: image_k); la escala y la rotación se aplican al colocarla (layer_transform)."""
+    if lay.get("blur_area"):                         # 🌫 zona borrosa: sin imagen propia (paint_blur_area); solo su sitio
+        return _zone_blank(lay)
     k = _key(lay)
     if k in _cache:
         return _cache[k]
@@ -421,6 +466,8 @@ def render_layer(lay: dict) -> tuple[QImage, float, float]:
     if lay.get("liquify"):
         from . import liquify
         rgba = liquify.apply(rgba, lay)
+    if float(lay.get("blur", 0) or 0) > 0:           # 🌫 desenfocar la capa entera (en píxeles del lienzo)
+        rgba = blur_rgba(rgba, float(lay["blur"]) / max(scale, 1e-3))
     core_h, core_w = rgba.shape[:2]
     rgba, _pad = _effects(rgba, lay, scale)
     img = rgba_to_qimage(rgba)
@@ -429,6 +476,83 @@ def render_layer(lay: dict) -> tuple[QImage, float, float]:
         _cache.clear()
     _cache[k] = (img, core_w, core_h)
     return _cache[k]
+
+
+_fx_cache: dict[str, tuple] = {}            # efectos ya hechos SIN licuar (vista rápida mientras se licua)
+
+
+def is_rendered(lay: dict) -> bool:
+    """¿La capa tal como está ya está dibujada (en caché)?"""
+    return _key(lay) in _cache
+
+
+def draft_k(lay: dict, view: float) -> float:
+    """Reducción para la vista rápida: la resolución con que se VE en pantalla (view = píxeles de pantalla por píxel
+    del lienzo), por octavos para no recalcular con cada pequeño movimiento; nunca más que shrink_k (la buena)."""
+    sk = shrink_k(lay)
+    if lay["kind"] != "image":
+        return sk
+    need = float(lay.get("scale", 1.0)) * max(float(view), 1e-3)     # px de pantalla por px de la imagen
+    return min(sk, max(1 / 16, math.ceil(need * 8) / 8))
+
+
+def render_layer_draft(lay: dict, kd: float | None = None) -> tuple[QImage, float, float]:
+    """Vista rápida mientras se arrastra ≈ Licuar / ✋ Estirar: el contorno, el brillo y la sombra se calculan UNA vez
+    (sin licuar) y en cada toque solo se deforma esa imagen ya hecha (~20–40 ms en vez de 1–3 s). Mismo tamaño y
+    margen que render_layer, así que se coloca igual. Al soltar se dibuja la buena con render_layer.
+    kd: la reducción de la vista rápida (draft_k); None = la de shrink_k."""
+    if lay["kind"] != "image" or not lay.get("liquify"):
+        return render_layer(lay)
+    fx, pad, cw, ch, k = draft_effects(lay, kd)
+    from . import liquify
+    img = rgba_to_qimage(liquify.apply_padded(fx, lay, pad, cw, ch))
+    img.setText("k", repr(k))
+    return img, cw, ch
+
+
+def draft_render(lay: dict, kd: float | None = None, prev: dict | None = None) -> tuple:
+    """render_layer_draft con memoria: prev es el estado del toque anterior (de la misma capa y reducción). Si solo
+    cambió el licuado, se rehace solo el rectángulo tocado (liquify.apply_padded_update). Devuelve
+    (imagen, ancho, alto, estado para el siguiente toque)."""
+    if lay["kind"] != "image" or not lay.get("liquify"):
+        img, cw, ch = render_layer(lay)
+        return img, cw, ch, None
+    fx, pad, cw, ch, k = draft_effects(lay, kd)
+    from . import liquify
+    out = None
+    if prev is not None and prev.get("fx") is fx and liquify.apply_padded_update(
+            prev["out"], fx, lay, pad, cw, ch, prev["field"]):
+        out = prev["out"]                                    # (se actualiza en sitio: solo lo tocado)
+    if out is None:
+        out = liquify.apply_padded(fx, lay, pad, cw, ch)
+    img = rgba_to_qimage(out)
+    img.setText("k", repr(k))
+    return img, cw, ch, {"fx": fx, "out": out, "field": liquify.field(lay)}
+
+
+def draft_effects(lay: dict, kd: float | None = None) -> tuple:
+    """Los efectos de la capa SIN licuar (para la vista rápida). Se puede llamar antes, en segundo plano, al activar
+    ≈ Licuar / ✋ Estirar: así el primer toque tampoco espera. kd: la reducción (draft_k); None = shrink_k."""
+    kd = shrink_k(lay) if kd is None else float(kd)
+    scale = float(lay.get("scale", 1.0)) / kd
+    fk = _key({k: v for k, v in lay.items() if k != "liquify"}) + f"|{kd}"
+    got = _fx_cache.get(fk)
+    if got is None:
+        bk = _base_key(lay) + f"|{kd}"
+        rgba = _base_cache.get(bk)
+        if rgba is None:
+            rgba = _image_content(lay, kd)
+            if len(_base_cache) > 40:
+                _base_cache.clear()
+            _base_cache[bk] = rgba
+        ch, cw = rgba.shape[:2]
+        if float(lay.get("blur", 0) or 0) > 0:       # 🌫 (también en la vista rápida, si la capa está desenfocada)
+            rgba = blur_rgba(rgba, float(lay["blur"]) / max(scale, 1e-3))
+        fx, pad = _effects(rgba, lay, scale)
+        if len(_fx_cache) > 4:
+            _fx_cache.clear()
+        got = _fx_cache[fk] = (fx, pad, cw, ch)
+    return (*got, kd)
 
 
 def layer_transform(lay: dict, img: QImage, warp: bool = True) -> QTransform:
@@ -502,6 +626,61 @@ def render_alone(doc: dict, lay: dict) -> QImage:
     return out
 
 
+# ------------------------------------------------------------- 🌫 zona borrosa (desenfoca lo que hay debajo)
+_under_cache: dict[str, np.ndarray] = {}     # lo de debajo ya desenfocado (mover la zona no lo rehace)
+
+
+def render_below(doc: dict, index: int, scale: float = 1.0) -> QImage:
+    """Lo que hay DEBAJO de la capa número index: fondo y capas anteriores visibles, a la escala dada."""
+    return render({**doc, "layers": doc["layers"][:index]}, scale)
+
+
+def _under_key(doc: dict, index: int, scale: float) -> str:
+    parts = [json.dumps(doc.get("bg") or {}, sort_keys=True), repr((doc["w"], doc["h"], scale))]
+    for lay in doc["layers"][:index]:
+        parts.append(_key(lay) + repr((lay.get("x"), lay.get("y"), lay.get("rotation"), lay.get("opacity"),
+                                       lay.get("visible", True), lay.get("flip"), lay.get("warp"))))
+    return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+
+def blurred_below(doc: dict, index: int, lay: dict, scale: float = 1.0) -> np.ndarray:
+    """Lo de debajo de la zona, ya desenfocado con su fuerza (RGBA). Se guarda: mover la zona no lo rehace."""
+    radius = float(lay["blur_area"].get("radius", 18))
+    key = hashlib.md5(f"{_under_key(doc, index, scale)}|{radius}".encode()).hexdigest()
+    got = _under_cache.get(key)
+    if got is None:
+        if len(_under_cache) > 6:
+            _under_cache.clear()
+        got = _under_cache[key] = blur_rgba(qimage_to_rgba(render_below(doc, index, scale)), radius * scale)
+    return got
+
+
+def paint_blur_area(p: QPainter, doc: dict, index: int, lay: dict, scale: float = 1.0):
+    """Pinta una zona borrosa: lo de debajo desenfocado, recortado a su círculo o cuadrado con el borde suave (~1 px).
+    p ya está en coordenadas del lienzo (como en render); scale: la escala de la exportación (1 en el lienzo)."""
+    img, _cw, _ch = render_layer(lay)
+    t = layer_transform(lay, img)
+    s = float(scale)
+    box = t.map(_shape_path(lay)).boundingRect()
+    px0, py0 = max(0, int(math.floor(box.left() * s)) - 4), max(0, int(math.floor(box.top() * s)) - 4)
+    px1, py1 = int(math.ceil(box.right() * s)) + 4, int(math.ceil(box.bottom() * s)) + 4
+    under = blurred_below(doc, index, lay, s)
+    px1, py1 = min(px1, under.shape[1]), min(py1, under.shape[0])
+    if px1 <= px0 or py1 <= py0:
+        return
+    m = QImage(px1 - px0, py1 - py0, QImage.Format_ARGB32)
+    m.fill(Qt.transparent)
+    q = QPainter(m)
+    q.setRenderHint(QPainter.Antialiasing)
+    q.setTransform(t * QTransform().scale(s, s).translate(-px0 / s, -py0 / s))   # (lienzo → máscara, con la forma)
+    q.fillPath(_shape_path(lay), QColor(255, 255, 255))
+    q.end()
+    alpha = qimage_to_rgba(m)[..., 3].astype(np.float32) / 255.0
+    alpha = cv2.GaussianBlur(alpha, (0, 0), max(0.5, s))         # borde suave
+    out = np.dstack([under[py0:py1, px0:px1, :3], np.clip(alpha * 255, 0, 255).astype(np.uint8)])
+    p.drawImage(QRectF(px0 / s, py0 / s, (px1 - px0) / s, (py1 - py0) / s), rgba_to_qimage(out))
+
+
 def render(doc: dict, scale: float = 1.0) -> QImage:
     """La miniatura entera (para exportar o para la vista previa pequeña)."""
     W, H = int(doc["w"] * scale), int(doc["h"] * scale)
@@ -512,12 +691,16 @@ def render(doc: dict, scale: float = 1.0) -> QImage:
     p.setRenderHint(QPainter.SmoothPixmapTransform)
     p.scale(scale, scale)
     paint_background(p, doc)
-    for lay in doc["layers"]:
+    for i, lay in enumerate(doc["layers"]):
         if not lay.get("visible", True):
             continue
-        img, _w, _h = render_layer(lay)
         p.save()
         p.setOpacity(float(lay.get("opacity", 1.0)))
+        if lay.get("blur_area"):                 # 🌫 zona borrosa: lo de debajo, desenfocado
+            paint_blur_area(p, doc, i, lay, scale)
+            p.restore()
+            continue
+        img, _w, _h = render_layer(lay)
         p.setTransform(layer_transform(lay, img) * QTransform().scale(scale, scale))
         p.drawImage(0, 0, img)
         p.restore()

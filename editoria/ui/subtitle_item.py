@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, 
 from PySide6.QtWidgets import QGraphicsItem
 
 from ..core.model import SubtitleStyle
-from ..core.subtitles import Cue
+from ..core.subtitles import Cue, CueWord
 from ..export.ass_subtitles import metrics
 
 ANIM = 0.12  # duración de las animaciones de entrada/salida (s)
@@ -122,12 +122,40 @@ def paint_subtitle(p: QPainter, cue: Cue, style: SubtitleStyle, t: float, W: int
     p.restore()
 
 
+def word_rects(cue: Cue, style: SubtitleStyle, W: int, H: int) -> list[tuple[CueWord, QRectF]]:
+    """Dónde cae cada palabra del subtítulo: el mismo cálculo que paint_subtitle (sin la animación de entrada)."""
+    size, _outline, margin = metrics(style, H)
+    font = make_font(style, size)
+    fm = QFontMetricsF(font)
+    line_h = fm.height()
+    space = fm.horizontalAdvance(" ")
+    block_h = len(cue.lines) * line_h
+    if style.position == "top":
+        top = margin
+    elif style.position == "middle":
+        top = (H - block_h) / 2
+    else:
+        top = H - margin - block_h
+    out: list[tuple[CueWord, QRectF]] = []
+    for li, line in enumerate(cue.lines):
+        widths = [fm.horizontalAdvance(w.text) for w in line]
+        total = sum(widths) + space * (len(line) - 1)
+        x = (W - total) / 2
+        line_top = top + li * line_h
+        for w, wd in zip(line, widths):
+            out.append((w, QRectF(x, line_top, wd, line_h)))
+            x += wd + space
+    return out
+
+
 class SubtitleItem(QGraphicsItem):
     """Capa de subtítulos encima del video en el visor."""
 
     def __init__(self):
         super().__init__()
         self.setZValue(10)
+        # Caché en coordenadas del dispositivo: el texto se dibuja solo al cambiar (set_state/set_size lo invalidan)
+        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
         self._W, self._H = 1920, 1080
         self._cue: Cue | None = None
         self._style: SubtitleStyle | None = None
@@ -139,6 +167,28 @@ class SubtitleItem(QGraphicsItem):
         self._W, self._H = W, H
         self._key = None
         self.update()
+
+    def cue_words(self) -> list[CueWord]:
+        """Las palabras del subtítulo que se ve ahora (vacío si no hay ninguno)."""
+        return self._cue.words if (self._cue is not None and self._style is not None) else []
+
+    def word_at(self, pt: QPointF) -> tuple[CueWord, QRectF] | None:
+        """La palabra del subtítulo bajo el punto (escena) y su rectángulo; también vale el hueco entre palabras
+        dentro del texto (entonces, la más cercana en esa línea). None si el punto está fuera del texto."""
+        rects = word_rects(self._cue, self._style, self._W, self._H) if self.cue_words() else []
+        if not rects:
+            return None
+        pad = max(6.0, self._H * 0.008)
+        for w, r in rects:
+            if r.adjusted(-pad, -pad, pad, pad).contains(pt):
+                return w, r
+        box = QRectF()
+        for _w, r in rects:
+            box = box.united(r)
+        if not box.adjusted(-pad, -pad, pad, pad).contains(pt):
+            return None
+        same_line = [(w, r) for w, r in rects if r.top() <= pt.y() <= r.bottom()] or rects
+        return min(same_line, key=lambda wr: abs(wr[1].center().x() - pt.x()))
 
     def set_state(self, cue: Cue | None, style: SubtitleStyle | None, t: float):
         self._cue, self._style, self._t = cue, style, t
@@ -187,6 +237,7 @@ class TitlesItem(QGraphicsItem):
     def __init__(self):
         super().__init__()
         self.setZValue(9)
+        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)   # (se invalida en set_items y set_size)
         self._W, self._H = 1920, 1080
         self._items: list[tuple[dict, float, float]] = []
         self._key = None

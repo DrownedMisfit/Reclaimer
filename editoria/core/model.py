@@ -19,7 +19,8 @@ FORMAT_NAME = "editoria-project"
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".ts", ".mts", ".m2ts"}
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".aac", ".m4a", ".ogg", ".opus", ".wma", ".aiff", ".aif"}
-IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tif", ".tiff"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".jfif", ".jpe", ".bmp", ".webp", ".gif", ".tif", ".tiff"}   # (.jfif: las
+#   imágenes que Windows baja de internet con ese nombre son JPEG)
 
 KIND_VIDEO = "video"
 KIND_AUDIO = "audio"
@@ -295,6 +296,8 @@ class Project:
     compounds: dict = field(default_factory=dict)
     # ✏ Anotaciones del visor (no se exportan): [{"t": segundo, "dur": s, "color": "#e5413c", "strokes": [[x, y, …]]}]
     annotations: list[dict] = field(default_factory=list)
+    # Cortes de audio que diste por buenos («✓ Está bien así»): claves de core/cut_check.py (van al deshacer también)
+    cut_ok: list[str] = field(default_factory=list)
 
     def marked_range(self) -> tuple[float, float] | None:
         """(entrada, salida) si hay un tramo marcado válido. Falta una marca = desde el inicio / hasta el final."""
@@ -305,9 +308,15 @@ class Project:
         return (a, b) if b - a > 0.04 else None
 
     @classmethod
-    def new(cls) -> "Project":
+    def new(cls, minimal: bool = False) -> "Project":
         p = cls()
         p.fps = 60.0      # proyectos nuevos: 60 FPS (fluidez); los antiguos conservan los suyos
+        if minimal:       # proyecto nuevo de la ventana: una pista de video («V1») y una de audio («A1»)
+            p.tracks = [
+                Track(new_id(), TRACK_VIDEO, "V1"),
+                Track(new_id(), TRACK_AUDIO, "A1", fx={"eq": True, "compress": True}),
+            ]
+            return p
         p.tracks = [
             Track(new_id(), TRACK_VIDEO, "V2"),
             Track(new_id(), TRACK_VIDEO, "V1"),
@@ -332,6 +341,7 @@ class Project:
             "edits": json.loads(json.dumps(self.edits)),
             "compounds": json.loads(json.dumps(self.compounds)),
             "annotations": json.loads(json.dumps(self.annotations)),
+            "cut_ok": list(self.cut_ok),
         }
 
     def apply_timeline_state(self, s: dict) -> None:
@@ -350,6 +360,7 @@ class Project:
         self.edits = json.loads(json.dumps(s.get("edits") or []))
         self.compounds = json.loads(json.dumps(s.get("compounds") or {}))
         self.annotations = json.loads(json.dumps(s.get("annotations") or []))
+        self.cut_ok = [str(k) for k in (s.get("cut_ok") or [])]
 
     # ---- guardar / abrir ----
     def to_dict(self) -> dict:
@@ -375,6 +386,32 @@ class Project:
         p.thumbnails = dict(d.get("thumbnails", {}))
         p.mark_in, p.mark_out = (list(d.get("marks") or [None, None]) + [None, None])[:2]
         return p
+
+    def reparar_vinculos(self) -> int:
+        """Proyectos guardados con el fallo de «✂ Eliminar silencio» (cientos de trozos con UN mismo vínculo, que
+        al hacer clic selecciona toda la narración): dentro de cada vínculo con más de 2 clips, se agrupa por inicio
+        y duración (cada imagen con su sonido) y cada grupo recibe un vínculo propio; un grupo suelto queda sin vínculo.
+        Devuelve cuántos clips cambiaron."""
+        por_vinculo: dict[str, list[Clip]] = {}
+        for c in self.clips.values():
+            if c.link:
+                por_vinculo.setdefault(c.link, []).append(c)
+        cambiados = 0
+        for grupo in por_vinculo.values():
+            if len(grupo) <= 2:
+                continue
+            por_tiempo: dict[tuple, list[Clip]] = {}
+            for c in grupo:
+                por_tiempo.setdefault((round(c.start, 3), round(c.duration, 3)), []).append(c)
+            if len(por_tiempo) == 1:            # todos en el mismo sitio (p. ej. imagen + dos sonidos): está bien
+                continue
+            for miembros in por_tiempo.values():
+                nuevo = new_id() if len(miembros) > 1 else ""
+                for c in miembros:
+                    if c.link != nuevo:
+                        c.link = nuevo
+                        cambiados += 1
+        return cambiados
 
     # ---- consultas ----
     def duration(self) -> float:

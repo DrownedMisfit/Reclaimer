@@ -68,9 +68,21 @@ def used_ranges(project, media_id: str) -> list[tuple[float, float]]:
     return out
 
 
-def unused(project, media_id: str, scenes: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Las escenas que no salen: ningún clip cubre más de un 30 % de ellas."""
-    used = used_ranges(project, media_id)
+def used_by_media(project) -> dict[str, list[tuple[float, float]]]:
+    """Como used_ranges, para todos los archivos a la vez: una sola pasada por los clips (⚡ sin buscar pista a pista)."""
+    video_ids = {t.id for t in project.tracks if t.kind == TRACK_VIDEO}
+    out: dict[str, list[tuple[float, float]]] = {}
+    for c in project.clips.values():
+        if c.track_id in video_ids:
+            out.setdefault(c.media_id, []).append((float(c.source_in), float(c.source_in) + float(c.src_len)))
+    return out
+
+
+def unused(project, media_id: str, scenes: list[tuple[float, float]],
+           used: list[tuple[float, float]] | None = None) -> list[tuple[float, float]]:
+    """Las escenas que no salen: ningún clip cubre más de un 30 % de ellas. «used» si ya se tiene (used_by_media)."""
+    if used is None:
+        used = used_ranges(project, media_id)
     out = []
     for a, b in scenes:
         cover = sum(max(0.0, min(b, y) - max(a, x)) for x, y in used)

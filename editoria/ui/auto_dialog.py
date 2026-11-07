@@ -28,6 +28,7 @@ from ..core.subtitles import PRESETS as SUB_PRESETS
 from . import help as help_ui
 from .common import fmt_time
 from .jobs import BackgroundJob
+from .quick_review import pending_suggestions
 
 SR = 16000
 
@@ -127,6 +128,7 @@ class AutoDialog(QDialog):
                               "al decir «miren» ni subtítulos. Lo demás sí se hace.")
         self.do_tr.setChecked(bool(self.settings.value("auto/transcribe", True, type=bool)))
         lay.addWidget(self.do_tr)
+        from ..core import intro_outro as _io
         for key, label, on in (
                 ("clean", "Limpiar la voz (lo marcado en «Quitar»)", True),
                 ("broll", "Colocar B-roll que encaje con lo que dices", True),
@@ -135,7 +137,9 @@ class AutoDialog(QDialog):
                  True),
                 ("eq", "Aplicar tu ecualizador «Mi voz» y mejorar la voz", True),
                 ("subs", "Subtítulos dentro del video" + (" (a lo mucho 3 palabras, letra grande)" if short else ""), short),
-                ("audit", "Revisión final (pantallas negras, audio, planos largos…)", True)):
+                ("audit", "Revisión final (pantallas negras, audio, planos largos…)", True),
+                ("intro", "Poner mi intro y outro al final (las que elegiste en «🎬 Mi intro y mi outro»)",
+                 _io.configured(self.ctrl.project.format))):
             cb = QCheckBox(label)
             cb.setChecked(bool(self.settings.value(f"auto/{key}", on, type=bool)))
             self.opts[key] = cb
@@ -161,6 +165,11 @@ class AutoDialog(QDialog):
         self.btn_audit.hide()
         self.btn_audit.clicked.connect(self._open_audit)
         btns.addWidget(self.btn_audit)
+        self.btn_review = QPushButton("⚡ Revisar rápido con teclas…")
+        self.btn_review.setToolTip("Recorre una a una lo que la IA dejó pendiente y los cortes dudosos (Ctrl+Shift+Q)")
+        self.btn_review.hide()
+        self.btn_review.clicked.connect(self._open_review)
+        btns.addWidget(self.btn_review)
         btns.addStretch(1)
         self.btn_close = QPushButton("Cerrar")
         self.btn_close.clicked.connect(self._close_or_cancel)
@@ -505,6 +514,7 @@ class AutoDialog(QDialog):
         mat = self.material.currentData()
         st.prefer = dict((x[0], x[2]) for x in MATERIALS).get(mat, [])
         st.continuous = st.continuous and mat in ("mix", "gameplay")
+        st.images_overlay = True     # las imágenes van ENCIMA del B-roll (fondo desenfocado), no a pantalla completa
         words = subtitles.timeline_words(p, self.mid)
         topics = [(m.time, m.end or m.time, m.label) for m in p.markers if m.kind == "topic"]
         used: dict[str, int] = {}
@@ -512,25 +522,69 @@ class AutoDialog(QDialog):
             if p.track(c.track_id).kind == TRACK_VIDEO:
                 used[c.media_id] = used.get(c.media_id, 0) + 1
         vol = ai.clip_vol.value() / 100
+        taken: dict = {}             # tramos ya usados: ningún trozo de archivo se repite en el video
 
         und = ai.understanding_for_work()
 
         def work(progress, cancelled):
             u = und() if callable(und) else und
             slots = broll_selection.make_slots(words, st, topics)
-            return broll_selection.propose_understood(slots, clips, st, used, u, progress, cancelled)
+            return broll_selection.propose_understood(slots, clips, st, used, u, progress, cancelled, taken=taken)
 
         def done(slots):
             ai._show_slots(slots)   # también quedan en la pestaña IA ✨ para cambiar clips
-            items = first_version.broll_items(slots, self.ctrl.project.media)
+            items = first_version.broll_items(slots, self.ctrl.project.media, taken=taken)
             created = self.ctrl.insert_ranges(items, tid, "IA · B-roll automático", origin=ORIGIN_AI,
                                               only_gaps=True, volume=vol)
-            self.broll_ids = list(created) if isinstance(created, list) else []
+            p_ = self.ctrl.project       # solo los clips de VIDEO (no sus audios vinculados)
+            self.broll_ids = [i for i in (created if isinstance(created, list) else [])
+                              if i in p_.clips and p_.track(p_.clips[i].track_id).kind == TRACK_VIDEO]
             named = sum(1 for s_ in slots if s_.get("entity"))
             self.report.append(f"🎬 B-roll: {len(self.broll_ids)} planos (cada {st.min_len:g}–{st.max_len:g} s); "
                                f"en {named} muestra lo que nombras.")
+            # sin repetir trozos, el material puede no alcanzar: se dice cuántos segundos quedan sin imagen
+            if slots:
+                span = slots[-1]["end"]          # el B-roll cubre desde 0 hasta el final de la voz
+                cubierto = sum(self.ctrl.project.clips[i].duration for i in self.broll_ids
+                               if i in self.ctrl.project.clips)
+                if span - cubierto > 3.0:
+                    self.report.append(f"⚠ {span - cubierto:.0f} s de la voz sin B-roll: no hay más material "
+                                       "sin repetir trozos. Añade clips a la biblioteca y vuelve a ejecutar.")
+            self._place_overlays(slots, tid)
             return f"{len(self.broll_ids)} planos"
         self._bg(work, done, "🎬 Eligiendo B-roll para cada frase…")
+
+    def _place_overlays(self, slots: list[dict], btid: str) -> int:
+        """«Imágenes encima»: cada imagen elegida (broll_selection.pick_overlays) va en la pista de video justo encima
+        del B-roll, con fondo desenfocado y sombra; nunca a pantalla completa."""
+        picks = [(s["start"] + 0.3, s["overlay"]) for s in slots if s.get("overlay")]
+        if not picks:
+            return 0
+        p = self.ctrl.project
+        narr = {c.track_id for c in self._narr_clips()}
+        bi = p.track_index(btid)
+        above = [t for t in p.tracks if t.kind == TRACK_VIDEO and not t.locked and t.id not in narr
+                 and p.track_index(t.id) < bi]
+        if not above:                            # (proyecto nuevo con una sola pista de video: se crea «V2» encima)
+            made = self.ctrl.ensure_video_above(btid) if hasattr(self.ctrl, "ensure_video_above") else None
+            p = self.ctrl.project
+            t_ = p.track(made) if made else None
+            if t_ is None or t_.locked or t_.id in narr:
+                self.report.append("🖼 Sin pista de video encima del B-roll: las imágenes no se han colocado.")
+                return 0
+            above = [t_]
+        top = above[-1].id
+        n = 0
+        for t, mid in picks:
+            try:
+                if self.ctrl.add_image_overlay([mid], top, t):
+                    n += 1
+            except Exception as exc:  # noqa: BLE001 - una imagen que falla no para el resto
+                self.report.append(f"✗ imagen encima: {exc}")
+        if n:
+            self.report.append(f"🖼 {n} {'imagen' if n == 1 else 'imágenes'} encima del B-roll "
+                               "(fondo desenfocado y sombra).")
+        return n
 
     def _step_zooms(self):
         if not self._opt("zooms"):
@@ -602,10 +656,18 @@ class AutoDialog(QDialog):
             return self._skip("no hay B-roll")
         cuts = [c.start for c in p.clips_on(tid)]
         starts = []
+        if style in ("cinematic", "custom"):            # cada tema nuevo empieza con su plano (y su transición):
+            for m in p.markers:                         # si cae a mitad de un plano largo, el plano se parte ahí
+                if m.kind != "topic" or m.time <= 1.0 or first_version.snap_to_cuts(m.time, cuts) is not None:
+                    continue
+                c = next((c for c in p.clips_on(tid) if c.start + 1.5 < m.time < c.end - 1.5), None)
+                if c is not None and self.ctrl.split_at_times(c.id, [m.time], "IA · Plano nuevo en el tema"):
+                    cuts.append(m.time)
+            ids = [c.id for c in p.clips_on(tid)]
         for m in p.markers:
             if m.kind == "topic" and m.time > 1.0:
                 t = first_version.snap_to_cuts(m.time, cuts)
-                if t is not None:
+                if t is not None and t not in starts:
                     starts.append(t)
         ken = style in ("dynamic", "cinematic", "custom")
         dips = style in ("cinematic", "custom")
@@ -645,15 +707,22 @@ class AutoDialog(QDialog):
             p = self.ctrl.project
             if mt.duck_db is None:
                 self.ctrl.set_track_props(mt.id, "Bajar música al hablar", duck_db=-12.0)
-            items = first_version.music_items(p.media[music_id], 0.0, p.duration())
+            items = first_version.music_items_fit(p.media[music_id], 0.0, p.duration())   # por compases si hay ritmo
             created = self.ctrl.insert_ranges(items, mt.id, "IA · Música de fondo", origin=ORIGIN_AI,
                                               only_gaps=True, volume=0.35)
             if isinstance(created, list) and created:
-                first, last = self.ctrl.project.clips[created[0]], self.ctrl.project.clips[created[-1]]
-                ch = {first.id: {"fx": dict(first.fx or {}, fade_in=1.5)}}
-                ch.setdefault(last.id, {"fx": dict(last.fx or {})})["fx"]["fade_out"] = 2.5
-                if last.id == first.id:
-                    ch[first.id]["fx"].update(fade_in=1.5, fade_out=2.5)
+                tramos = sorted((self.ctrl.project.clips[i] for i in created if i in self.ctrl.project.clips),
+                                key=lambda c: c.start)
+                ch: dict = {}
+
+                def fx_of(c):
+                    return ch.setdefault(c.id, {"fx": dict(c.fx or {})})["fx"]
+                fx_of(tramos[0])["fade_in"] = 1.5
+                fx_of(tramos[-1])["fade_out"] = 2.5
+                for a, b in zip(tramos, tramos[1:]):   # la canción vuelve a empezar: fundido cruzado de 1,5 s
+                    if abs(b.start - a.end) < 0.05:
+                        fx_of(a)["fade_out"] = 1.5
+                        fx_of(b)["fade_in"] = 1.5
                 self.ctrl.batch_clip_props(ch, "Fundidos de la música")
                 notes.append("música (baja sola cuando hablas)")
         if not self.ctrl.project.loudnorm:
@@ -703,6 +772,7 @@ class AutoDialog(QDialog):
     def _step_audit(self):
         if not self._opt("audit"):
             return self._skip()
+        self.ctrl.ensure_timeline_peaks(wait=True)   # la revisión de cortes necesita la voz de cada clip
         issues, checked = run_audit(self.ctrl.project, self.ctrl.missing, self.ctrl.peaks, self.ctrl.clip_vecs)
         self.issues = issues
         warn = [i for i in issues if i.get("severity") in ("error", "warning")]
@@ -711,15 +781,53 @@ class AutoDialog(QDialog):
         self._next(f"{len(warn)} avisos" if warn else "todo bien")
 
     # ------------------------------------------------------------ final
+    def _poner_intro_outro(self):
+        """«Poner mi intro y outro» al final, dentro del mismo paso de deshacer."""
+        from ..core import intro_outro as _io
+        intro, outro = _io.get(self.ctrl.project.format)
+        if not (intro or outro):
+            return
+        try:
+            n = _io.place(self.ctrl, intro, outro)
+        except Exception as exc:  # noqa: BLE001 - si falla, el resto de la versión queda bien
+            self.report.append(f"✗ Mi intro y mi outro: {exc}")
+            return
+        self.report.append(f"🎬 Intro y outro: {n} pieza(s) puesta(s)." if n else
+                           "🎬 Intro y outro: ya estaban puestas.")
+
+    def _arreglar_cortes(self):
+        """Los cortes dudosos (líneas rojas) se arreglan solos con su sugerencia, dentro de este mismo paso de deshacer
+        (lo mismo que «✓ Aplicar todas las sugerencias» del panel de cortes, sin abrirlo)."""
+        from .cut_fix import aplicar_sugerencias
+        antes = self.win.timeline.refresh_cut_issues()
+        try:
+            hechos, quedan = aplicar_sugerencias(self.ctrl, self.win.timeline)
+        except Exception as exc:  # noqa: BLE001 - si falla, la versión queda como estaba
+            self.report.append(f"✗ Cortes dudosos: {exc}")
+            return
+        if antes:
+            self.report.append(f"✂ Cortes dudosos: {antes} al principio; {hechos} ajustes automáticos; "
+                               f"quedan {quedan} para revisar a mano.")
+
     def _finish(self, msg: str = ""):
         if not self.running:
             return
         self.running = False
+        if not msg:
+            self._arreglar_cortes()
+        if not msg and "intro" in self.opts and self.opts["intro"].isChecked():
+            self._poner_intro_outro()
         self.ctrl.undo_stack.endMacro()
         self.bar.setValue(1000 if not msg else self.bar.value())
         mins = (time.time() - self.t0) / 60
         p = self.ctrl.project
         head = msg or f"✓ Primera versión lista en {mins:.0f} min · {fmt_time(p.duration())} de video."
+        # Lo que queda por decidir: propuestas pendientes (no se aplicaron) y cortes de audio dudosos (líneas rojas)
+        n_sug = len(pending_suggestions(p))
+        n_cut = self.win.timeline.refresh_cut_issues()
+        if n_sug or n_cut:
+            self.report.append(f"⚡ Por revisar: {n_sug} propuesta(s) pendiente(s) y {n_cut} corte(s) de audio dudoso(s).")
+        self.btn_review.setVisible(bool(n_sug or n_cut))
         self.status.setText(head + "\n" + "\n".join(self.report) +
                             "\n\nRevísala en el visor; todo se puede cambiar, y Ctrl+Z la deshace entera.")
         self.btn_close.setText("Cerrar")
@@ -727,6 +835,11 @@ class AutoDialog(QDialog):
         self.btn_go.setText("✓ Hecho" if not msg else "Detenido")
         self.win.timeline.fit()
         self.win.engine.seek(0.0)
+
+    def _open_review(self):
+        """Cierra este resumen y abre la ⚡ Revisión rápida (que no es modal, así que no puede ir debajo de este diálogo)."""
+        self.accept()
+        QTimer.singleShot(0, self.win.open_quick_review)
 
     def _open_audit(self):
         self.win.open_audit()

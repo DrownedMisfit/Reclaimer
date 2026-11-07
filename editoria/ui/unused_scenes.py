@@ -99,7 +99,8 @@ class UnusedScenes(QWidget):
             self.count.setText("")
             self.info.setText("Importa videos en Medios para ver sus escenas.")
             return
-        used = {mid: SP.used_ranges(p, mid) for mid, _p, _d in vids}
+        usados = SP.used_by_media(p)
+        used = {mid: usados.get(mid, []) for mid, _p, _d in vids}
 
         def work(progress, cancelled, partial):
             for i, (mid, path, dur) in enumerate(vids):
@@ -143,8 +144,9 @@ class UnusedScenes(QWidget):
     def unused_list(self) -> list[tuple[str, float, float]]:
         p = self.ctrl.project
         out = []
+        usados = SP.used_by_media(p)           # una pasada por los clips para todos los archivos
         for m in SP.video_media(p, self.ctrl.missing):
-            for a, b in SP.unused(p, m.id, self.scenes.get(m.id, [])):
+            for a, b in SP.unused(p, m.id, self.scenes.get(m.id, []), usados.get(m.id, [])):
                 out.append((m.id, a, b))
         return out
 

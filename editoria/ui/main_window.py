@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayo
 from .. import APP_NAME, __version__
 from ..core.controller import ProjectController
 from ..core import transform
-from ..core.model import TRACK_AUDIO, TRACK_VIDEO
+from ..core.model import FORMATS, TRACK_AUDIO, TRACK_VIDEO
 from ..core.paths import autosave_path, session_lock_path
 from .ai_manager import ClipAnalysisManager
 from .audio_monitor import AudioMonitor
@@ -24,11 +24,13 @@ from .common import fmt_tc
 from .help import set_help
 from .inspector import InspectorPanel
 from .library import LibraryPanel
-from .preview import PlaybackEngine, PreviewPanel
+from .preview import PlaybackEngine, PreviewPanel, decodificar_grafica
 from .subtitles_panel import SubtitlesPanel
 from .timeline import TimelineWidget
 from .transcript_panel import TranscriptPanel
 from .voice_panel import VoicePanel
+from . import intro_outro_dialog
+from .hint_marks import set_source as marcas_set
 
 PROJECT_FILTER = "Proyecto de Reclaimer (*.eia)"
 AUTOSAVE_MS = 60_000
@@ -107,6 +109,7 @@ class MainWindow(QMainWindow):
         self.library = LibraryPanel(self.ctrl, self.analyzer)
         self.preview = PreviewPanel()
         self.preview.title_label.renamed.connect(lambda n: self.ctrl.rename_project(n))
+        self.workspaces.switched.connect(self.preview.set_guides_space)   # ▦ guías de cada pestaña (Edits/Shorts: 9:16)
         self.engine = PlaybackEngine(self.ctrl, self.preview, self)
         self.inspector = InspectorPanel(self.ctrl, self.engine)
         help_ui.install(QApplication.instance())
@@ -159,6 +162,11 @@ class MainWindow(QMainWindow):
         from .moments_panel import MomentsPanel
         self.effects = EffectsPanel(self.ctrl, self.engine, self.timeline)
         self.moments = MomentsPanel(self.ctrl, self.engine, self.timeline)
+        from .clips_panel import ClipsPanel           # 🎬 «Dijiste Fortnite en 0:12» → tráileres y gameplay para bajar
+        self.clips = ClipsPanel(self.ctrl, self.timeline)
+        self.clips.seek_requested.connect(self.engine.user_seek)
+        self.clips.hints_changed.connect(lambda m: marcas_set(self.timeline, "clips", m))   # 🎬 marcas de «Dijiste…»
+        self.transcript.search_marks_changed.connect(lambda m: marcas_set(self.timeline, "buscar", m))   # 🔎 Buscar
         self.timeline.moments_requested.connect(self.open_moments)
         self.timeline.gap_ai_requested.connect(self._gap_ai)
         self.timeline.similar_requested.connect(self.find_similar)
@@ -196,6 +204,7 @@ class MainWindow(QMainWindow):
         self._dock("effects", "Efectos", self.effects)
         self._dock("ai", "IA ✨", self.ai_panel)
         self._dock("moments", "🔎 Momentos", self.moments)
+        self._dock("clips", "🎬 Clips", self.clips)
         self._dock("inspector", "Inspector", self.inspector)
         self._dock("voice", "Limpieza", self.voice)
         self._dock("transcript", "Texto", self.transcript)
@@ -210,6 +219,9 @@ class MainWindow(QMainWindow):
         from .task_window import TasksPanel, manager
         self.tasks_panel = TasksPanel(self)
         self._dock("tasks", "◈ Tareas de la IA", self.tasks_panel)
+        from .guided_panel import GuidedPanel      # 🧭 Montaje guiado: los pasos de un montaje (página propia)
+        self.guided = GuidedPanel(self)
+        self._dock("guided", "🧭 Montaje guiado", self.guided)
         manager().open_panel.connect(self.open_tasks)
         self.docks["guide"].toggleViewAction().toggled.connect(lambda on: on or self.guide.clear())
         self.right_tabs = _PanelSwitcher(self)   # compatibilidad: right_tabs.setCurrentWidget(panel)
@@ -263,6 +275,7 @@ class MainWindow(QMainWindow):
         self.preview.canvas.pick_clip_cb = self._clip_on_track_now
         self.preview.canvas.layer_picked.connect(self._pick_from_viewer)
         self.preview.canvas.transform_done.connect(self._tf_done)
+        self.preview.canvas.subtitle_edit.connect(self._subtitle_edit_from_viewer)
         self.engine.time_changed.connect(lambda _t: self._update_transform_edit())
         self.ctrl.project_changed.connect(self._update_transform_edit)
         self.ctrl.project_changed.connect(lambda: self._update_region_edit())
@@ -270,8 +283,11 @@ class MainWindow(QMainWindow):
         self.voice.media_selected.connect(self.transcript.set_media)
         self.voice.cut_rules_changed.connect(self.transcript.refresh)
         self.voice.suggestion_selected.connect(self.timeline.set_highlight_suggestion)
+        self.voice.quick_review_requested.connect(self.open_quick_review)
         self.transcript.set_media(self.voice.media_id() or "")
         self.library.add_requested.connect(self._add_at_playhead)
+        self.library.add_at_times_requested.connect(self._add_at_times)          # 🔑 en las palabras clave
+        self.library.keyword_target = lambda: self.timeline.keyword_target(self.engine.time)
         self.library.add_moment_requested.connect(self._add_moment)
         self.library.example_requested.connect(
             lambda mid, t: (self.show_panel(self.moments), self.moments.example_from_media(mid, t)))
@@ -428,12 +444,63 @@ class MainWindow(QMainWindow):
             lambda ids, sens: self.cut_scenes(ids, sens.replace("+marcas", ""), sens.endswith("+marcas")))
         self.timeline.topics_requested.connect(self.open_topics_tool)
         self.library.keywords_requested.connect(lambda mids: self.open_keywords(mids))
+        self.library.obs_marks_requested.connect(lambda mids: self.read_obs_marks(mids))
         self.preview.canvas.comp_drop.connect(self._comp_drop)
+        # ⚠ Cortes de audio que pueden estar mal (líneas rojas): contador y ◀ ▶ para ir de uno a otro
+        self.cut_fix = None                     # el panel de ajuste (se crea la primera vez)
+        self.cut_badge = QLabel("")
+        self.cut_badge.setStyleSheet("color: #ff3b30; font-weight: bold;")
+        self.cut_badge.setToolTip("Cortes de audio que pueden estar mal: se comieron parte de una palabra, quedaron "
+                                  "pegados a ella o suenan con la voz todavía sonando.\n"
+                                  "La línea roja marca cada uno: clic en ella para revisarlo y ajustarlo.")
+        lay.addWidget(self.cut_badge)
+        from .cut_fix import conectar_clic
+        conectar_clic(self.cut_badge, lambda: self._open_cut_issue(0))     # clic en el texto: lista de cortes
+        self.btn_cut_prev = btn("◀", "Corte de audio anterior (Alt+←)", lambda: self._go_cut(-1))
+        self.btn_cut_next = btn("▶", "Corte de audio siguiente (Alt+→)", lambda: self._go_cut(1))
+        self.timeline.cut_issues_changed.connect(self._sync_cut_badge)
+        self.timeline.cut_issue_clicked.connect(self._open_cut_issue)
+        self._sync_cut_badge(0)
         lay.addStretch()
         btn("−", "Alejar (−)", lambda: self.timeline.zoom(1 / 1.5))
         btn("+", "Acercar (+)", lambda: self.timeline.zoom(1.5))
         btn("⤢", "Ver toda la timeline (Ctrl+0)", self.timeline.fit)
         return bar
+
+    def _sync_cut_badge(self, n: int):
+        """⚠ N cortes: el contador y ◀ ▶ solo se ven si hay alguno que revisar."""
+        self.cut_badge.setText(f"⚠ {n} corte{'s' if n != 1 else ''}" if n else "")
+        for w in (self.cut_badge, self.btn_cut_prev, self.btn_cut_next):
+            w.setVisible(n > 0)
+
+    def _go_cut(self, step: int):
+        """◀ ▶ (Alt+← / Alt+→): lleva el cabezal al corte de audio anterior o siguiente y abre su ajuste."""
+        issues = self.timeline.cut_issues
+        if not issues:
+            self.ctrl.message.emit("No hay cortes de audio que revisar.")
+            return
+        now = self.engine.time
+        order = sorted(range(len(issues)), key=lambda k: issues[k]["t"])
+        if step > 0:
+            cand = [k for k in order if issues[k]["t"] > now + 0.02] or order[:1]     # al pasar del último, vuelve
+            k = cand[0]
+        else:
+            cand = [k for k in order if issues[k]["t"] < now - 0.02] or order[-1:]
+            k = cand[-1]
+        t = issues[k]["t"]
+        self.engine.user_seek(t)
+        self.timeline.set_playhead(t, follow=True)
+        self._open_cut_issue(k)
+
+    def _open_cut_issue(self, k: int):
+        """Abre (o recoloca) el panel de ajuste del corte k de la línea de tiempo."""
+        issues = self.timeline.cut_issues
+        if not (0 <= k < len(issues)):
+            return
+        if self.cut_fix is None:
+            from .cut_fix import CutFixPanel
+            self.cut_fix = CutFixPanel(self)
+        self.cut_fix.show_issue(issues[k]["track_id"], issues[k]["t"])
 
     def _sync_vh_menu(self):
         for a in self.vh_actions:
@@ -472,6 +539,8 @@ class MainWindow(QMainWindow):
         self.docks[key] = d
         return d
 
+    _OCULTOS_AL_INICIO = ("guide", "tasks", "guided")     # se abren cuando se pide (Ventana o su página)
+
     def _default_layout(self):
         """Distribución inicial (como en Resolve): [Medios] | [Visor] | [Inspector] arriba y la línea de
         tiempo sola abajo, a todo lo ancho. Junto a la línea de tiempo no hay nada por defecto: si
@@ -486,15 +555,19 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(d["media"], d["effects"])
         self.tabifyDockWidget(d["media"], d["ai"])
         self.tabifyDockWidget(d["media"], d["moments"])
+        self.tabifyDockWidget(d["media"], d["clips"])
         self.addDockWidget(Qt.RightDockWidgetArea, d["inspector"])
         for k in ("voice", "transcript", "subtitles", "history", "scopes"):
             self.tabifyDockWidget(d["inspector"], d[k])
+        # 🧭 Montaje guiado: debajo del inspector (a la derecha), así se ve a la vez que 🎬 Clips (a la izquierda)
+        self.addDockWidget(Qt.RightDockWidgetArea, d["guided"])
+        self.splitDockWidget(d["inspector"], d["guided"], Qt.Vertical)
         # La guía flota aparte (así nunca tapa ni oculta la opción que te está enseñando)
         self.addDockWidget(Qt.RightDockWidgetArea, d["tasks"])   # al lado; se puede soltar y arrastrar
         self.addDockWidget(Qt.RightDockWidgetArea, d["guide"])
         d["guide"].setFloating(True)
         for key, dock in d.items():
-            dock.setVisible(key not in ("guide", "tasks"))
+            dock.setVisible(key not in self._OCULTOS_AL_INICIO)
         d["media"].raise_()
         d["inspector"].raise_()
         self.resizeDocks([d["media"], d["inspector"]], [380, 440], Qt.Horizontal)
@@ -503,7 +576,7 @@ class MainWindow(QMainWindow):
     def reset_layout(self):
         self.restoreState(self._default_state, 3)
         for key, dock in self.docks.items():
-            dock.setVisible(key not in ("guide", "tasks"))
+            dock.setVisible(key not in self._OCULTOS_AL_INICIO)
         self.docks["media"].raise_()
         self.docks["inspector"].raise_()
         QTimer.singleShot(0, self._apply_dock_sizes)
@@ -635,6 +708,7 @@ class MainWindow(QMainWindow):
         return bar
 
     PAGES = [("media", "🗂", "Medios"), ("effects", "✦", "Efectos"), ("edit", "🎞", "Editar"),
+             ("guided", "🧭", "Montaje guiado"),
              ("fairlight", "🎚", "Audio"), ("ai", "✨", "IA"), ("thumb", "🖼", "Miniatura"), ("deliver", "🚀", "Entrega")]
 
     def _page_bar(self) -> QWidget:
@@ -681,6 +755,9 @@ class MainWindow(QMainWindow):
         elif key == "edit":
             self.show_panel(self.library)
             self.show_panel(self.inspector)
+        elif key == "guided":
+            self.show_panel(self.guided)
+            self.show_panel(self.clips)         # a la izquierda; el guiado, a la derecha: se ven a la vez
         elif key == "fairlight":
             sel = list(self.inspector._ids)   # una imagen con su sonido vinculado cuenta como uno
             c = self.ctrl.project.clips.get(sel[0]) if len(sel) == 1 else None
@@ -746,9 +823,14 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("&Archivo")
         act(m, "Nuevo proyecto", "Ctrl+N", self.new_project)
+        self.menu_templates = m.addMenu("Nuevo desde plantilla ▸")      # 📋 plantillas de proyecto
+        self.menu_templates.setToolTip("Proyecto nuevo con el formato, las pistas y el estilo de subtítulos de una "
+                                       "plantilla (sin clips ni medios).")
+        self.menu_templates.aboutToShow.connect(self._fill_templates_menu)
         act(m, "Abrir proyecto…", "Ctrl+O", self.open_project)
         act(m, "Guardar", "Ctrl+S", self.save)
         act(m, "Guardar como…", "Ctrl+Shift+S", self.save_as)
+        act(m, "📋 Guardar como plantilla…", None, self.save_as_template)
         act(m, "Guardar nueva versión (v01, v02…)", "Ctrl+Alt+S", self.save_version)
         act(m, "💾 Guardado y copias de seguridad…", None, lambda: self.saving.open_settings())
         act(m, "⟲ Recuperar una copia de seguridad…", None, lambda: self.saving.open_settings())
@@ -758,6 +840,9 @@ class MainWindow(QMainWindow):
         act(m, "🎬 Ir a la pestaña YouTube", "Ctrl+1", lambda: self.workspaces.switch("youtube"))
         act(m, "🎵 Ir a la pestaña Edits", "Ctrl+2", lambda: self.workspaces.switch("edit"))
         act(m, "📱 Ir a la pestaña Shorts", "Ctrl+3", lambda: self.workspaces.switch("short"))
+        self.menu_move = m.addMenu("↪ Mover este proyecto a")          # cambia su formato y lo lleva a otra pestaña
+        self.menu_move.setToolTip("Lleva el proyecto actual a otra pestaña (cambia su formato). Ctrl+Z lo devuelve.")
+        self.menu_move.aboutToShow.connect(lambda: self.workspaces.fill_move_menu(self.menu_move))
         m.addSeparator()
         act(m, "Importar archivos…", "Ctrl+I", self.library.import_files_dialog)
         act(m, "Importar carpeta…", "Ctrl+Shift+I", self.library.import_folder_dialog)
@@ -766,7 +851,7 @@ class MainWindow(QMainWindow):
         act(m, "🚀 Cola de exportación…", "Ctrl+Shift+E", self.open_queue)
         act(m, "🖼 Crear miniatura…", "Ctrl+Shift+M", self.open_thumbnail)
         act(m, "📸 Exportar este fotograma (PNG)", "Ctrl+Alt+G", self.export_frame)
-        act(m, "📑 Capítulos para YouTube…", "Ctrl+Shift+K", self.open_chapters)
+        act(m, "📝 Descripción para YouTube (capítulos, créditos…)", "Ctrl+Shift+K", self.open_chapters)
         m.addSeparator()
         act(m, "Salir", "Ctrl+Q", self.close)
 
@@ -787,7 +872,16 @@ class MainWindow(QMainWindow):
         act(m, "Pegar e insertar", "Ctrl+Shift+V", self._paste_insert)
         act(m, "Cortar y propagar", "Ctrl+Shift+X", self._cut_ripple)
         act(m, "Insertar espacio", None, self._insert_gap)
+        from .music_fit_ui import add_music_fit_menu      # 🎵 Ajustar la música a la duración / selección
+        add_music_fit_menu(self, m)
+        m.addSeparator()
+        act(m, "🔖 Leer marcas de OBS", None, lambda: self.read_obs_marks(),
+            "Pone como marcadores rojos los capítulos que pusiste con una tecla mientras grababas en OBS")
+        act(m, "🔖 Fallos marcados…", None, lambda: self.open_obs_fallos(),
+            "Lista de fallos marcados en OBS: quita cada frase equivocada con un clic")
         act(m, "Eliminar atributos…", None, self._remove_attributes)
+        act(m, "🎬 Mi intro y mi outro…", None, lambda: intro_outro_dialog.open_dialog(self))
+        act(m, "➕ Poner mi intro y outro", None, lambda: intro_outro_dialog.put_now(self))
         m.addSeparator()
         act(m, "Activar / desactivar clip", "D", self._toggle_enabled)
         act(m, "Cambiar duración…", "Ctrl+D", self._change_duration)
@@ -848,14 +942,27 @@ class MainWindow(QMainWindow):
             self.proxy_actions[lv] = a
         self.proxy_actions[self.proxies.level].setChecked(True)
         pm.addSeparator()
-        a_auto = pm.addAction("Preparar copias ligeras solo (también en «Completa»)")
+        a_auto = pm.addAction("Tener las copias ligeras listas también en «Completa»")
         a_auto.setCheckable(True)
-        a_auto.setChecked(self.proxies.auto)
-        a_auto.setToolTip("En segundo plano se hacen las copias «Media» y «Un cuarto» de tus videos: al cambiar de "
-                          "calidad ya están listas. Ocupan algo de disco (en datos\\cache\\proxies).")
-        a_auto.toggled.connect(self.proxies.set_auto)
+        a_auto.setChecked(self.proxies.extra)
+        a_auto.setToolTip("Apagado (normal): solo se hacen las copias de la calidad que eliges, cuando la eliges (así "
+                          "no se gasta nada si reproduces en «Completa»). Encendido: la copia «Media» de tus videos se "
+                          "prepara de antemano en segundo plano. Ocupan algo de disco (en datos\\cache\\proxies).")
+        a_auto.toggled.connect(self.proxies.set_extra)
+        pm.addSeparator()
+        a_gpu = pm.addAction("Decodificar el video con la tarjeta gráfica")
+        a_gpu.setCheckable(True)
+        a_gpu.setChecked(decodificar_grafica())
+        a_gpu.setToolTip("Activado: menos CPU, pero un pequeño parón al abrir cada archivo. Desactivado: más suave al "
+                         "cambiar de clip, usa más CPU. Se aplica al reiniciar Reclaimer.")
+        a_gpu.toggled.connect(lambda on: QSettings("EditorIA", "EditorIA").setValue(
+            "reproduccion/decodificar_grafica", bool(on)))
         m.addSeparator()
         act(m, "Reproducir / pausar", "Space", self.engine.toggle)
+        self.act_second = act(m, "🖥 Visor en la segunda pantalla", "F11", self.toggle_second_screen,
+                              tip="Muestra el visor, grande y sin controles, en el otro monitor (Esc para cerrarlo)")
+        self.act_second.setCheckable(True)
+        QTimer.singleShot(0, self._restore_second_screen)
         act(m, "Hacia atrás (J: otra vez = más rápido)", "J", lambda: self.engine.jkl("j"))
         act(m, "Parar (K)", "K", lambda: self.engine.jkl("k"))
         act(m, "Hacia delante (L: otra vez = más rápido)", "L", lambda: self.engine.jkl("l"))
@@ -867,12 +974,16 @@ class MainWindow(QMainWindow):
         act(m, "Fotograma siguiente", "Right", lambda: self.engine.step(1))
         act(m, "Ir al inicio", "Home", lambda: self.engine.seek(0))
         act(m, "Ir al final", "End", lambda: self.engine.seek(self.ctrl.project.duration()))
+        act(m, "Corte de audio anterior (línea roja)", "Alt+Left", lambda: self._go_cut(-1))
+        act(m, "Corte de audio siguiente (línea roja)", "Alt+Right", lambda: self._go_cut(1))
 
         m = mb.addMenu("&Voz")
         act(m, "Transcribir y analizar la narración", "Ctrl+T",
             lambda: (self.right_tabs.setCurrentWidget(self.voice), self.voice.transcribe()))
         act(m, "Volver a analizar (silencios, muletillas…)", "Ctrl+Shift+T",
             lambda: (self.right_tabs.setCurrentWidget(self.voice), self.voice.analyze()))
+        act(m, "🔎 Buscar en lo que dijiste", "Ctrl+Alt+F",           # (Ctrl+F ya es de «Buscar clips por contenido»)
+            lambda: (self.right_tabs.setCurrentWidget(self.transcript), self.transcript.focus_search()))
         act(m, "Ver transcripción", None, lambda: self.right_tabs.setCurrentWidget(self.transcript))
         act(m, "Estilo de subtítulos", None, lambda: self.right_tabs.setCurrentWidget(self.subtitles))
         act(m, "Exportar subtítulos (.srt)…", None, self.transcript.export_srt)
@@ -894,12 +1005,18 @@ class MainWindow(QMainWindow):
         act(m, "🎬 Proponer B-roll", None,
             lambda: (self.right_tabs.setCurrentWidget(self.ai_panel), self.ai_panel.propose()))
         act(m, "🔬 Entender mi biblioteca a fondo…", None, self.open_understand)
+        act(m, "◈ Analizar a fondo lo seleccionado en Medios", None, self.analyze_selected_full)
         act(m, "🔎 Buscar momentos en mis medios…", "Ctrl+Shift+F", lambda: self.open_moments(""))
         act(m, "⧉ Comparación…", None, self.open_compare)
         act(m, "🎵 Crear edit musical…", "Ctrl+M", self.open_edit_maker)
         act(m, "⚕ Revisar el proyecto…", "Ctrl+R", self.open_audit)
+        act(m, "⚡ Revisión rápida con teclas…", "Ctrl+Shift+Q", self.open_quick_review)
+        act(m, "✂ Shorts desde este video…", None, lambda: __import__(
+            "editoria.ui.shorts_dialog", fromlist=["open_shorts_dialog"]).open_shorts_dialog(self))
         m.addSeparator()
         act(m, "✨ Primera versión automática…", "Ctrl+Shift+A", self.open_auto)
+        act(m, "📜 Montaje desde el guion…", None, lambda: __import__(
+            "editoria.ui.script_dialog", fromlist=["open_script_dialog"]).open_script_dialog(self))
         act(m, "Buscar clips por contenido", "Ctrl+F",
             lambda: (self.library.btn_ai_search.setChecked(True), self.library.search.setFocus()))
 
@@ -970,8 +1087,8 @@ class MainWindow(QMainWindow):
         act(m, "🔓 Desbloquear toda la timeline", None, lambda: self.ctrl.lock_all_tracks(False))
 
         m = mb.addMenu("&Ventana")
-        for key in ("media", "effects", "ai", "moments", "inspector", "voice", "transcript", "subtitles", "history",
-                    "scopes", "guide", "timeline"):
+        for key in ("media", "effects", "ai", "moments", "clips", "inspector", "voice", "transcript", "subtitles", "history",
+                    "scopes", "guided", "guide", "timeline"):
             m.addAction(self.docks[key].toggleViewAction())
         m.addSeparator()
         act(m, "Restablecer la distribución de paneles", None, self.reset_layout)
@@ -1197,6 +1314,14 @@ class MainWindow(QMainWindow):
         if n:
             self.statusBar().showMessage(f"🔊 Volumen normalizado en {n} clip(s). Ctrl+Z lo deshace.", 6000)
 
+    def analyze_selected_full(self):
+        """◈ Analizar a fondo: forma de onda, ritmo y lo demás de los medios seleccionados en Medios (a petición)."""
+        ids = self.library.selected_media_ids()
+        if not ids:
+            self.statusBar().showMessage("Selecciona antes uno o varios archivos en 🗂 Medios.", 6000)
+            return
+        self.ctrl.analyze_full(ids)
+
     def _find_in_media(self):
         sel = self._sel_or_msg()
         c = self.ctrl.project.clips.get(sel[0]) if sel else None
@@ -1298,6 +1423,53 @@ class MainWindow(QMainWindow):
         created = self.ctrl.add_media(ids, None, self.engine.time)
         if isinstance(created, list):
             self.timeline.set_selection(created)
+
+    def _pregunta_modo_palabra(self, una_marca: bool) -> str | None:
+        """🔑 Pregunta cómo poner el video en la(s) marca(s): «partes», «entero» o None (cancelar)."""
+        from ..core.model import KIND_VIDEO as _KV
+        box = QMessageBox(self)
+        box.setWindowTitle("Poner el video")
+        if una_marca:
+            box.setText("¿Cómo lo pongo en esta marca?")
+            b1 = box.addButton("Un trozo (lo que dura la frase)", QMessageBox.AcceptRole)
+            b1.setToolTip("Un trozo del video, de la duración de la frase que se dice en esa marca (2 a 6 s).")
+            b2 = box.addButton("Entero (hasta la siguiente marca o el final)", QMessageBox.AcceptRole)
+            b2.setToolTip("Desde el principio del video (tras los logos) hasta la siguiente marca de esa palabra, "
+                          "el final del video o el de la línea de tiempo, lo que llegue antes.")
+        else:
+            box.setText("¿Cómo lo pongo en cada marca?")
+            b1 = box.addButton("Por partes (recomendado)", QMessageBox.AcceptRole)
+            b1.setToolTip("En cada marca va un trozo distinto y seguido del video, con la duración de la frase "
+                          "que se dice ahí (2 a 6 s). Ningún tramo se repite; si no caben, se omiten y se avisa.")
+            b2 = box.addButton("Entero (hasta la siguiente marca)", QMessageBox.AcceptRole)
+            b2.setToolTip("En cada marca, el video desde su principio (tras los logos) hasta la siguiente marca de "
+                          "esa palabra, el final del video o el de la línea de tiempo, lo que llegue antes.")
+        cancelar = box.addButton("Cancelar", QMessageBox.RejectRole)
+        cancelar.setToolTip("No pone nada.")
+        box.setDefaultButton(b1)
+        box.exec()
+        pulsado = box.clickedButton()
+        if pulsado is b1:
+            return "partes"
+        if pulsado is b2:
+            return "entero"
+        return None
+
+    def _add_at_times(self, ids, times, text: str = ""):
+        """🔑 Como «Añadir a la timeline (en el cabezal)», pero en cada marca de palabra clave (un solo Ctrl+Z).
+        Si hay videos, pregunta primero cómo ponerlos (por partes o entero)."""
+        from ..core.model import KIND_VIDEO as _KV
+        modo = "partes"
+        if any(self.ctrl.project.media.get(i) is not None and self.ctrl.project.media[i].kind == _KV for i in ids):
+            modo = self._pregunta_modo_palabra(len(set(times)) <= 1)
+            if modo is None:
+                return
+        created = self.ctrl.add_media_at_times(ids, times, text, modo=modo)
+        if isinstance(created, list) and created:
+            self.timeline.set_selection(created)
+            n = len(times)
+            self.statusBar().showMessage(f"🔑 Añadido en {n} sitio{'s' if n != 1 else ''}. Ctrl+Z lo deshace de "
+                                         "una vez.", 6000)
 
     def _add_moment(self, media_id: str, moment: float):
         """Añade un clip empezando un poco antes de su mejor momento (resultado de la búsqueda IA)."""
@@ -1660,6 +1832,15 @@ class MainWindow(QMainWindow):
                                              "suaves»).", 8000)
         manager().start("✂ Cambios de escena", work, done, lambda m: self.statusBar().showMessage("✗ " + m, 8000))
 
+    def read_obs_marks(self, media_ids: list | None = None):
+        """🔖 Marcas de OBS (capítulos del MP4) → marcadores rojos; ver ui/obs_marks_ui.py."""
+        from .obs_marks_ui import leer_marcas
+        leer_marcas(self, media_ids or None)
+
+    def open_obs_fallos(self):
+        from .obs_marks_ui import abrir_fallos
+        abrir_fallos(self)
+
     def open_keywords(self, media_ids: list | None = None, scope: str = "timeline"):
         """🔑 Buscar palabras clave en el audio (ligero)."""
         from .keywords_dialog import KeywordsDialog
@@ -1712,8 +1893,8 @@ class MainWindow(QMainWindow):
 
     def open_chapters(self):
         """📑 Capítulos para la descripción de YouTube (desde los marcadores o los temas)."""
-        from .chapters_dialog import ChaptersDialog
-        ChaptersDialog(self).exec()
+        from .description_dialog import DescriptionDialog
+        DescriptionDialog(self).exec()
 
     def export_frame(self):
         """📸 El fotograma del cabezal como PNG, tal como saldrá en el video (y copiado al portapapeles)."""
@@ -1891,7 +2072,8 @@ class MainWindow(QMainWindow):
         """Más impacto visual solo en esos clips: zooms de golpe en los cortos, zoom lento en los largos."""
         from ..ai.first_version import cinematic_changes
         p = self.ctrl.project
-        changes = cinematic_changes(p, clip_ids, [], ken=True, dips=False, fade_ends=False, punch_every=2)
+        changes = cinematic_changes(p, clip_ids, [], ken=True, dips=False, fade_ends=False,
+                                    punch_every=1)   # (lo elegido, TODO con impacto: zoom de golpe a cada clip corto)
         if not changes:
             self.ctrl.message.emit("Esos clips ya tienen zoom: quítalo antes (Inspector → Video) si quieres otro.")
             return
@@ -2454,6 +2636,9 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         def go(key):
+            from .audit_dialog import revision_previa
+            if not revision_previa(self):
+                return
             w, h = target_size(key, p.width, p.height)
             t = TARGETS[key]
             name = p.name + (f" - {t['suffix']}" if t["suffix"] else "")
@@ -2483,20 +2668,80 @@ class MainWindow(QMainWindow):
         dlg.raise_()
 
     def export(self):
-        """Antes de exportar se revisa el proyecto; si hay posibles problemas se muestran."""
-        from ..ai.audit import run_audit
-        from .audit_dialog import AuditDialog
-        self.engine.pause()
-        issues, _n = run_audit(self.ctrl.project, self.ctrl.missing, self.ctrl.peaks, self.ctrl.clip_vecs)
-        if any(i["severity"] in ("error", "warning") for i in issues):
-            if not AuditDialog(self.ctrl, self.engine, self.timeline, self, before_export=True).exec():
-                return
-        ExportDialog(self.ctrl, self).exec()
+        """Antes de exportar se revisa el proyecto; si hay avisos importantes se muestran (audit_dialog.revision_previa)."""
+        from .audit_dialog import revision_previa
+        if revision_previa(self):
+            ExportDialog(self.ctrl, self).exec()
 
     def open_audit(self):
         from .audit_dialog import AuditDialog
         self.engine.pause()
         AuditDialog(self.ctrl, self.engine, self.timeline, self).exec()
+
+    def open_quick_review(self):
+        """⚡ Revisión rápida con teclas (Ctrl+Shift+Q): propuestas de la IA y cortes dudosos, uno a uno. No es modal."""
+        from .quick_review import QuickReview
+        if self.voice.job is not None or self.ai_panel.job is not None:
+            QMessageBox.information(self, "Revisión rápida", "Espera a que termine la tarea de IA que está en marcha.")
+            return
+        if getattr(self, "quick_review", None) is None:
+            self.quick_review = QuickReview(self)
+        self.quick_review.start()
+
+    # ------------------------------------------------------- 📋 plantillas de proyecto
+    def _fill_templates_menu(self):
+        from ..core import project_templates as pt
+        m = self.menu_templates
+        m.clear()
+        items = pt.list_templates()
+        if not items:
+            a = m.addAction("(Todavía no hay plantillas: guarda una con «Guardar como plantilla…»)")
+            a.setEnabled(False)
+            return
+        for t in items:
+            label = FORMATS.get(t["formato"], ("",))[0]
+            a = m.addAction(f"{t['nombre']}  ·  {label}".rstrip(" ·"))
+            a.triggered.connect(lambda _c=False, path=t["ruta"]: self.new_from_template(path))
+
+    def new_from_template(self, path: str):
+        """Proyecto nuevo con la configuración de una plantilla (en la pestaña de su tipo). Sin clips ni medios."""
+        from ..core import project_templates as pt
+        try:
+            tpl = pt.load(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Plantilla", f"No se pudo leer la plantilla: {exc}")
+            return
+        fmt = tpl.get("formato") if tpl.get("formato") in FORMATS else "youtube"
+        ws = self.workspaces
+        if fmt != ws.current and not ws.switch(fmt):
+            return
+        before = self.ctrl.project
+        ws.new_here()                         # pregunta antes si hay cambios sin guardar
+        if self.ctrl.project is before:       # cancelaste: no tocamos el proyecto actual
+            return
+        name = str(tpl.get("nombre") or "")
+        # Un solo paso de deshacer; el proyecto nuevo está vacío, así que solo cambia su configuración
+        if self.ctrl._edit(f"Plantilla «{name}»", lambda p: pt.apply(p, tpl)) is None:
+            self.statusBar().showMessage("No se pudo aplicar la plantilla.", 6000)
+            return
+        self.statusBar().showMessage(f"📋 Proyecto nuevo desde la plantilla «{name}».", 6000)
+
+    def save_as_template(self):
+        """Archivo → Guardar como plantilla…: formato, pistas y ajustes de audio, subtítulos (sin clips ni medios)."""
+        from PySide6.QtWidgets import QInputDialog
+        from ..core import project_templates as pt
+        p = self.ctrl.project
+        name, ok = QInputDialog.getText(self, "Guardar como plantilla",
+                                        "Nombre de la plantilla (p. ej. «Mi YouTube con voz»):",
+                                        text=FORMATS.get(p.format, ("Plantilla",))[0].split(" ", 1)[-1])
+        name = name.strip()
+        if not ok or not name:
+            return
+        if os.path.exists(pt.template_path(name)) and QMessageBox.question(
+                self, "Guardar como plantilla", f"Ya hay una plantilla «{name}». ¿La reemplazo?") != QMessageBox.Yes:
+            return
+        pt.save(p, name)
+        self.statusBar().showMessage(f"📋 Plantilla guardada: «{name}». Se usa en Archivo → Nuevo desde plantilla.", 7000)
 
     def _do_autosave(self):
         if self.ctrl.dirty:
@@ -2508,6 +2753,7 @@ class MainWindow(QMainWindow):
     def try_recover(self):
         """Si el programa se cerró de golpe la última vez, ofrece recuperar el autoguardado."""
         self.workspaces.start()          # 🗂 la pestaña donde estabas, con su proyecto
+        self.preview.set_guides_space(self.workspaces.current)
         lock, auto = session_lock_path(), autosave_path()
         if lock.exists() and auto.exists():
             r = QMessageBox.question(
@@ -2595,37 +2841,55 @@ class MainWindow(QMainWindow):
         manager().start(f"🎯 Afinar palabras de «{m.name}»", work, done, fail)
 
     def learn_voice(self, media_id: str, words: list):
-        """◈ Palabras recién afinadas: se guardan como ejemplo de tu voz y la IA vuelve a aprender (en segundo plano,
-        unos segundos). Con menos de 5 minutos de ejemplos todavía no entrena."""
+        """◈ Palabras recién afinadas: la grabación solo se APUNTA para aprender tu voz (instantáneo, sin gastar nada).
+        Se aprende cuando se usa: al abrir «✂ Eliminar silencio» (learn_voice_pending) o con Voz → Entrenar."""
         import importlib.util
         if importlib.util.find_spec("torch") is None:
             return
         m = self.ctrl.project.media.get(media_id)
         if m is None or not os.path.exists(m.path):
             return
-        path, words = m.path, [list(w) for w in words]
+        from ..ai import voice_model as VM
+        try:
+            VM.queue_example(m.path, words)
+        except OSError:
+            pass
 
-        def work(progress, _cancelled):
-            from ..ai import voice_model as VM
-            from ..core import media as media_tools
-            progress(0.02, "◈ Guardando el ejemplo de tu voz…")
-            VM.add_example(media_tools.cache_key(path), media_tools.decode_mono(path, VM.SR), words)
-            return VM.train_from_examples(progress=progress)
+    def learn_voice_pending(self) -> bool:
+        """◈ Si hay grabaciones apuntadas, la IA aprende tu voz ahora en segundo plano (al usar «Eliminar silencio»).
+        Devuelve True si empezó."""
+        import importlib.util
+        if importlib.util.find_spec("torch") is None:
+            return False
+        from ..ai import voice_model as VM
+        if not VM.pending() or getattr(self, "_learning_voice", False):
+            return False
+        self._learning_voice = True
 
         def done(rep):
+            self._learning_voice = False
             if rep:
                 v = rep.get("val") or {}
                 self.statusBar().showMessage(
                     f"◈ La IA aprendió tu voz con {rep['minutes']:.0f} min de ejemplos"
                     + (f" · en una grabación que no vio: {v['acierto'] * 100:.1f} % de acierto, bordes a "
                        f"{v['borde_mediana_ms']:.0f} ms" if v else ""), 9000)
+
+        def fail(_e):
+            self._learning_voice = False
         from .task_window import manager
-        manager().start("◈ Aprender tu voz", work, done, lambda _e: None)
+        manager().start("◈ Aprender tu voz", lambda p, c: VM.learn_pending(p, c), done, fail)
+        return True
 
     def train_voice_now(self):
         """◈ Menú Voz: vuelve a entrenar con los ejemplos guardados (o explica cómo conseguirlos)."""
         import importlib.util
         from ..ai import voice_model as VM
+        if importlib.util.find_spec("torch") is not None and VM.pending():
+            try:
+                VM.process_pending()           # lo apuntado al transcribir cuenta ya
+            except Exception:  # noqa: BLE001
+                pass
         mins = VM.examples_minutes()
         if importlib.util.find_spec("torch") is None:
             QMessageBox.information(self, "◈ Entrenar la IA con tu voz",
@@ -2685,7 +2949,51 @@ class MainWindow(QMainWindow):
         if enabled():
             self.claude_bridge.start()
 
+    # ---- 🖥 visor en la segunda pantalla · ✏ corregir subtítulos desde el visor
+    SECOND_KEY = "visor/segunda_pantalla"
+
+    def toggle_second_screen(self, _on=False):
+        from .second_screen import SecondScreenWindow
+        win = getattr(self, "_second", None)
+        if win is not None and win.isVisible():
+            win.close()
+            return
+        if win is None:
+            self._second = win = SecondScreenWindow(self.preview.canvas, self.engine.toggle, "F11", self)
+            win.closed.connect(self._second_closed)
+        win.abrir()
+        self.act_second.setChecked(True)
+        QSettings("EditorIA", "EditorIA").setValue(self.SECOND_KEY, True)
+
+    def _second_closed(self):
+        self.act_second.setChecked(False)
+        if not getattr(self, "_second_closing", False):   # cerrada a propósito (Esc / F11): no se vuelve a abrir sola
+            QSettings("EditorIA", "EditorIA").setValue(self.SECOND_KEY, False)
+
+    def _restore_second_screen(self):
+        """Al arrancar: solo si estaba abierta al cerrar Y de verdad hay una segunda pantalla."""
+        from .second_screen import pantalla_secundaria
+        if str(QSettings("EditorIA", "EditorIA").value(self.SECOND_KEY, "false")).lower() == "true" \
+                and pantalla_secundaria()[1]:
+            self.toggle_second_screen()
+
+    def _subtitle_edit_from_viewer(self, indices, clicked: int, rect):
+        from .subtitle_edit import SubtitleEditor
+        ed = getattr(self, "_sub_editor", None)
+        if ed is None:
+            self._sub_editor = ed = SubtitleEditor(self.ctrl, self.preview.canvas.viewport())
+        mid = self.ctrl.project.subtitles.media_id
+        if not mid:
+            return
+        ed.open(mid, list(indices), clicked, rect)
+
     def closeEvent(self, e):
+        win = getattr(self, "_second", None)
+        if win is not None and win.isVisible():        # al cerrar el programa, la segunda pantalla queda «abierta» para la próxima vez
+            QSettings("EditorIA", "EditorIA").setValue(self.SECOND_KEY, True)
+            self._second_closing = True
+            win.close()
+            self._second_closing = False
         self.engine.pause()
         if self._thumb_page is not None and getattr(self, "_thumb_editor", None) is not None:
             self._thumb_editor.close()            # 🖼 sale del taller (se guarda) y los paneles vuelven a su sitio

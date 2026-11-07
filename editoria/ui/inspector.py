@@ -35,6 +35,17 @@ def _dim(text=""):
     return label
 
 
+def _muestras_espectro(path: str, src: float):
+    """3 s de audio (mono, 16 kHz) para el espectro del ecualizador. Corre en segundo plano."""
+    try:
+        r = media_tools.run_quiet([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-ss", f"{max(0, src - 1):.2f}",
+                                   "-t", "3", "-i", path, "-vn", "-ac", "1", "-ar", "16000",
+                                   "-f", "s16le", "-"], timeout=10)
+        return np.frombuffer(r.stdout, np.int16).astype(np.float32) / 32768 if r.returncode == 0 else None
+    except Exception:  # noqa: BLE001 - el espectro es solo una ayuda visual
+        return None
+
+
 class InspectorPanel(QWidget):
     track_requested = Signal(str)   # «Seguir personaje u objeto» en este clip
     ramp_done = Signal(list)        # rampa de velocidad creada: seleccionar sus tramos
@@ -58,6 +69,7 @@ class InspectorPanel(QWidget):
         self.stack.addWidget(self._build_clip_page())
         self.stack.addWidget(self._build_multi_page())
         self.stack.addWidget(self._build_text_page())
+        self.eq_graph.installEventFilter(self)      # al mostrarse la gráfica del ecualizador, se calcula su espectro
 
         # Con scroll: así el panel nunca empuja ni aplasta la timeline
         scroll = QScrollArea()
@@ -72,8 +84,8 @@ class InspectorPanel(QWidget):
         ctrl.media_changed.connect(self._refresh)
         if engine is not None:
             engine.time_changed.connect(lambda _t: self._refresh_framing())
-            engine.time_changed.connect(lambda _t: (not engine.playing and self._clip() is not None
-                                                    and self._spectrum_timer.start()))
+            engine.time_changed.connect(lambda _t: (not engine.playing and self.eq_graph.isVisible()
+                                                    and self._clip() is not None and self._spectrum_timer.start()))
         self._refresh()
 
     # -------------------------------------------------------------- páginas
@@ -757,24 +769,38 @@ class InspectorPanel(QWidget):
         n_same = sum(1 for o in self.ctrl.project.clips.values() if o.media_id == c.media_id)
         self.btn_eq_all.setVisible(n_same > 1)
         self.btn_eq_all.setText(f"Aplicar a los {n_same} clips de este archivo")
-        if self._spectrum_key != (c.id, round(self._now(), 1)):
+        if self._spectrum_key != (c.id, round(self._now(), 1)) and self.eq_graph.isVisible():
             self._spectrum_timer.start()
 
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is self.eq_graph and ev.type() == QEvent.Show and self._clip() is not None:
+            self._spectrum_key = None                  # se acaba de mostrar: el espectro se calcula ahora
+            self._spectrum_timer.start()
+        return super().eventFilter(obj, ev)
+
     def _update_spectrum(self):
+        """Espectro del ecualizador: solo si la gráfica se ve, y el ffmpeg corre en segundo plano (no congela)."""
+        if not self.eq_graph.isVisible():
+            return
         c = self._aclip()
         m = self.ctrl.project.media_of(c) if c else None
         if c is None or m is None or (self.engine is not None and self.engine.playing):
             return
         self._spectrum_key = (c.id, round(self._now(), 1))
         src = self.ctrl.clip_source_time(c.id, self._now())
-        try:
-            r = media_tools.run_quiet([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-ss", f"{max(0, src - 1):.2f}",
-                                       "-t", "3", "-i", m.path, "-vn", "-ac", "1", "-ar", "16000",
-                                       "-f", "s16le", "-"], timeout=10)
-            samples = np.frombuffer(r.stdout, np.int16).astype(np.float32) / 32768 if r.returncode == 0 else None
-        except Exception:  # noqa: BLE001 - el espectro es solo una ayuda visual
-            samples = None
-        self.eq_graph.set_spectrum(samples, 16000)
+        self._spectrum_token = getattr(self, "_spectrum_token", 0) + 1
+        tok = self._spectrum_token
+        from .jobs import BackgroundJob
+        path = m.path
+        job = BackgroundJob(lambda _p, _c: _muestras_espectro(path, src), self)
+
+        def llego(samples, tok=tok):
+            if tok == self._spectrum_token and self.eq_graph.isVisible():   # solo el último pedido
+                self.eq_graph.set_spectrum(samples, 16000)
+        job.done.connect(llego)
+        self._spectrum_job = job                       # (se guarda para que no la recoja el recolector)
+        job.start()
 
     TEXT_POSITIONS = [("Arriba", 0.5, 0.12), ("Centro", 0.5, 0.5), ("Abajo", 0.5, 0.85),
                       ("Arriba izquierda", 0.25, 0.08), ("Arriba derecha", 0.75, 0.08),

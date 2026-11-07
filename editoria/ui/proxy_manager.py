@@ -1,8 +1,7 @@
 """Crea en segundo plano las copias ligeras (proxies) que usa el visor con «Media» / «Un cuarto».
 
-Automático: aunque estés en «Completa», se preparan las dos (primero la de la calidad que usas), una detrás de
-otra y sin prisa; así, al cambiar a «Media» o «Un cuarto», ya están listas. Se puede apagar en
-Reproducción → «Preparar copias ligeras solo»."""
+Solo trabaja cuando hace falta: con «Completa» no crea nada; con «Media» o «Un cuarto» prepara la copia de la
+calidad que estás usando (al cambiar de calidad, set_level() la crea)."""
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal
@@ -27,6 +26,8 @@ class ProxyManager(QObject):
         if self.level not in proxies.LEVELS:
             self.level = "full"
         self.auto = str(self.settings.value("reproduccion/copias_auto", "true")).lower() == "true"
+        # «también en Completa»: tenerlas listas de antemano (apagado: solo se hacen las de la calidad que usas)
+        self.extra = str(self.settings.value("reproduccion/copias_en_completa", "false")).lower() == "true"
         import os
         if os.environ.get("EDITORIA_DATOS"):          # pruebas: sin copias que nadie pidió
             self.auto = False
@@ -36,6 +37,7 @@ class ProxyManager(QObject):
         self._timer.setInterval(1500)
         self._timer.timeout.connect(self.ensure)
         ctrl.media_changed.connect(self._timer.start)      # clips nuevos: también su copia ligera
+        ctrl.project_changed.connect(self._timer.start)    # un clip colocado en la línea de tiempo: su copia
         ctrl.project_replaced.connect(self._timer.start)
 
     def set_level(self, level: str):
@@ -51,12 +53,18 @@ class ProxyManager(QObject):
         if on:
             self.ensure()
 
+    def set_extra(self, on: bool):
+        self.extra = bool(on)
+        self.settings.setValue("reproduccion/copias_en_completa", "true" if on else "false")
+        if on:
+            self.ensure()
+
     def levels(self) -> list[str]:
-        """Qué copias hacer: la de la calidad que usas primero; con «automático», también las demás."""
-        out = [] if self.level == "full" else [self.level]
-        if self.auto:
-            out += [lv for lv in ("quarter", "half") if lv not in out]
-        return out
+        """Qué copias hacer: SOLO la de la calidad que se está usando (en «Completa», ninguna, salvo que pidas tenerlas
+        listas de antemano: entonces la «Media»)."""
+        if self.level == "full":
+            return ["half"] if self.extra else []
+        return [self.level]
 
     def pending(self) -> list[tuple[str, str, int, float, str]]:
         import os
@@ -68,7 +76,10 @@ class ProxyManager(QObject):
             self.ctrl.message.emit(f"⚠️ No se encuentra «{gone[0].name}»" + (f" (y {len(gone) - 1} más)" if len(gone) > 1
                                    else "") + ": ¿se movió o se borró? Clic derecho → volver a enlazar.")
             self.ctrl.media_changed.emit()
-        vids = [m for m in p.media.values() if m.kind == KIND_VIDEO and m.probed and m.id not in self.ctrl.missing]
+        # Solo los videos que están en la línea de tiempo (nada de copias de toda la biblioteca)
+        usados = self.ctrl.timeline_media_ids()
+        vids = [m for m in p.media.values() if m.kind == KIND_VIDEO and m.probed and m.id not in self.ctrl.missing
+                and m.id in usados]
         return [(m.id, m.path, m.height, m.duration, lv) for lv in self.levels() for m in vids
                 if not proxies.has_proxy(m.path, lv)]
 
@@ -93,6 +104,8 @@ class ProxyManager(QObject):
 
         def work(progress, cancelled):
             import time
+            # la tarjeta gráfica se comprueba AQUÍ (hilo del trabajo), no en la ventana
+            progress(0.0, "Creando copias ligeras" + (" (con la tarjeta gráfica)…" if proxies.hw_encoder() else "…"))
             done, t0, before = 0, time.time(), 0.0
             for i, (path, h, dur, lvs) in enumerate(jobs):
                 if cancelled():
@@ -116,8 +129,7 @@ class ProxyManager(QObject):
                                          self.ready.emit()))
         self.job.failed.connect(lambda msg: self.status.emit("✗ Copias ligeras: " + msg))
         self.job.finished.connect(self._finished)
-        self.status.emit(f"Creando copias ligeras ({label}) para editar con fluidez"
-                         + (" (con la tarjeta gráfica)…" if proxies.hw_encoder() else "…"))
+        self.status.emit(f"Creando copias ligeras ({label}) para editar con fluidez…")
         self.job.start()
 
     def _finished(self):

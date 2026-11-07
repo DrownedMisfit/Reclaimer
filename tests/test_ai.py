@@ -27,6 +27,8 @@ Empecemos por la historia. La trama sigue a un grupo de soldados en una guerra d
 Los personajes tampoco ayudan mucho. El protagonista tiene algunos momentos emotivos, pero sus compañeros son casi caricaturas y casi no muestran emociones.
 Ahora hablemos del combate, que es lo mejor del juego. Los tiroteos se sienten pesados y contundentes. Cubrirse detrás de las paredes y flanquear a los enemigos funciona de maravilla.
 En cuanto a las cinemáticas, están muy bien trabajadas. La dirección de cámara y los planos le dan un aire de película de acción, y la animación facial es increíble.
+Gráficamente el juego es precioso. Los escenarios tienen muchísimo detalle, la iluminación es muy buena y las texturas se ven nítidas.
+La banda sonora también acompaña muy bien. La música sube en los momentos de tensión y los efectos de sonido de las armas suenan potentes.
 Técnicamente el juego va muy bien. Mantiene sesenta fotogramas por segundo casi siempre y no encontré errores graves. Los tiempos de carga son muy cortos.
 En conclusión, es un juego muy sólido con una historia irregular. Gracias por ver el video, nos vemos en el próximo."""
 
@@ -177,9 +179,22 @@ def main():
     while win.ai_panel.job is not None:
         pump(app, 0.1)
     pump(app, 0.3)
-    assert win.ai_panel.slots and all(s.get("candidates") for s in win.ai_panel.slots)
+    # Con 5 clips de unos segundos NO caben 36 huecos sin repetir un trozo (antes se repetía el mismo trozo para
+    # todos). Ahora los huecos sin tramo libre salen sin candidato, y los que tienen candidato no se solapan.
+    filled = [s for s in win.ai_panel.slots if s.get("candidates")]
+    assert filled and len(filled) < len(win.ai_panel.slots), (len(filled), len(win.ai_panel.slots))
+    spans: dict = {}
+    for s in filled:
+        c0 = s["candidates"][0]
+        spans.setdefault(c0["media_id"], []).append((c0["source_in"], c0["source_in"] + c0["duration"]))
+    for mid, rs in spans.items():
+        assert ctrl.project.media[mid].kind != "image" or len(rs) == 1, "imagen repetida"
+        for i, (a, b) in enumerate(rs):
+            for c, d in rs[i + 1:]:
+                assert min(b, d) - max(a, c) <= 0.1, ("trozo repetido", ctrl.project.media[mid].name)
+    print(f"  huecos con clip: {len(filled)} de {len(win.ai_panel.slots)} (sin repetir trozos)")
     used = {}
-    for s in win.ai_panel.slots:
+    for s in filled:
         used[s["candidates"][0]["media_id"]] = used.get(s["candidates"][0]["media_id"], 0) + 1
     print("  reparto del mejor candidato:", {ctrl.project.media[k].name: v for k, v in used.items()})
     assert len(used) >= 3, "no debe usar siempre el mismo clip"

@@ -328,6 +328,20 @@ class ExportDialog(QDialog):
             self.progress.setFormat("100 %")
             self.status.setText(f"✓ Listo en {int(time.time() - self._t0)} s: {self._opts.path}")
             self.btn_open.setVisible(True)
+            try:          # 📝 descripción completa (capítulos, créditos, tu pie, hashtags) junto al video
+                from ..core import description as DS
+                from .description_dialog import prefs
+                pr = self.ctrl.project
+                par, pie = prefs(pr, self.ctrl.path)
+                texto = DS.default_text(pr, par, pie)
+                if texto.strip():
+                    ruta = os.path.splitext(self._opts.path)[0] + ".descripcion.txt"
+                    with open(ruta, "w", encoding="utf-8") as f:
+                        f.write(texto + "\n")
+                    self.status.setText(self.status.text() + f"\n📝 Descripción para YouTube: "
+                                                             f"{os.path.basename(ruta)}")
+            except Exception:  # noqa: BLE001 - la descripción nunca estropea una exportación
+                pass
         elif self._cancelled:
             self.status.setText("Exportación cancelada.")
         elif self._opts.encoder == "gpu" and not self._retried_cpu:

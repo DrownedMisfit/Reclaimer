@@ -8,6 +8,8 @@ un reproductor para cada uno.
 from __future__ import annotations
 
 import bisect
+import math
+import os
 
 from PySide6.QtCore import QElapsedTimer, QObject, QPointF, QRectF, QSettings, QSizeF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QTransform
@@ -25,6 +27,33 @@ from .subtitle_item import SubtitleItem, TitlesItem
 
 
 VIDEO_POOL = 3   # reproductores por pista de video (un archivo abierto en cada uno)
+
+
+def decodificar_grafica() -> bool:
+    """Ajuste «Decodificar el video con la tarjeta gráfica». Por defecto: sí en PC modesto, no en uno normal."""
+    try:
+        v = QSettings("EditorIA", "EditorIA").value("reproduccion/decodificar_grafica", None)
+        if v is not None:
+            return str(v).lower() == "true"
+        from ..core import hw
+        return bool(hw.equipo().get("modesto"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ajustar_decodificacion():
+    """Antes de crear ningún reproductor: con el ajuste en «procesador», Qt no crea un decodificador D3D11VA en el
+    hilo de la interfaz al abrir cada archivo (~35–150 ms de parón). Si el usuario ya fijó la variable, no se toca."""
+    if "QT_FFMPEG_DECODING_HW_DEVICE_TYPES" in os.environ:
+        return
+    try:
+        if not decodificar_grafica():
+            os.environ["QT_FFMPEG_DECODING_HW_DEVICE_TYPES"] = "none"
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_ajustar_decodificacion()
 
 
 def _decor_box(c, W: int, H: int, layout="clip"):
@@ -76,7 +105,7 @@ class TrackLayer:
         self._bg_time = QElapsedTimer()
         self._bg_time.start()
         self._want_bg = False
-        self._bg_every = 33          # ms entre fondos (se ajusta solo según lo que tarde: 16–200)
+        self._bg_every = 66          # ms entre fondos (se ajusta solo según lo que tarde: 66–200)
         self._bg_cost = 0.0
         self._bw = self._bh = 1.0
         # Varios videos por pista (uno visible): cada archivo del edit queda abierto en el suyo, así cambiar
@@ -155,7 +184,7 @@ class TrackLayer:
             self._set_bg_source(img)
         cost = t.nsecsElapsed() / 1e6
         self._bg_cost = cost if self._bg_cost == 0 else 0.8 * self._bg_cost + 0.2 * cost
-        self._bg_every = int(min(200, max(16, self._bg_cost * 3)))
+        self._bg_every = int(min(200, max(66, self._bg_cost * 3)))
 
     def _set_bg_source(self, img: QImage):
         b = self._bars
@@ -198,14 +227,16 @@ class TrackLayer:
         if self._mirror:
             self._update_mirror(src, bw, bh)
             return
-        # Ampliar para llenar la caja (cover) a 1/4 de tamaño y desenfoque gaussiano de verdad (como al exportar)
+        # Ampliar para llenar la caja (cover) a 1/8 de tamaño y desenfoque gaussiano (solo vista previa: con 1/8 el
+        # desenfoque es 3,5 px a 1/8 = 7 px a 1/4, el mismo aspecto que antes y mucho menos coste)
+        k = 8.0
         s = max(bw / src.width(), bh / src.height())
-        big = src.scaled(max(1, int(src.width() * s / 4)), max(1, int(src.height() * s / 4)),
+        big = src.scaled(max(1, int(src.width() * s / k)), max(1, int(src.height() * s / k)),
                          Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        pix = QPixmap.fromImage(_soft_blur(big, 7.0, 0.76))
+        pix = QPixmap.fromImage(_soft_blur(big, 3.5, 0.76))
         self.bg.setPixmap(pix)
-        self.bg.setScale(4.0)
-        self.bg.setPos((bw - pix.width() * 4) / 2, (bh - pix.height() * 4) / 2)
+        self.bg.setScale(k)
+        self.bg.setPos((bw - pix.width() * k) / 2, (bh - pix.height() * k) / 2)
 
     def _update_mirror(self, src: QImage, bw: float, bh: float):
         """Edits: el clip y, arriba y abajo, copias como el original (o en espejo si «flip»), borrosas."""
@@ -574,6 +605,8 @@ class GuidesItem(QGraphicsItem):
         return QRectF(-4, -4, self.W + 8, self.H + 8)
 
     def paint(self, p: QPainter, _opt, _w=None):
+        if _w is not None and _w.property("clean_view"):   # segunda pantalla: sin guías ni asas
+            return
         W, H = self.W, self.H
         k = max(W, H) / 1080
         pen = QPen(QColor(255, 255, 255, 150), 2 * k)
@@ -695,6 +728,15 @@ class _GuidesPanel(QWidget):
                                               ("center", "Centro", self._center_icon()),
                                               ("safe", "Shorts", self._aspect_icon(9 / 16))])
         section("Reglas y guías", [("rulers", "Reglas", self._rulers_icon()), ("thirds", "Tercios", self._thirds_icon())])
+
+    def set_modes(self, modes):
+        """Marca los botones según «modes» sin avisar (al cambiar de pestaña)."""
+        modes = set(modes)
+        has_aspect = any(m.startswith("a:") for m in modes)
+        for k, b in self.buttons.items():
+            b.blockSignals(True)
+            b.setChecked(k in modes or (k == "a:" and not has_aspect))
+            b.blockSignals(False)
 
     def _toggled(self, key, on):
         if key.startswith("a:"):               # relaciones de aspecto: una sola (o «Predet.» = ninguna)
@@ -823,6 +865,8 @@ class CompositionItem(QGraphicsItem):
         return QRectF(0, 0, self.W, self.H)
 
     def paint(self, p: QPainter, _opt, _w=None):
+        if _w is not None and _w.property("clean_view"):   # segunda pantalla: sin guías ni asas
+            return
         k = max(self.W, self.H) / 1080
         f = QFont("Segoe UI")
         f.setPixelSize(int(46 * k))
@@ -873,6 +917,7 @@ class Canvas(QGraphicsView):
     annotation_added = Signal(dict)       # ✏ un trazo nuevo (lo guarda la ventana principal)
     mode_changed = Signal(str)
     view_zoom_changed = Signal(float)     # zoom del VISOR (1 = ajustado a la ventana)
+    subtitle_edit = Signal(object, int, object)   # ✏ doble clic en un subtítulo: (índices de sus palabras, la pulsada, rect en el visor)
 
     def __init__(self):
         super().__init__()
@@ -1199,6 +1244,13 @@ class Canvas(QGraphicsView):
 
     def mouseDoubleClickEvent(self, e):
         sp = self.mapToScene(e.position().toPoint())
+        if e.button() == Qt.LeftButton:       # ✏ sobre el texto de un subtítulo: corregirlo (tiene prioridad)
+            hit = self.subs.word_at(sp)
+            if hit is not None:
+                word, wr = hit
+                self.subtitle_edit.emit([w.index for w in self.subs.cue_words()], word.index,
+                                        self.mapFromScene(wr).boundingRect())
+                return
         if e.button() == Qt.LeftButton and self._tf and self._tf_hit(sp) and self._tf["orig"] is not None:
             self.transform_done.emit(self._tf["clip"], self._tf["orig"], None)    # vuelve a pantalla completa
             return
@@ -1529,6 +1581,8 @@ class _DynZoomOverlay(QGraphicsItem):
         return r.adjusted(-20 * self.k, -20 * self.k, 20 * self.k, 20 * self.k)
 
     def paint(self, p, _opt, _w=None):
+        if _w is not None and _w.property("clean_view"):   # segunda pantalla: sin guías ni asas
+            return
         for r, col, label in zip(self.rects, (QColor("#3ad16b"), QColor("#e5413c")), ("Inicio", "Final")):
             p.setPen(QPen(col, 3 * self.k))
             p.setBrush(Qt.NoBrush)
@@ -1569,6 +1623,8 @@ class _TransformOverlay(QGraphicsItem):
         return self.r.adjusted(-m, -m, m, m)
 
     def paint(self, painter, _opt, _w=None):
+        if _w is not None and _w.property("clean_view"):   # segunda pantalla: sin guías ni asas
+            return
         r = self.r
         if r is None:
             return
@@ -1636,6 +1692,8 @@ class _RegionOverlay(QGraphicsItem):
         return r.adjusted(-m, -m, m, m)
 
     def paint(self, painter, _opt, _w=None):
+        if _w is not None and _w.property("clean_view"):   # segunda pantalla: sin guías ni asas
+            return
         for r, shape in self.shapes:
             for col, width in ((QColor(0, 0, 0, 160), 3.0), (QColor("#f2a03d"), 1.5)):
                 pen = QPen(col, width * self.k, Qt.DashLine if width < 2 else Qt.SolidLine)
@@ -2061,9 +2119,34 @@ class PreviewPanel(QWidget):
     def _guides_changed(self):
         self._guides_set([k for k, a in self._guide_acts.items() if a.isChecked()])
 
+    # ▦ Cada pestaña (YouTube / Edits / Shorts) recuerda SUS guías. Si nunca las cambiaste ahí: YouTube sin relación
+    # de aspecto (16:9, «Predet.») y Edits / Shorts con la de 9:16 (el usuario: «por defecto las guías en Edits y
+    # Shorts deberían ir en 9:16»). YouTube sigue usando la clave de siempre (visor/guias).
+    GUIDES_DEFAULT = {"youtube": [], "edit": [f"a:{9 / 16:.4f}"], "short": [f"a:{9 / 16:.4f}"]}
+
+    @staticmethod
+    def guides_key(space: str) -> str:
+        return "visor/guias" if space in ("", "youtube") else f"visor/guias_{space}"
+
+    @classmethod
+    def guides_for(cls, space: str) -> list[str]:
+        s = QSettings("EditorIA", "EditorIA")
+        key = cls.guides_key(space)
+        if not s.contains(key):
+            return list(cls.GUIDES_DEFAULT.get(space, []))
+        return [m for m in str(s.value(key, "") or "").split(",") if m]
+
+    def set_guides_space(self, space: str):
+        """Al entrar en una pestaña: sus guías (las que elegiste allí, o las de por defecto)."""
+        self._guides_space = str(space or "youtube")
+        modes = self.guides_for(self._guides_space)
+        self.canvas.guides.set_modes(modes)
+        self.guides_panel.set_modes(modes)
+
     def _guides_set(self, modes):
         self.canvas.guides.set_modes(modes)
-        QSettings("EditorIA", "EditorIA").setValue("visor/guias", ",".join(modes))
+        QSettings("EditorIA", "EditorIA").setValue(self.guides_key(getattr(self, "_guides_space", "youtube")),
+                                                   ",".join(modes))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2249,38 +2332,103 @@ class _Lane:
         self.loads = 0           # cuántas veces abrió un archivo (diagnóstico: con cortes rápidos debe ser poco)
         self.want_pos = 0.0
         self.want_play = False
+        self.has_video = video_output is not None
+        self.fps = 60.0            # fotogramas por segundo del archivo: los saltos caen en un fotograma exacto
+        self._req_ms = None        # último salto pedido (ms); None si se reprodujo o cambió el archivo
+        self._pending_ms = None    # destino pedido mientras el salto anterior aún se pintaba (arrastre)
+        self._in_src = False       # dentro de setSource(): sus señales de estado son del archivo ANTERIOR
+        self._seek_timer = QTimer()          # «el fotograma llegó»: 250 ms como seguro si no llega
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.timeout.connect(self._resume_pending)
         self.player.mediaStatusChanged.connect(self._on_status)
 
+    def _load(self, path: str, pos: float, playing: bool):
+        """Abre un archivo nuevo. Un reproductor que estaba reproduciendo emite LoadedMedia del archivo VIEJO dentro
+        de setSource(): esas señales se ignoran (ver _on_status), si no se daba por cargado el archivo nuevo."""
+        self.path, self.loaded = path, False
+        self.loads += 1
+        self.want_pos, self.want_play = pos, playing
+        self._req_ms = None
+        self._in_src = True
+        try:
+            self.player.setSource(QUrl.fromLocalFile(path))
+        finally:
+            self._in_src = False
+
     def _on_status(self, status):
+        if self._in_src:
+            return
         if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia) and not self.loaded:
             self.loaded = True
+            self._req_ms = None
             if self.want_play:
-                self.player.setPosition(int(self.want_pos * 1000))
-                self.player.play()
+                self._set_pos(self._ms(self.want_pos))
+                self._play()
             else:
                 # En pausa: primero pausar y LUEGO ir al segundo; así se pinta el fotograma (antes, al cambiar
                 # de archivo —p. ej. «Calidad: Un cuarto»— el visor se quedaba en negro hasta reproducir)
                 self.player.pause()
-                self.player.setPosition(int(self.want_pos * 1000))
-                QTimer.singleShot(150, self._repaint_frame)
+                if self.has_video:            # (el audio no tiene imagen: se coloca al reproducir)
+                    self._set_pos(self._ms(self.want_pos))
+                    QTimer.singleShot(150, self._repaint_frame)
 
     def _repaint_frame(self):
         if self.loaded and self.player.playbackState() != QMediaPlayer.PlayingState:
-            self.player.setPosition(int(self.want_pos * 1000))
+            self._seek_paused(self._ms(self.want_pos))
+
+    def _ms(self, pos: float) -> int:
+        """Milisegundo del fotograma más cercano a pos (así ±1 fotograma se ve de verdad)."""
+        return int(pos * 1000 + 500 / self.fps)
+
+    def _set_pos(self, ms: int):
+        """Salto del reproductor; se recuerda el destino para no repetir el mismo fotograma en pausa."""
+        self._req_ms = ms
+        self._pending_ms = None
+        self.player.setPosition(ms)
+        self._seek_timer.start(250)
+
+    def _seek_paused(self, ms: int):
+        """Salto en pausa. Mientras el anterior aún se pinta (arrastre del cabezal), solo se guarda el destino
+        y se pide en cuanto llega el fotograma: así el visor sigue al cabezal sin tirar saltos a medias."""
+        self._req_ms = ms
+        if self._seek_timer.isActive():
+            self._pending_ms = ms
+        else:
+            self._set_pos(ms)
+
+    def _play(self):
+        self._seek_timer.stop()
+        self._pending_ms = None
+        self._req_ms = None
+        self.player.play()
+
+    def _frame_arrived(self, _frame=None):
+        """Llegó un fotograma del reproductor: si el salto en curso ya se pintó, va el destino pendiente."""
+        if not self._seek_timer.isActive():
+            return                     # (reproduciendo llegan muchos: nada que hacer)
+        self._seek_timer.stop()
+        self._resume_pending()
+
+    def _resume_pending(self):
+        ms, self._pending_ms = self._pending_ms, None
+        if ms is not None and self.loaded and self.player.playbackState() != QMediaPlayer.PlayingState:
+            self._set_pos(ms)
 
     def idle(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
+            self._req_ms = None          # se movió: el último salto pedido ya no vale
+        self.want_play = False           # (en pausa, _req_ms se conserva: no se vuelve a pedir el mismo salto)
 
-    def drive(self, path: str, pos: float, playing: bool, volume: float, rate: float = 1.0):
+    def drive(self, path: str, pos: float, playing: bool, volume: float, rate: float = 1.0,
+              fps: float | None = None):
         self.audio.setVolume(max(0.0, min(1.0, volume)))
+        if fps:
+            self.fps = fps
         if playing and abs(self.player.playbackRate() - rate) > 1e-3:
             self.player.setPlaybackRate(rate)
         if path != self.path:
-            self.path, self.loaded = path, False
-            self.loads += 1
-            self.want_pos, self.want_play = pos, playing
-            self.player.setSource(QUrl.fromLocalFile(path))
+            self._load(path, pos, playing)
             return
         if not self.loaded:
             self.want_pos, self.want_play = pos, playing
@@ -2289,19 +2437,24 @@ class _Lane:
         state = self.player.playbackState()
         if playing:
             if state != QMediaPlayer.PlayingState:
-                self.player.setPosition(int(pos * 1000))
-                self.player.play()
+                if abs(cur - pos) >= 1.0 / self.fps:     # ya está en ese fotograma: solo se reanuda
+                    self._set_pos(self._ms(pos))
+                self._play()
             elif abs(cur - pos) > 0.3 * max(1.0, rate):  # se desincronizó: corregir
-                self.player.setPosition(int(pos * 1000))
+                self._set_pos(self._ms(pos))
         else:
             if state == QMediaPlayer.PlayingState:
                 self.player.pause()
-            if abs(cur - pos) > 0.02:
-                self.player.setPosition(int(pos * 1000))
+                self._req_ms = None
+            self.want_pos = pos
+            # (el audio, en pausa, no se coloca: al reproducir se coloca solo)
+            if self.has_video and self._ms(pos) != self._req_ms:
+                self._seek_paused(self._ms(pos))
             if state == QMediaPlayer.StoppedState:
                 self.player.pause()
 
     def dispose(self):
+        self._seek_timer.stop()
         self.player.stop()
         self.player.deleteLater()
         self.audio.deleteLater()
@@ -2321,6 +2474,8 @@ class _VideoLane:
     def __init__(self, parent: QObject, layer):
         self.layer = layer
         self.slots = [_Lane(parent, v) for v in layer.videos]
+        for s, v in zip(self.slots, layer.videos):     # cada fotograma que llega confirma el salto en curso
+            v.videoSink().videoFrameChanged.connect(s._frame_arrived)
         self.active = 0
         self._used = [0.0] * len(self.slots)
         self._n = 0
@@ -2332,7 +2487,8 @@ class _VideoLane:
         free = [i for i in range(len(self.slots)) if i != avoid]
         return min(free, key=lambda i: self._used[i])          # el que hace más que no se usa
 
-    def drive(self, path: str, pos: float, playing: bool, volume: float, rate: float = 1.0):
+    def drive(self, path: str, pos: float, playing: bool, volume: float, rate: float = 1.0,
+              fps: float | None = None):
         i = self._slot_for(path, avoid=None if self.slots[self.active].path == path else self.active)
         if i != self.active:
             old = self.slots[self.active]
@@ -2342,30 +2498,41 @@ class _VideoLane:
             self.layer.set_active(i)
         self._n += 1
         self._used[i] = self._n
-        self.slots[i].drive(path, pos, playing, volume, rate)
+        self.slots[i].drive(path, pos, playing, volume, rate, fps)
 
-    def preload(self, path: str, pos: float):
+    def preload(self, path: str, pos: float, fps: float | None = None):
         """Prepara el siguiente plano en otro reproductor (pausado en su punto, sin sonido)."""
-        if self.slots[self.active].path == path:
-            return                     # mismo archivo: con las copias ligeras el salto es inmediato
+        act = self.slots[self.active]
+        if act.path == path:
+            # Mismo archivo que el activo (V1 tapado por un B-roll): si la capa está oculta y en pausa, se coloca ya
+            # en su punto; así al destaparse no hay que hacer setPosition+play y esperar la decodificación.
+            if (self.layer.box.isVisible() or not act.loaded
+                    or act.player.playbackState() == QMediaPlayer.PlayingState):
+                return
+            if fps:
+                act.fps = fps
+            act.want_pos = pos
+            if act._ms(pos) != act._req_ms:
+                act._seek_paused(act._ms(pos))
+            return
         i = self._slot_for(path, avoid=self.active)
         s = self.slots[i]
         self._used[i] = self._n + 0.5
         s.audio.setVolume(0.0)
+        if fps:
+            s.fps = fps
         if s.path != path:
-            s.path, s.loaded = path, False
-            s.loads += 1
-            s.want_pos, s.want_play = pos, False
-            s.player.setSource(QUrl.fromLocalFile(path))
+            s._load(path, pos, False)
             return
         if not s.loaded:
             s.want_pos = pos
             return
         if s.player.playbackState() == QMediaPlayer.PlayingState:
             s.player.pause()
-        if abs(s.player.position() / 1000.0 - pos) > 0.04:
-            s.want_pos = pos
-            s.player.setPosition(int(pos * 1000))
+            s._req_ms = None
+        s.want_pos = pos
+        if s._ms(pos) != s._req_ms:
+            s._seek_paused(s._ms(pos))
 
     def idle(self):
         for s in self.slots:
@@ -2400,12 +2567,19 @@ class PlaybackEngine(QObject):
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._tick)
         self._vlanes: dict[str, _Lane] = {}   # un reproductor de video por pista
+        self._last_w: dict[str, float] = {}   # ancho en pantalla usado por pista (margen para no recargar)
+        self._cue_key = None                  # con qué datos se calcularon los subtítulos (ver _refresh)
         self._audio: dict[str, _Lane] = {}
         self._ranges: list[tuple[float, float]] = []  # fragmentos pendientes de "Escuchar"
         self._stop_at: float | None = None
         self._cues = []        # subtítulos ya calculados
         self._speech: list[tuple[float, float]] = []
         self._cue_starts: list[float] = []
+        self._bounds: list[float] = []        # inicios y fines de los clips de video (ver _arm_cut)
+        self._cut_timer = QTimer(self)        # corte a tiempo: un _tick justo en el próximo inicio/fin de clip
+        self._cut_timer.setSingleShot(True)
+        self._cut_timer.setTimerType(Qt.PreciseTimer)
+        self._cut_timer.timeout.connect(self._on_cut)
 
         preview.btn_play.clicked.connect(self.toggle)
         preview.btn_start.clicked.connect(lambda: self.user_seek(0))
@@ -2414,8 +2588,12 @@ class PlaybackEngine(QObject):
         preview.btn_fwd.clicked.connect(lambda: self.step(1))
         preview.btn_loop.toggled.connect(self.set_loop)
         ctrl.project_changed.connect(self._refresh)
-        ctrl.transcript_changed.connect(lambda _m: self._refresh())
+        ctrl.transcript_changed.connect(self._on_transcript)
         ctrl.project_replaced.connect(lambda: (self.pause(), self.seek(0)))
+        self._refresh()
+
+    def _on_transcript(self, _media_id=None):
+        self._cue_key = None           # la transcripción cambió: se recalculan subtítulos y tramos de voz
         self._refresh()
 
     def _next_clip(self, track_id: str, c):
@@ -2492,6 +2670,7 @@ class PlaybackEngine(QObject):
     def pause(self):
         self._stop_at = None
         self._ranges = []
+        self._cut_timer.stop()
         if not self.playing:
             return
         self.playing = False
@@ -2551,6 +2730,24 @@ class PlaybackEngine(QObject):
             self.time = t
             self._sync()
         self.time_changed.emit(self.time)
+        self._arm_cut()
+
+    def _on_cut(self):
+        if self.playing:
+            self._tick()
+
+    def _arm_cut(self):
+        """Corte a tiempo: si el próximo inicio/fin de clip de video cae antes del siguiente _tick (30 ms), se
+        programa un _tick justo en ese milisegundo. Así el plano precargado entra en su fotograma y no hay que
+        decodificar en el corte. Solo con reproducción hacia delante."""
+        if not self.playing or self.rate <= 0 or self._cut_timer.isActive():
+            return
+        k = bisect.bisect_right(self._bounds, self.time + 1e-4)
+        if k >= len(self._bounds):
+            return
+        dt = (self._bounds[k] - self.time) / self.rate
+        if dt * 1000 < self._timer.interval() + 5:
+            self._cut_timer.start(math.ceil(dt * 1000) + 1)
 
     def refresh_sources(self):
         """Se crearon copias ligeras (proxies): el visor pasa a usarlas."""
@@ -2592,9 +2789,25 @@ class PlaybackEngine(QObject):
         self.preview.canvas.set_canvas_size(p.width, p.height)
         self.preview.fps = p.fps
         self.preview.set_title(p.name)
-        self._speech = audio_fx.speech_intervals(p)   # para bajar la música cuando hablas
-        self._cues = styled_cues(p) if p.subtitles.enabled else []
-        self._cue_starts = [c.start for c in self._cues]
+        # Subtítulos y tramos de voz: solo se recalculan si cambió algo que los afecta (estilo, pistas, clips, medios).
+        # Solo cuentan los medios que suenan (pista de audio) o los de los subtítulos: un B-roll que se borra no
+        # obliga a recalcular la voz y los subtítulos (con cientos de clips, eso costaba ~20 ms en cada Supr).
+        aud = {t.id for t in p.tracks if t.kind == TRACK_AUDIO}
+        rel = {c.media_id for c in p.clips.values() if c.track_id in aud}
+        if p.subtitles.media_id:
+            rel.add(p.subtitles.media_id)
+        vt = {t.id for t in p.tracks if t.kind == TRACK_VIDEO}
+        self._bounds = sorted({round(x, 4) for c in p.clips.values() if c.track_id in vt and c.enabled
+                               for x in (c.start, c.end)})
+        key = (id(p), repr(p.subtitles), repr(p.tracks),
+               tuple(sorted((m.id, m.kind, m.category) for m in p.media.values() if m.id in rel)),
+               tuple((c.id, c.media_id, c.track_id, c.start, c.source_in, c.duration, c.speed, c.reverse, c.enabled)
+                     for c in p.clips.values() if c.media_id in rel))
+        if key != self._cue_key:
+            self._cue_key = key
+            self._speech = audio_fx.speech_intervals(p)   # para bajar la música cuando hablas
+            self._cues = styled_cues(p) if p.subtitles.enabled else []
+            self._cue_starts = [c.start for c in self._cues]
         self._sync()
 
     # -------------------------------------------------------- sincronizar
@@ -2634,6 +2847,7 @@ class PlaybackEngine(QObject):
         canvas = self.preview.canvas
         vtracks = [tr for tr in p.tracks if tr.kind == TRACK_VIDEO]
         covered = False
+        cover_end = 0.0                # cuándo termina lo que tapa la pantalla entera
         post: list = []                # 🎨 capas de ajuste de encima (se aplican a las capas de debajo)
         from ..core import generators as _GEN
         for depth, tr in enumerate(vtracks):
@@ -2645,6 +2859,7 @@ class PlaybackEngine(QObject):
                 layer.hide()
                 if lane:
                     lane.idle()
+                self._prepare_ahead(tr, layer, t, covered, cover_end)   # sin trabas en el corte siguiente
                 continue
             src_t = c.src_at(t - c.start) if m.kind != KIND_IMAGE else t - c.start
             zoom = transform.value_at(c.zoom_kf, src_t)
@@ -2672,13 +2887,14 @@ class PlaybackEngine(QObject):
                 if self.mute_all:          # 🎙 grabando la voz: el proyecto no suena (no se cuela en el micro)
                     vol = 0.0
                 run, rate = self._lane_motion(c)
-                lane.drive(self.ctrl.preview_path(m), src_t, run, vol if run else 0.0, rate)
+                max_w = self._view_w(layer) * max(1.0, zoom[0])          # ancho en pantalla (px del visor)
+                lane.drive(self._pick_path(tr.id, m, max_w), src_t, run, vol if run else 0.0, rate, m.fps or p.fps)
                 # El siguiente plano de la pista, preparado antes de que llegue (cortes sin trabas)
                 nxt = self._next_clip(tr.id, c)
                 if nxt is not None and nxt.start - t < 2.5:
                     nm = p.media_of(nxt)
                     if nm is not None and nm.kind == KIND_VIDEO and nm.id not in self.ctrl.missing:
-                        lane.preload(self.ctrl.preview_path(nm), nxt.src_at(0.0))
+                        lane.preload(self.ctrl.preview_path(nm, max_w), nxt.src_at(0.0), nm.fps or p.fps)
             adj = _GEN.is_adjust(m)
             layer.set_color(None if (self.color_bypass or adj) else c.color)
             layer.set_post([] if adj else list(post))
@@ -2698,6 +2914,7 @@ class PlaybackEngine(QObject):
             # mezcla o recorte, la pista de debajo se tiene que ver (la misma regla que al exportar)
             if _full_frame(p, c) and zoom[0] >= 0.999:
                 covered = True
+                cover_end = c.end
 
         # Audio: un reproductor por pista de audio
         for tr in p.tracks:
@@ -2721,6 +2938,51 @@ class PlaybackEngine(QObject):
             # En pausa (o hacia atrás) no suena el audio: solo se coloca en su sitio.
             run, rate = self._lane_motion(c)
             lane.drive(self.ctrl.preview_path(m), c.src_at(t - c.start), run, vol if run else 0.0, rate)
+
+    def _view_w(self, layer) -> float:
+        """Ancho que ocupa la capa en el visor, en píxeles de pantalla (sin el zoom del clip)."""
+        return self.preview.canvas.transform().m11() * layer.box.rect().width()
+
+    def _pick_path(self, track_id: str, m, max_w: float) -> str:
+        """Archivo del visor para una pista. Con un margen del 10 % para no recargar al redimensionar un poco."""
+        prev = self._last_w.get(track_id)
+        if prev and abs(max_w - prev) <= 0.1 * prev:
+            max_w = prev
+        self._last_w[track_id] = max_w
+        return self.ctrl.preview_path(m, max_w)
+
+    def _first_clip_from(self, track_id: str, t: float):
+        best = None
+        for o in self.ctrl.project.clips_on(track_id):
+            if o.enabled and o.start >= t - 1e-3 and (best is None or o.start < best.start):
+                best = o
+        return best
+
+    def _prepare_ahead(self, tr, layer, t: float, covered: bool, cover_end: float):
+        """Pista sin clip ahora (o tapada): si lo siguiente que se verá en ella llega en menos de 2,5 s, su
+        reproductor se prepara ya, pausado en su punto (así el corte no se traba)."""
+        if tr.hidden:
+            return
+        p = self.ctrl.project
+        if covered:                       # lo de debajo aparece cuando termina lo que tapa
+            if cover_end - t >= 2.5:
+                return
+            at = cover_end
+            c2 = p.clip_at(tr.id, at)
+        else:
+            c2 = self._first_clip_from(tr.id, t)
+            if c2 is None or c2.start - t >= 2.5:
+                return
+            at = c2.start
+        if c2 is None or not c2.enabled:
+            return
+        m2 = p.media_of(c2)
+        if m2 is None or m2.kind != KIND_VIDEO or m2.id in self.ctrl.missing:
+            return
+        lane = self._vlanes.get(tr.id)
+        if lane is None:
+            lane = self._vlanes[tr.id] = _VideoLane(self, layer)
+        lane.preload(self.ctrl.preview_path(m2, self._view_w(layer)), c2.src_at(at - c2.start), m2.fps or p.fps)
 
     def _lane_motion(self, c) -> tuple[bool, float]:
         """¿El reproductor de este clip avanza solo, y a qué velocidad? Hacia atrás, congelado o con J

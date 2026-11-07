@@ -1047,9 +1047,8 @@ class EffectsPanel(QWidget):
     def _update_look_status(self):
         clips = self._targets()
         if not clips:
+            # Solo texto: al deseleccionar no se resalta nada (el aviso sale al pulsar una acción sin selección)
             self.look_status.setText("Selecciona clips en la timeline para ponerles efectos.")
-            from .nudge import nudge_for
-            nudge_for(self.look_status.text())
             return
         names = {k: t.split(" ", 1)[-1] for k, t, _v, _h in LOOKS}
         on = sorted({names[k] for c in clips for k in (c.fx or {}) if k in names})

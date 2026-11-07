@@ -40,15 +40,21 @@ def cached(path: str) -> dict | None:
         return None
 
 
-def analyze(path: str) -> dict:
-    """{"tempo", "beats", "downbeats", "strong", "drop", "sections": [{a, b, kind}], "stops", "duration"}"""
+def analyze(path: str, cancelled=None) -> dict:
+    """{"tempo", "beats", "downbeats", "strong", "drop", "sections": [{a, b, kind}], "stops", "duration"}
+    cancelled: función opcional (como en los trabajos en segundo plano); si devuelve True, se para entre etapas."""
     hit = cached(path)
     if hit is not None:
         return hit
     from . import edit_engine, edit_maker
+    from .base import Cancelled
     sr = music_analysis.SR
     samples = media_tools.decode_mono(path, sr)
+    if cancelled is not None and cancelled():
+        raise Cancelled()
     song = edit_maker.analyze_song(path, samples)
+    if cancelled is not None and cancelled():
+        raise Cancelled()
     if len(song["beats"]) >= 4:
         edit_engine.enrich(song, samples, sr)
         beats = song["beats"]

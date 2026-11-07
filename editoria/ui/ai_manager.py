@@ -26,11 +26,13 @@ class ClipAnalysisManager(QObject):
         self._auto_timer.setInterval(1500)
         self._auto_timer.timeout.connect(self._auto)
         ctrl.media_changed.connect(self._auto_timer.start)
+        self._auto_on = False
 
     @property
     def auto(self) -> bool:
-        """Analizar solo los clips nuevos (se activa la primera vez que el usuario analiza)."""
-        return str(self.settings.value("ia/analizar_auto", "false")).lower() == "true"
+        """Analizar solo los clips nuevos: se activa cuando el usuario analiza y dura esta sesión. Al abrir Reclaimer
+        de nuevo no arranca solo (el usuario: «solo entro a subtitular y pierdo rendimiento»)."""
+        return self._auto_on
 
     def models_ready(self) -> bool:
         try:
@@ -59,7 +61,7 @@ class ClipAnalysisManager(QObject):
         if not ids:
             self._set_status("✓ Todos los clips están analizados.")
             return
-        self.settings.setValue("ia/analizar_auto", True)
+        self._auto_on = True                   # los clips nuevos de esta sesión, también
         p = self.ctrl.project
         work_items = [(mid, p.media[mid].path, p.media[mid].kind, p.media[mid].duration) for mid in ids
                       if mid in p.media]

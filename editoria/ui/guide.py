@@ -379,11 +379,16 @@ class Highlighter(QWidget):
         """⚡ Solo se repinta el contorno (donde está ahora y donde estaba). Esta capa ocupa TODA la ventana: un
         update() suyo hacía redibujar el programa entero 7 veces por segundo mientras se veía un consejo."""
         from PySide6.QtGui import QRegion
+
+        def _banda(rc):      # solo la franja donde va el contorno (el interior es transparente)
+            if rc.isEmpty():
+                return QRegion()
+            return QRegion(rc).subtracted(QRegion(rc.adjusted(16, 16, -16, -16)))
         r = self.target_rect()
         now = r.adjusted(-12, -12, 12, 12) if r is not None else QRect()
         old = self.__dict__.get("_ring", QRect())
         self._ring = now
-        reg = QRegion(now).united(QRegion(old))
+        reg = _banda(now).united(_banda(old))
         if not reg.isEmpty():
             self.update(reg)
 

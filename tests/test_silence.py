@@ -43,7 +43,7 @@ def main():
     subprocess.run([ff, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=12",
                     "-c:v", "libx264", "-preset", "ultrafast", vid], check=True)
     st = QSettings("EditorIA", "EditorIA")
-    saved = {k: st.value(k) for k in ("silencio/ultimo", "silencio/ajustes")}
+    saved = {k: st.value(k) for k in ("silencio/ultimo", "silencio/ajustes", "silencio/mas_opciones")}
     try:
         # --- detección con los ajustes del usuario (30 fps)
         db = S.frame_levels(voz, 30)
@@ -76,8 +76,25 @@ def main():
         ids, note = targets(win)
         assert ids == [aid] and "«A1»" in note, (ids, note)
         assert win.preview.quick["silence"].isVisible()
+        st.setValue("silencio/mas_opciones", "false")         # (plegado, como al empezar)
         dlg = SilenceDialog(win, ids)
         dlg.show()
+        # --- disposición: lo esencial visible y «Más opciones» plegado
+        assert not dlg.more_box.isVisibleTo(dlg), "«Más opciones» debe empezar plegado"
+        for w in (dlg.ctl["threshold_db"][1], dlg.ctl["before"][1], dlg.ctl["after"][1], dlg.ctl["min_frames"][1],
+                  dlg.crossfade, dlg.info, dlg.b_ok, dlg.more_btn):
+            assert w.isVisibleTo(dlg), w
+        assert not dlg.mode.isVisibleTo(dlg) and not dlg.clicks.isVisibleTo(dlg)
+        dlg.more_btn.click()
+        pump(app, 0.1)
+        assert dlg.more_box.isVisibleTo(dlg) and dlg.mode.isVisibleTo(dlg), "al pulsar, se ve «Detección»"
+        assert str(st.value("silencio/mas_opciones")).lower() == "true", "el plegado queda guardado"
+        dlg.more_btn.click()
+        pump(app, 0.1)
+        assert not dlg.more_box.isVisibleTo(dlg)
+        dlg.more_btn.click()                                  # (abierto: así lo recuerda la próxima vez)
+        pump(app, 0.1)
+        print("✓ «Eliminar silencio»: lo esencial a la vista; «⚙ Más opciones» plegado y recordado")
         t0 = time.time()
         while not dlg._ready and time.time() - t0 < 30:
             pump(app, 0.05)
@@ -85,6 +102,9 @@ def main():
         dlg._load_preset(dlg.preset.currentIndex())
         pump(app, 0.4)
         assert len(dlg.regions) == 2 and win.timeline.preview_regions == dlg.regions
+        pistas = {win.ctrl.project.clips[i].track_id for i in dlg.clip_ids if i in win.ctrl.project.clips}
+        assert set(win.timeline.preview_tracks or []) == pistas, (win.timeline.preview_tracks, pistas)
+        print("✓ vista previa como Resolve: se oscurece solo en la pista que se corta")
         assert "2" in dlg.info.text()
         win.grab().save(os.path.join(out, "vista_previa.png"))
         removed = sum(b - a for a, b in dlg.regions)
@@ -106,7 +126,8 @@ def main():
         regs = S.plan(p, [p.clips[aid]], 30.0, p1)
         c.remove_silence([aid], regs, scope="track")
         assert abs(max(x.end for x in p.clips_on(v1.id)) - dur0) < 1e-6
-        assert abs(max(x.end for x in p.clips_on(nar.id)) - (12 - removed)) < 1e-3
+        # (lo quitado según ESTE plan: el del diálogo puede llevar además lo aprendido de tus retoques reales)
+        assert abs(max(x.end for x in p.clips_on(nar.id)) - (12 - sum(b - a for a, b in regs))) < 1e-3
         c.undo_stack.undo()
         print("✓ «Solo en estos clips»: la voz se acorta y el video se queda igual")
 
@@ -119,7 +140,7 @@ def main():
                                     os.path.join(out, "f.txt"))
         assert subprocess.run(args, capture_output=True).returncode == 0
         x = media_tools.decode_mono(wav, 16000)
-        assert abs(len(x) / 16000 - (12 - removed)) < 0.1
+        assert abs(len(x) / 16000 - (12 - sum(b - a for a, b in regs))) < 0.1
         print(f"✓ exportado: {len(x) / 16000:.2f} s (antes 12 s)")
 
         # --- guardar un ajuste propio

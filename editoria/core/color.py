@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -213,10 +214,31 @@ def auto(rgb8: np.ndarray) -> dict:
 
 
 _fast32: dict[str, np.ndarray] = {}
+_HILOS = 4                  # franjas de filas a la vez, solo con fotogramas grandes (visor a pantalla completa)
+_MIN_PX_HILOS = 150_000
+_pool: ThreadPoolExecutor | None = None
 
 
 def apply_argb32(px: np.ndarray, color: dict) -> np.ndarray:
-    """Píxeles empaquetados de Qt (uint32 0xAARRGGBB) → corregidos. ~5 ms por fotograma del visor."""
+    """Píxeles empaquetados de Qt (uint32 0xAARRGGBB) → corregidos. ~5 ms por fotograma del visor; con fotogramas
+    grandes, las filas se reparten en 4 franjas a la vez (numpy suelta el GIL: el mismo resultado, píxel a píxel)."""
+    global _pool
+    if px.ndim != 2 or px.size < _MIN_PX_HILOS:
+        return _apply_argb32_un_hilo(px, color)
+    if _pool is None:
+        _pool = ThreadPoolExecutor(_HILOS, thread_name_prefix="color")
+    _apply_argb32_un_hilo(px[:1, :1], color)     # la tabla queda en caché antes de repartir
+    out = np.empty(px.shape, np.uint32)
+    h = px.shape[0]
+    cortes = [h * k // _HILOS for k in range(_HILOS + 1)]
+
+    def franja(k):
+        out[cortes[k]:cortes[k + 1]] = _apply_argb32_un_hilo(px[cortes[k]:cortes[k + 1]], color)
+    list(_pool.map(franja, range(_HILOS)))
+    return out
+
+
+def _apply_argb32_un_hilo(px: np.ndarray, color: dict) -> np.ndarray:
     k = key(color)
     flat = _fast32.get(k)
     if flat is None:

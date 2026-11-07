@@ -13,6 +13,7 @@ datos/registros/
 
 # Lo que crea el programa al usarlo: exportaciones, audio extraído, pruebas
 Exportados/
+Descargas/
 Audio extraído/
 _pruebas_tmp/
 x/
@@ -35,3 +36,9 @@ motor_ia/miopen/
 *.m4a
 !tests/assets/**
 datos/sesion_abierta.lock
+
+# Lo que crea el programa y no se publica
+respaldos/
+Descargas/
+datos/navegador_png/
+_pruebas_tmp/

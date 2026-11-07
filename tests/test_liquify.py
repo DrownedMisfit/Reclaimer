@@ -199,6 +199,41 @@ def test_editor(out):
     ed.act_liq.trigger()                                    # «≈ Licuar» después de Estirar vuelve a inflar
     assert ed.canvas.liq_mode == "inflar" and ed.act_liq.isChecked() and not ed.act_stretch.isChecked()
     print("✓ ✋ Estirar: el ojo agarrado llegó donde se soltó el ratón (también con un arrastre rápido)")
+    # ⚡ rendimiento: con contorno y brillo, arrastrar NO rehace los efectos en cada movimiento (antes, 1–3 s por
+    # movimiento con una imagen grande): se hacen una vez y se deforma la imagen ya hecha; la buena, al soltar, en
+    # segundo plano (sin congelar)
+    ed.act_stretch.trigger()
+    lay = ed.cur()
+    lay["outline"].update(on=True, color="#FF0000", width=8)
+    lay["glow"].update(on=True, radius=24)
+    T.render_layer(lay)
+    efectos = []
+    orig_fx = T._effects
+    T._effects = lambda *a, **k: efectos.append(1) or orig_fx(*a, **k)
+    vistas = []                                             # vista rápida: como mucho 1 cálculo por movimiento
+    orig_draft = T.draft_render
+    T.draft_render = lambda *a, **k: vistas.append(1) or orig_draft(*a, **k)
+    try:
+        ed.canvas.mousePressEvent(ev(QEvent.MouseButtonPress, b_s, Qt.LeftButton))
+        vistas.clear()
+        for i in range(1, 9):
+            ed.canvas.mouseMoveEvent(ev(QEvent.MouseMove, b_s + (a_s - b_s) * (i / 16), Qt.LeftButton))
+            ed.canvas.viewport().repaint()
+        en_arrastre = len(efectos)
+        en_vista = len(vistas)
+        ed.canvas.mouseReleaseEvent(ev(QEvent.MouseButtonRelease, b_s + (a_s - b_s) * 0.5, Qt.NoButton))
+        assert en_arrastre <= 1, f"arrastrando, los efectos se rehicieron {en_arrastre} veces (debe ser ≤ 1)"
+        assert en_vista <= 8, f"8 movimientos, la vista rápida se calculó {en_vista} veces (debe ser ≤ 1 por movimiento)"
+        t0 = time.time()
+        while ed.canvas._liq_finishing and time.time() - t0 < 20:
+            pump(app, 0.05)
+        assert not ed.canvas._liq_finishing and T.is_rendered(ed.cur()), "la buena debe quedar hecha al soltar"
+    finally:
+        T._effects = orig_fx
+        T.draft_render = orig_draft
+    print(f"✓ ⚡ Estirar con contorno y brillo: los efectos se hicieron {en_arrastre} vez al arrastrar (no en cada "
+          f"movimiento), la vista rápida {en_vista} vez por 8 movimientos, y la versión buena se termina sola en "
+          "segundo plano al soltar")
     ed.toggle_liquify(False)
     assert ed.canvas.tool is None
     print("✓ «👀 Ojos saltones» de un clic (Ctrl+Z lo deshace), aviso si no hay cara, «↺ Quitar licuado»")

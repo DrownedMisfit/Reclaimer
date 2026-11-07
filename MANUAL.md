@@ -1111,3 +1111,161 @@ y Ayuda → Diagnóstico dice qué eligió (fila «Equipo»).
   desenfocada y oscura, detrás del sujeto.
 - **📐 Plantillas** (barra de arriba): guardar una miniatura como plantilla y reutilizar su composición.
 - **📱 Pasar a Short** (barra, en la de YouTube): crea la vertical a partir de la de YouTube.
+
+## ⚡ Editar más rápido (06/11/2026)
+
+- **🔴 Cortes dudosos**: tras quitar silencios, cada corte de la voz que se come una palabra, queda pegado o corta con
+  la voz sonando sale como una **línea roja** en la línea de tiempo (motivo al pasar el ratón). «⚠ N cortes» en la
+  barra de la línea de tiempo con ◀ ▶ (o **Alt+← / Alt+→**) te lleva a cada uno. Clic en la línea roja: ajustar
+  «Antes / Después del corte» (−40, +40, +120 ms), «▶ Escuchar», «✓ Está bien así» o «↺ Devolver todo el silencio».
+  El ajuste mueve todas las pistas (el B-roll no se desincroniza) y el aviso se quita solo al arreglarlo.
+- **🎬 Clips · carpetas por palabra** (pestaña junto a «Momentos»): ten una carpeta (por defecto
+  `Vídeos\Reclaimer - Clips por palabra`, «Cambiar…» para elegir otra) con una subcarpeta por tema —«Fortnite»,
+  «Minecraft», lo que quieras— llena de TUS videos e imágenes. «Dijiste…» lista lo que nombras en la narración
+  («Fortnite · 3 veces») con «📁 12» si ya tiene carpeta (12 archivos) o «＋» si no. Los nombres de tus carpetas
+  también se buscan en lo que dices. Alias con coma: una carpeta «Fortnite, fortnait» vale para las dos.
+  Al elegir una palabra ves su carpeta en miniaturas: «＋ Crear carpeta» si no existe, suelta ahí archivos o carpetas
+  desde el Explorador (se copian) o en la propia palabra de la lista. Doble clic = ponerlo donde lo dices.
+- **🖼 Imágenes encima del video**: suelta una imagen en una pista de video encima de otra: dura hasta que acaba la
+  frase que dices ahí (1,5–6 s), centrada con sombra, entrada suave y el video de debajo desenfocado solo en ese
+  tramo. Clic derecho → «🖼 Estilo de imagen» (esquina, costados, pantalla completa, sin animación) y «⏱ Ajustar a la frase».
+- **⚡ Revisión rápida con teclas** (menú IA, **Ctrl+Mayús+Q**, o «Limpieza»): una a una, las propuestas de la IA y
+  los cortes dudosos; **Enter** acepta, **Supr** rechaza, **→/Espacio** salta, **←** vuelve, **P** escucha.
+  La «✨ Primera versión automática» la ofrece al terminar.
+- **📋 Plantillas de proyecto** (Archivo): «Guardar como plantilla…» (formato, pistas, estilo de subtítulos…; sin
+  clips) y «Nuevo desde plantilla ▸».
+- Estilo cinematográfico: cada cambio de tema empieza con plano nuevo, fundido y whoosh. «Más impacto visual» da zoom
+  a TODOS los clips elegidos.
+- Miniatura: **⚖ Comparar A/B** (A y B se guardan con el proyecto).
+
+- **🔴 Cortes dudosos, más rápido** (06/11): pulsa «⚠ N cortes» y sale la LISTA de todos (clic = ir ahí). Cada uno
+  trae «💡 Sugerencia» (p. ej. «Recuperar 160 ms después del corte para no comerse «bienvenidos»») con
+  «✓ Aplicar sugerencia» (y pasa solo al siguiente) o «✓ Aplicar todas las sugerencias» (un solo Ctrl+Z). En la
+  revisión rápida: Enter aplica la sugerencia, O = está bien así.
+- **🎬 Clips, más listo** (06/11): al elegir un tema, banderitas cian en la línea de tiempo donde lo dices (✕ las
+  quita). «📍 Poner donde lo dices» coloca el clip en esos momentos (dura lo que queda de la frase, salta los logos,
+  sin sonido, en una pista libre; un Ctrl+Z). Con varios archivos elegidos se reparten: momento 1 → archivo 1,
+  momento 2 → archivo 2… «⏵ Poner en el cabezal» lo pone donde está la línea roja. Clic derecho en una miniatura:
+  poner, abrir, mostrar en la carpeta o quitarla (a la Papelera, preguntando). Los momentos se encuentran también si
+  la narración está dentro de un clip compuesto ⧉.
+
+- **Miniatura · Material** (06/11): las imágenes que pones desde tus carpetas (📁 Carpetas, el Explorador, «Imagen
+  desde archivo») se quedan en «Material» como «📁 nombre», también en otros proyectos. Clic derecho (o Supr):
+  «✕ Quitar» (de la lista, o de Medios si venía de ahí; el archivo se queda), «🗑 Eliminar el archivo» (a la Papelera,
+  preguntando antes) y en los «🔎 PNG», «🗑 Borrar este PNG».
+
+- **✂ Eliminar silencio, más claro** (06/11, como DaVinci Resolve): a la vista solo Umbral, Antes del inicio,
+  Después del final, Mínimo a eliminar, Fundido cruzado y «Se quitarán N silencios · tiempo»; lo demás (detección,
+  protección de la voz, clics, IA, palabras, lo aprendido, ajustes guardados…) en «⚙ Más opciones» (recuerda si lo
+  dejaste abierto). En la línea de tiempo, lo que se va a quitar se OSCURECE dentro de la pista que se corta, con una
+  línea fina en cada borde; las demás pistas solo llevan una marca fina en la regla.
+
+- **🧭 Montaje guiado** (06/11, página junto a «Editar»): los pasos para editar rápido, en orden, cada uno con su
+  estado y su botón: 1 🗂 Importar · 2 ✂ Quitar silencios · 3 ⚠ Revisar cortes dudosos («Revisar» / «Aplicar
+  todas») · 4 🎬 Clips para lo que dices («N palabras · M con carpeta») · 5 ⚡ Revisión rápida · 6 🖼 Miniatura ·
+  7 🚀 Entrega. Se ve a la vez que el panel 🎬 Clips. Es el mismo proyecto que en las demás páginas: lo que hagas
+  aquí sigue ahí al pasar a Editar, Miniatura, etc.
+
+- **↪ Mover este proyecto a** (06/11, Archivo, o clic derecho en las pestañas YouTube / Edits / Shorts): si editaste
+  en la pestaña equivocada, el proyecto pasa a la otra con su formato (resolución, encuadres, subtítulos) y su
+  historial: Ctrl+Z devuelve el formato anterior. Si la otra pestaña tenía un proyecto, pregunta y lo guarda en las
+  copias de seguridad.
+- **Más ligero: cada función trabaja cuando la usas** (06/11). Para subtitular ya no se gasta nada en lo demás:
+  · el aprendizaje de tu voz ya no corre después de cada transcripción: se apunta y se aprende al usar
+    «✂ Eliminar silencio» (o Voz → Entrenar);
+  · el análisis de clips con IA solo se hace solo en la sesión en la que lo pediste (al volver a abrir, no arranca);
+  · copias ligeras: solo las de la calidad que eliges (en «Completa», ninguna; Reproducción → «Tener las copias
+    ligeras listas también en «Completa»» si las quieres de antemano);
+  · los paneles ocultos (Texto, 🎬 Clips, 🧭 Montaje guiado) no recalculan nada hasta que los abres, y el espectro del
+    ecualizador solo se calcula si se ve (y ya no congela la ventana).
+
+- **⚡ Licuar y Estirar fluidos** (06/11, miniatura): con una imagen con contorno, brillo o sombra, cada movimiento
+  del ratón rehacía esos efectos (1–3 s por movimiento). Ahora se preparan una vez (en segundo plano al activar la
+  herramienta) y al arrastrar solo se deforma la imagen ya hecha: ~20 ms por movimiento (~60 ms con fotos enormes).
+  Al soltar, la versión buena se termina sola en segundo plano sin congelar la ventana.
+
+- **Miniatura, más rápida y con más herramientas** (06/11):
+  · ⚡ Licuar / Estirar suaves de verdad: ~5 ms por movimiento (antes ~200 ms) y soltar sin congelar (~12 ms).
+  · La capa elegida en «Capas» es la que se mueve en el lienzo aunque pinches encima de otra; para elegir otra en el
+    lienzo, doble clic (en un texto, además, se abre para escribir).
+  · 🖼 Buscar fondo: en «🔎 PNG», modo «🖼 Fondo» (imágenes grandes con la forma de la miniatura); clic derecho →
+    «Usar de fondo» la pone detrás de todo cubriendo el lienzo.
+  · Barra flotante del texto (aparece encima del texto elegido): color, fuente, A−/A+, negrita, cursiva,
+    izquierda/centrado/derecha, contorno (color y grosor), sombra (suave/dura/larga), brillo y 🔥 Mi estilo.
+  · 🌫 Desenfocar la capa entera: clic derecho → «Desenfocar» (fuerza en «Desenfoque» del panel).
+  · 🌫 Zona borrosa: botón «🌫 Borroso ▾» → Círculo o Cuadrado, se dibuja arrastrando y se estira con las esquinas
+    (libre; Mayús = proporcional) y los lados; desenfoca lo que hay debajo («Fuerza» en el panel).
+  · 😜 Caras graciosas: 27 gestos en 4 grupos (👀 Ojos: entrecerrados, mirar arriba/abajo/izquierda/derecha, bizco,
+    guiño… · 😮 Emociones: sorpresa, miedo, felicidad, risa, tristeza, enojo, asco, duda · 🗿 Cabeza · 👃 Rasgos),
+    con Intensidad (Suave / Normal / Exagerado) y «Todas las caras».
+
+- **🖱 La rueda ya no cambia valores sin querer** (06/11, en todo el programa): números, deslizadores, desplegables y pestañas
+  solo cambian con la rueda si les das clic y giras sin sacar el ratón de encima; si no, la rueda desplaza el panel
+  (aunque la casilla siga con el foco).
+
+- **⚡ Edición más fluida** (06/11, medido con un proyecto grande):
+  · Línea de tiempo: arrastrar un clip 2–5 ms por movimiento (antes ~23), recortar 3–5 ms (antes 35–40), mover el
+    cabezal por la regla 2 ms (antes 17). Deseleccionar ya no pone un contorno naranja que se comía 1,9 s de CPU.
+    El imán es instantáneo; el panel Texto ya no se rehace si solo mueves B-roll.
+  · Vista previa: video con subtítulos 59,6 fps (antes 48–55); Short con fondo desenfocado y subtítulos 58,8 fps
+    sin tirones (antes 27–45); B-roll pesado 46,7 fps (antes 34–40). Las flechas avanzan fotograma a fotograma y
+    muestran el fotograma exacto; arrastrar el cabezal enseña 12–17 de 30 fotogramas (antes 2–5). Se precarga el
+    siguiente B-roll (menos tirones en los cortes) y, si ya existen copias ligeras, se usan en «Completa» cuando el
+    visor es pequeño (sin crearlas en segundo plano).
+
+- **Editar más rápido, 2.ª tanda** (06/11):
+  · ✨ Primera versión automática: el B-roll ya NO repite escenas (0 tramos solapados; antes miles), usa casi todo tu
+    material y respeta tus carpetas por tema (72 % de planos del tema correcto, antes 1 %); las imágenes y capturas
+    van ENCIMA con fondo desenfocado y sombra (no a pantalla completa); la música se une con fundidos; y al final
+    aplica solo las sugerencias de los cortes dudosos (en la prueba, 16 → 0).
+  · Arreglado un fallo grave: tras «✂ Eliminar silencio», todos los trozos de la narración quedaban vinculados entre
+    sí (un clic los elegía todos y Supr borraba la narración entera). Ahora cada trozo va solo con su sonido, y los
+    proyectos antiguos se reparan al abrirlos.
+  · Más fluido: rueda de la línea de tiempo 7–11 ms (antes 12–35), borrar un B-roll ~26 ms, color de la vista previa
+    en 4 hilos (1080p: 26 → 11 ms).
+  · ✂ Shorts desde este video (propone tramos de 45–75 s y crea cada Short aparte, en vertical).
+  · 📝 Descripción para YouTube (Ctrl+Mayús+K): párrafo, capítulos, créditos, tu pie fijo y hashtags; al exportar se
+    guarda <video>.descripcion.txt. ⚕ Revisión antes de exportar con «Ir» en cada aviso.
+  · 🖥 Visor en la segunda pantalla (F11). ✏ Doble clic en un subtítulo del visor = corregirlo. Las correcciones de
+    palabras (panel Texto, visor) se deshacen con Ctrl+Z y conservan la puntuación.
+  · 🎬 Mi intro y mi outro (por tipo de proyecto, también en la Primera versión). 🔎 Buscar en lo que dijiste
+    (Ctrl+Alt+F): «3 de 12», ◀ ▶ y marcas en la línea de tiempo.
+
+- **Editar más rápido, 3.ª tanda** (06/11, tras investigar Resolve 20, Premiere, Descript, Gling, TimeBolt, AutoCut…):
+  · 📜 Montaje desde el guion: pega tu guion (una oración por línea) → elige la mejor toma de cada línea, quita las
+    demás, marca lo que falta (rojo) y lo improvisado (amarillo, no se quita) y coloca [CLIP: tema] / [IMG: nombre];
+    [MÚSICA: …] y [NOTA: …] quedan como marcadores. Un solo Ctrl+Z.
+  · 🔖 Marcas de OBS: si al grabar pulsas la tecla «Añadir marcador de capítulo» de OBS (formato MP4 híbrido) cuando
+    te equivocas, Edición → «Leer marcas de OBS» las pone en rojo y «Fallos marcados» propone quitar cada frase
+    fallida (una a una o todas).
+  · ✂ Reordenar con el texto: en el panel Texto, selecciona frases, Ctrl+X, pon el cursor y Ctrl+V: se mueve la voz
+    con su B-roll, sin huecos (Ctrl+C copia). Nota: el texto del panel sigue en el orden en que lo grabaste.
+  · 🎵 Ajustar la música a la duración (Edición): la canción se alarga o acorta por compases, conservando intro y
+    final; también en la Primera versión.
+  · Línea de tiempo: la regla se queda fija arriba al desplazarte por las pistas; Alt + rueda desplaza las pistas en
+    vertical; un proyecto nuevo empieza con 1 pista de video y 1 de audio (las demás se crean solas al hacer falta).
+
+- **07/11**:
+  · 🔑 Palabras clave en Medios: una sección con una carpeta por palabra (Fortnite, GTA 6…). «✨ Crear de lo que
+    dices» las crea a partir de tu narración; suelta CARPETAS de tu PC sobre una palabra para enlazarlas (no se
+    copian) o archivos sueltos para copiarlos; «📂 Añadir carpeta de mi PC…»; selecciona archivos y «📍 Poner donde
+    lo dices». Quitar una palabra manda a la Papelera solo la carpeta de Reclaimer: tus carpetas del PC nunca se
+    borran, solo se desvinculan.
+  · «Dijiste…» entiende nombres compuestos: «GTA 6» (también «GTA seis», «GTA VI», «G.T.A. 6»), «Zelda Ocarina of
+    Time», «Resident Evil 4», «Call of Duty Black Ops 6», «Nintendo Switch 2»… sin pegar números sueltos («jugué
+    Fortnite dos horas» sigue siendo «Fortnite»).
+  · Importar es ligero: solo se lee la duración y la miniatura; la onda de audio se calcula al meter el clip en la
+    línea de tiempo (o cuando una función la necesita) y las copias ligeras solo de lo que está en la línea de
+    tiempo. «◈ Analizar a fondo lo seleccionado en Medios» si lo quieres antes.
+  · El panel Texto muestra el orden de la línea de tiempo (tras reordenar con Ctrl+X/V). Reclaimer se cierra al
+    momento aunque haya un análisis en marcha.
+
+  · Vista previa sin tirones al cambiar de clip (de 35 por minuto a 0 en la prueba): la precarga deja listo el
+    fotograma del siguiente plano, V1 tapado ya está en su punto al destaparse y el corte llega a tiempo. Reproducción
+    → «Decodificar el video con la tarjeta gráfica» (desactivado = más suave, algo más de CPU; activado en PCs
+    modestos; se aplica al reiniciar).
+  · Medios: clic derecho en un video → «🔑 Añadir en la palabra clave seleccionada» (las marcas azules de la regla)
+    y «🔑 Añadir en todas las «PlayStation» (N)». «⟲ Reiniciar todo» quita todos los medios de todas las
+    categorías (sin borrar tus archivos; pregunta qué hacer con los que estén en la línea de tiempo y, si marcas la
+    casilla, borra también sus miniaturas y datos guardados). Las guías del visor empiezan en 9:16 en Edits y
+    Shorts (16:9 en YouTube) y se recuerdan por pestaña.

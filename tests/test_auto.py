@@ -79,6 +79,16 @@ def main():
 
     clips = make_clips(out)
     clips.pop("voz.wav")
+    # Sin repetir ningún trozo, 130 s de voz necesitan bastante más material distinto (cada clip deja un resto que
+    # ya no cabe un plano). Los 5 clips de arriba suman ~40 s, así que se añaden 4 clips de 40 s para que el B-roll
+    # cubra la voz como antes.
+    ff = media_tools.ffmpeg()
+    for k, rule in enumerate((30, 90, 150, 210)):
+        extra = os.path.join(out, f"material_extra_{k}.mp4")
+        media_tools.run_quiet([ff, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+                               f"cellauto=s=640x360:rule={rule}:r=24,trim=duration=40,"
+                               "colorchannelmixer=rr=1:gg=0.5:bb=0.2", "-c:v", "libx264", "-pix_fmt", "yuv420p", extra])
+        clips[f"material_extra_{k}.mp4"] = extra
     narr = os.path.join(out, "mi_narracion.wav")
     transcript = make_narration(narr)
     song = os.path.join(out, "musica.wav")

@@ -172,7 +172,8 @@ def simple_cues(path: str, duration: float) -> dict:
 def metadata_text(name: str, category: str, ai_type: str, ai_tags: list[str], tags: list[str]) -> str:
     """Lo que se SABE de un clip, en palabras (tipo, lo que se ve, tus etiquetas y carpetas, nombre)."""
     base = os.path.splitext(name)[0].replace("_", " ").replace("-", " ")
-    parts = [ai_type or category, ", ".join(ai_tags), ", ".join(tags), base]
+    # la categoría que pusiste tú va SIEMPRE (aunque la IA haya dado otro tipo)
+    parts = [ai_type, category if category and category != ai_type else "", ", ".join(ai_tags), ", ".join(tags), base]
     return ". ".join(p for p in parts if p)
 
 

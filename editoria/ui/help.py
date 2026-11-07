@@ -23,6 +23,28 @@ Aquí están todos tus archivos (narración, gameplay, cinemáticas, música, im
 <li><b>Clic derecho</b> en un archivo: cambiar categoría, etiquetas, corregir lo que vio la IA…</li>
 <li>Los archivos originales nunca se modifican.</li>
 </ul><br><br><b>Organizar</b>: clic derecho → «📂 Mover a…» (otra categoría o carpeta, o una nueva), o arrastra los archivos sobre una carpeta. <b>Supr</b> quita de Medios (el archivo sigue en el disco); «🗑 Eliminar el archivo» lo manda a la Papelera de Windows (recuperable).<br><br><b>🎵 Convertir en solo audio</b>: clic derecho en uno o varios videos. Si el sonido ya es AAC o MP3 se copia tal cual (sin perder nada, en segundos); si no, se convierte a AAC de alta calidad. Se guarda en la carpeta «Audio extraído» de Reclaimer (tus originales no se tocan) y aparece en Medios ▸ «Audio extraído»."""),
+    "palabras_clave": ("🔑 Palabras clave", """
+Una carpeta por palabra (Fortnite, Minecraft…) con tu material para ella. Lo que dices en la narración
+aparece aquí y en 🎬 Clips.
+<ul>
+<li><b>＋ Palabra clave</b>: crea una. <b>✨ Crear de lo que dices</b>: crea una carpeta por cada palabra de tu narración.</li>
+<li><b>📂 Añadir carpeta de mi PC</b>: la enlaza (no se copia). Arrastrar una carpeta del Explorador sobre la palabra hace lo mismo.</li>
+<li><b>📍 Poner donde lo dices</b>: pone los archivos seleccionados (o todos) en los momentos donde la dices. Un solo Ctrl+Z.</li>
+<li>🔗 = viene de una carpeta de tu PC. <b>Quitar palabra clave</b> manda a la Papelera solo su carpeta de Reclaimer; tus carpetas del PC nunca se borran.</li>
+</ul>"""),
+    "montaje_guion": ("📜 Montaje desde el guion", """
+Pegas tu guion con <b>una oración por línea</b> y eliges la narración. «🔍 Analizar» busca cada línea en lo que dijiste
+y elige la mejor toma (normalmente la última completa). Cada línea tiene su desplegable de tomas y ▶ para escucharla.
+<ul>
+<li><b>⚠ falta</b>: esa línea no la encontré en la grabación (se marca donde iría).</li>
+<li><b>✎ improvisado</b>: lo dijiste y no estaba en el guion. Se deja, pero se marca.</li>
+<li>Etiquetas entre corchetes: <b>[CLIP: fortnite]</b> pone un clip de esa carpeta en esa frase; <b>[IMG: titular.png]</b>
+pone una imagen; <b>[MÚSICA: tensa]</b> y <b>[NOTA: …]</b> solo dejan un marcador con el texto.</li>
+</ul>«✓ Montar» hace todo en UN solo paso: quita las tomas descartadas en todas las pistas. Ctrl+Z lo deshace todo."""),
+    "montaje_guiado": ("🧭 Montaje guiado", """
+Los pasos de un montaje en orden: importar, quitar silencios, revisar los cortes dudosos, poner los clips
+de lo que dices, la revisión rápida, la miniatura y la entrega.<br><br>
+Cada paso muestra su estado y tiene su botón. Lo que hagas aquí es el mismo proyecto que en las demás páginas."""),
     "analizar_clips": ("◈ Analizar clips con IA", """
 La IA mira varios fotogramas de cada clip y anota su <b>tipo</b> (Gameplay, Cinemáticas, Menús…) y
 <b>lo que se ve</b> (combate, exploración, diálogo, personaje…).<br><br>
@@ -491,7 +513,12 @@ Se aplica al tema bajo el cabezal, o a «de 1:20 a 1:40», o «durante 20 segund
     "revision": ("Revisión del proyecto", """
 Nada se cambia solo: tú decides qué corregir. Doble clic en un aviso = ir a ese momento (y seleccionar el clip).
 ⛔ = casi seguro un fallo · ⚠️ = posible problema · ℹ️ = sugerencia."""),
-    "recorte_ia": ("✂ Recortar sujeto con IA", """
+    "shorts_video": ("✂ Shorts desde este video", """
+Reclaimer busca en tu narración los mejores momentos para Shorts de 45 a 75 segundos (voz con energía, temas y
+nombres que salen, y que empiezan y acaban en pausa).<br>
+<b>▶ Ver</b> reproduce el tramo. <b>✓ Crear Short</b> guarda un proyecto nuevo, en formato Short, solo con ese tramo.
+El video largo no cambia."""),
+    "recorte_ia":("✂ Recortar sujeto con IA", """
 Separa un personaje, una roca o un vehículo del fondo en TODO el clip (como la «Magic Mask» de Resolve).
 La IA (SAM 2.1, en tu tarjeta gráfica) no mira solo el contorno: entiende el interior (texturas, piezas,
 detalles) y recuerda los fotogramas anteriores, así lo sigue aunque gire o se tape un momento.<br><br>
@@ -509,12 +536,15 @@ algo (pelo, casco, arma), clic también ahí. Escribe su nombre y «✓ Guardar 
 <b>Buscar</b>: «🔎 Buscarlo en mis videos», o en 🔎 Momentos elige «👤 Nombre». Aprende sus colores propios (los
 que tiene él y no su fondo) en su proporción, su tamaño, su figura y sus líneas. Es ligero: la primera vez
 recorre cada video en miniatura (se guarda) y después es casi instantáneo."""),
-    "capitulos": ("📑 Capítulos para YouTube", """
-El texto «0:00 Intro · 3:12 Jugabilidad…» para pegar en la descripción: YouTube lo convierte en capítulos.<br>
+    "capitulos": ("📝 Descripción para YouTube", """
+La descripción completa del video, lista para pegar en YouTube: un párrafo inicial (solo para este proyecto), los
+<b>capítulos</b> («0:00 Intro · 3:12 Jugabilidad…», que YouTube convierte en capítulos), los <b>créditos</b> de los clips
+bajados, tu <b>pie fijo</b> (Ko-fi, redes…, para todos los videos) y <b>hashtags</b> sugeridos. Cada parte se activa o no.
+Al exportar el video se guarda también «<video>.descripcion.txt» junto a él.<br>
 Sale de tus <b>marcadores con nombre</b> (M en la línea de tiempo) o de los <b>temas de la narración</b>. Cambia
 los nombres en la lista (se guardan en los marcadores) y quita los que no quieras.<br>
 Reglas de YouTube (se aplican solas y te avisa): el primero en 0:00, al menos 3, cada uno de 10 s o más.<br>
-Archivo → «📑 Capítulos para YouTube…» (Ctrl+Mayús+K)."""),
+Archivo → «📝 Descripción para YouTube (capítulos, créditos…)» (Ctrl+Mayús+K)."""),
     "voz_off": ("🎙 Grabar voz en off", """
 Pon el cabezal donde empieza tu narración y pulsa ⏺ Grabar: tras la cuenta atrás el video se reproduce y grabas
 mientras lo ves; ⏹ Parar (o Espacio) y la toma cae en la pista de voz, en ese sitio. Nunca tapa nada (si ahí ya hay
@@ -534,8 +564,20 @@ gráfica libre. Tolera acentos y pequeños errores («Marcos» encuentra «Marcu
 otra palabra en el mismo archivo es instantáneo (y si ya lo transcribiste en «Limpieza», usa eso).<br>
 <b>Dónde</b>: pestaña IA ✨ → «🔑 Palabras clave», clic derecho en un clip (✨ IA) o en Medios.<br>
 <b>Resultados</b>: doble clic = ir ahí · arrastrar a la línea de tiempo · «➕ Poner en el cabezal» ·
-«📍 Marcadores» (si buscaste en la línea de tiempo)."""),
-    "temas_tool": ("◎ Temas: quedarme o mandar a Medios", """
+«📍 Marcadores» (si buscaste en la línea de tiempo).<br>
+<b>Añadir en una palabra clave</b> (clic derecho en un clip o en Medios): «Por partes (recomendado)» pone un trozo
+distinto en cada marca; «Entero» pone el video desde su principio hasta la siguiente marca.<br>
+<b>🔗</b> = archivo enlazado desde una carpeta de tu PC (no se copia; quitarlo no borra nada de tu PC)."""),
+    "clips_dijiste": ("🎬 Dijiste…", """
+Lo que dices en la narración que parece un juego, una compañía o una palabra de tu vocabulario. Pulsa una palabra
+para ver sus momentos. <b>Clic derecho</b>: «✓ Es palabra clave» (la guarda en el glosario) o «✕ No es palabra
+clave» (no volverá a salir). Lo que internet confirma como juego lleva ✓; lo que dice que no lo es, va al final y
+atenuado."""),
+    "glosario": ("📖 Glosario de palabras clave", """
+Dos listas: <b>Sí son palabras clave</b> (se buscan y se ofrecen en «Dijiste…» y en «✨ Crear de lo que dices») y
+<b>No son palabras clave</b> (nunca salen). Añade una palabra o frase con su tipo si quieres (juego, saga, consola…).
+«Quitar seleccionadas» la olvida de las dos listas. Se guarda al cerrar."""),
+    "temas_tool":("◎ Temas: quedarme o mandar a Medios", """
 Clic derecho en un tema → «◎ Temas: quedarme o mandar a Medios…». Marca los temas y elige:
 <b>Quedarme solo con estos</b> (lo demás se quita y se junta) · <b>Mandar a Medios</b> (cada tramo, un video en
 «Temas · <tema>», con el tema como palabra clave) · <b>Las dos cosas</b>. Ctrl+Z deshace lo de la línea de tiempo."""),

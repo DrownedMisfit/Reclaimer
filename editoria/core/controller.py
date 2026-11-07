@@ -10,13 +10,14 @@ así que sus cambios también serán reversibles y respetarán los bloqueos.
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
 import re
 import shutil
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
@@ -99,9 +100,73 @@ class _StateCommand(QUndoCommand):
         self._ctrl._apply_packed(self._before)
 
 
+class _LibraryCommand(QUndoCommand):
+    """Un paso de deshacer de «⟲ Reiniciar todo»: guarda biblioteca + timeline antes y después (en memoria)."""
+
+    def __init__(self, ctrl: "ProjectController", before: dict, after: dict, text: str):
+        super().__init__(text)
+        self._ctrl, self._before, self._after = ctrl, before, after
+        self._first = True
+
+    def redo(self):
+        if self._first:  # el cambio ya se aplicó al crearse
+            self._first = False
+            return
+        self._ctrl._library_restore(self._after)
+
+    def undo(self):
+        self._ctrl._library_restore(self._before)
+
+
+class _TranscriptCommand(QUndoCommand):
+    """Un paso de deshacer de una corrección de la transcripción (y de los resaltados de los subtítulos)."""
+
+    def __init__(self, ctrl: "ProjectController", media_id: str, text: str, before: dict | None, after: dict | None,
+                 emph_before: list, emph_after: list):
+        super().__init__(text)
+        self._ctrl, self._mid = ctrl, media_id
+        self._before, self._after = before, after
+        self._emph_before, self._emph_after = list(emph_before), list(emph_after)
+
+    def redo(self):
+        self._put(self._after, self._emph_after)
+
+    def undo(self):
+        self._put(self._before, self._emph_before)
+
+    def _put(self, data: dict | None, emph: list):
+        """Lista NUEVA (no se muta en sitio): la «firma» de los paneles cambia y se vuelven a dibujar."""
+        p = self._ctrl.project
+        p.transcripts[self._mid] = copy.deepcopy(data)
+        if p.subtitles.media_id == self._mid:
+            p.subtitles.emphasis = list(emph)
+        self._ctrl._set_media_dirty()
+        self._ctrl.transcript_changed.emit(self._mid)
+        self._ctrl.project_changed.emit()
+
+
 class _AnalysisSignals(QObject):
     done = Signal(str, object)
     rhythm = Signal(str, object)
+    peaks = Signal(str, object)
+
+
+class _PeaksTask(QRunnable):
+    """Calcula la forma de onda de un archivo (decodifica todo el sonido: lo caro) en segundo plano."""
+
+    def __init__(self, media_id: str, path: str, signals: _AnalysisSignals):
+        super().__init__()
+        self.media_id, self.path, self.signals = media_id, path, signals
+
+    def run(self):
+        try:
+            res = {"peaks": media_tools.waveform_peaks(self.path)}
+        except Exception as exc:  # noqa: BLE001 - se informa al usuario
+            res = {"error": str(exc)}
+        try:
+            self.signals.peaks.emit(self.media_id, res)
+        except RuntimeError:          # se cerró Reclaimer mientras se calculaba
+            pass
 
 
 class _RhythmTask(QRunnable):
@@ -137,8 +202,12 @@ class _AnalyzeTask(QRunnable):
             result["info"] = info
             if self.kind in (KIND_VIDEO, KIND_IMAGE):
                 result["thumb"] = media_tools.thumbnail(self.path, self.kind, info["duration"])
+            # Los PICOS de onda NO se calculan aquí (decodificar todo el sonido es lo caro): se piden cuando el medio
+            # entra en la línea de tiempo o los necesita una acción (ver ensure_peaks). Solo se leen si ya existen.
             if self.kind == KIND_AUDIO or (self.kind == KIND_VIDEO and info.get("has_audio")):
-                result["peaks"] = media_tools.waveform_peaks(self.path)
+                cached = media_tools.cached_peaks(self.path)
+                if cached is not None:
+                    result["peaks"] = cached
             # (las pistas de OBS ya no se separan solas al importar: el usuario lo pide con «⋮ → 🎵 Separar audio»)
         except Exception as exc:  # noqa: BLE001 - cualquier fallo se informa al usuario
             result["error"] = str(exc)
@@ -175,6 +244,7 @@ class ProjectController(QObject):
     dirty_changed = Signal()
     message = Signal(str)        # mensaje para la barra de estado
     rhythm_changed = Signal()    # se reconoció el ritmo de alguna canción
+    peaks_changed = Signal()     # llegaron picos de volumen (forma de onda, medidores, cortes)
     saved = Signal(str)          # se guardó el proyecto (ruta)
 
     def __init__(self, parent=None):
@@ -200,12 +270,21 @@ class ProjectController(QObject):
         self.beats: dict[str, list[float]] = {}   # golpes de la música (segundos del archivo)
         self.rhythm: dict[str, dict] = {}          # ritmo reconocido de cada canción (ai/rhythm.py)
         self.rhythm_busy: set[str] = set()
+        # Importar mucho material no debe trabarlo: como mucho 2 archivos a la vez (ffprobe + miniatura)
         self._pool = QThreadPool(self)
-        self._pool.setMaxThreadCount(max(2, min(4, (os.cpu_count() or 4) // 4)))
+        self._pool.setMaxThreadCount(2)
+        # Los picos de onda (lo caro) van en su propio hilo, de uno en uno, solo para lo que se usa
+        self._peak_pool = QThreadPool(self)
+        self._peak_pool.setMaxThreadCount(1)
+        self._peaks_busy: set[str] = set()      # calculándose en segundo plano
+        self._peaks_failed: set[str] = set()    # no se pudo leer su sonido (no se reintenta en bucle)
+        self._want_peaks: set[str] = set()      # pedidos a fondo (analyze_full) hasta que esté su análisis
         self._signals = _AnalysisSignals(self)
         self._signals.done.connect(self._on_analyzed)
         self._signals.rhythm.connect(self._on_rhythm)
+        self._signals.peaks.connect(self._on_peaks)
         self.project_changed.connect(self._auto_rhythm)
+        self.project_changed.connect(self._queue_timeline_peaks)
 
     # ------------------------------------------------------------------ estado
     def shutdown(self, wait_ms: int = 3000) -> bool:
@@ -213,7 +292,9 @@ class ProjectController(QObject):
         False si alguno no terminó a tiempo (entonces Reclaimer sale sin destruir su hilo: si no, se caía al cerrar
         justo después de importar o grabar algo)."""
         self._pool.clear()
-        return bool(self._pool.waitForDone(wait_ms))
+        self._peak_pool.clear()
+        ok = self._pool.waitForDone(wait_ms)
+        return bool(self._peak_pool.waitForDone(wait_ms) and ok)
 
     def new_undo_stack(self) -> QUndoStack:
         st = QUndoStack(self)
@@ -251,10 +332,16 @@ class ProjectController(QObject):
     split_av = True   # al poner un video, su sonido va a una pista de audio, vinculado (como en Resolve)
     proxy_level = "full"   # resolución de la línea de tiempo en el visor: full | half | quarter
 
-    def preview_path(self, m) -> str:
+    def preview_path(self, m, max_w: float | None = None) -> str:
         """Archivo que reproduce el visor: la copia ligera si se eligió «Media»/«Un cuarto» y ya existe.
-        (Exportar usa siempre m.path, el original.)"""
+        Con «Completa», si el visor es pequeño (max_w = ancho en pantalla, px), también una copia ligera que ya
+        exista (nunca se prepara ninguna en segundo plano). (Exportar usa siempre m.path, el original.)"""
         from .proxies import has_proxy, proxy_path
+        if self.proxy_level == "full" and max_w is not None and m.kind == KIND_VIDEO:
+            for level, lim in (("quarter", 500), ("half", 1000)):
+                if max_w <= lim and has_proxy(m.path, level):
+                    return proxy_path(m.path, level)
+            return m.path
         if self.proxy_level != "full" and m.kind == KIND_VIDEO and has_proxy(m.path, self.proxy_level):
             return proxy_path(m.path, self.proxy_level)
         return m.path
@@ -323,8 +410,11 @@ class ProjectController(QObject):
         m = p.media_of(c)
         return bool(m and m.kind == KIND_IMAGE)
 
-    def _clear_range(self, p: Project, track_id: str, a: float, b: float, exclude=()):
-        """Deja libre el tramo [a, b) de una pista recortando lo que haya (modo sobrescribir)."""
+    def _clear_range(self, p: Project, track_id: str, a: float, b: float, exclude=(), relink: dict | None = None):
+        """Deja libre el tramo [a, b) de una pista recortando lo que haya (modo sobrescribir).
+        relink: si el sonido/imagen vinculado se corta TAMBIÉN en la misma operación (quitar silencios, cerrar hueco),
+        cada pieza de la derecha recibe su propio vínculo (un dict compartido por todas las pistas de ese tramo);
+        sin él, la pieza derecha conserva el vínculo (su pareja no se ha cortado)."""
         for c in p.clips_on(track_id):
             if c.id in exclude or c.end <= a + EPS or c.start >= b - EPS:
                 continue
@@ -335,7 +425,8 @@ class ProjectController(QObject):
                 del p.clips[c.id]
             elif c.start < a and c.end > b:  # el hueco cae en medio: se parte en dos
                 right = replace(c, id=new_id(), start=b, duration=c.end - b,
-                                source_in=c.piece_src(b - c.start, c.duration) if shift_src else 0.0)
+                                source_in=c.piece_src(b - c.start, c.duration) if shift_src else 0.0,
+                                link=self._new_link(c.link, relink))
                 if shift_src:
                     c.source_in = c.piece_src(0.0, a - c.start)
                 c.duration = a - c.start
@@ -350,6 +441,13 @@ class ProjectController(QObject):
                     c.source_in = c.piece_src(cut, c.duration)
                 c.start = b
                 c.duration -= cut
+
+    @staticmethod
+    def _new_link(old: str, relink: dict | None) -> str:
+        """Vínculo de una pieza nueva al cortar: sin relink, el mismo; con relink, uno propio por pareja."""
+        if relink is None:
+            return old
+        return relink.setdefault(old, new_id()) if old else ""
 
     def _auto_layout(self, p: Project, m: MediaItem | None, track_id: str) -> dict | None:
         """Al AÑADIR un clip: sin efectos automáticos (el usuario: «no espero que porque sea 9:16 tenga una imagen
@@ -575,45 +673,120 @@ class ProjectController(QObject):
         un clip sin querer. overwrite=True: sobrescribe lo que haya (modo antiguo).
         new_track=True (soltar debajo de la última pista): cada tipo de archivo va a una pista NUEVA."""
         def fn(p: Project):
-            t = max(0.0, start)
-            created = []
-            fresh: dict[str, str] = {}         # tipo de pista -> la pista nueva creada en este paso
-            for mid in media_ids:
-                m = p.media.get(mid)
-                if m is None:
-                    continue
-                if mid in self.missing:
-                    raise EditError(f"No se encuentra el archivo «{m.name}».")
-                if m.kind == KIND_IMAGE:
-                    dur = DEFAULT_IMAGE_DURATION
-                elif m.duration > 0:
-                    dur = m.duration
-                else:
-                    raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
-                if new_track:
-                    kind = self.track_kind_for(m)
-                    if kind not in fresh:
-                        fresh[kind] = self._new_track_for(p, kind)
-                    tid = fresh[kind]
-                else:
-                    tid = self._compatible_track(p, m, track_id)
-                if overwrite:
-                    self._clear_range(p, tid, t, t + dur)
-                else:
-                    tid = self._free_track(p, p.track(tid).kind, tid, t, t + dur)
-                c = Clip(new_id(), mid, tid, t, 0.0, dur, origin=origin, layout=self._auto_layout(p, m, tid))
-                p.clips[c.id] = c
-                created.append(c.id)
-                ac = self._link_audio(p, c, m)   # el sonido, debajo y vinculado (como en Resolve)
-                if ac:
-                    created.append(ac)
-                t += dur
-            return created
+            return self._place_media(p, media_ids, track_id, start, origin, overwrite, new_track)
 
         n = len(media_ids)
         created = self._edit("Añadir clip" if n == 1 else f"Añadir {n} clips", fn)
         if created:
             self.clips_placed.emit(list(created))
+        return created
+
+    def add_media_at_times(self, media_ids: list[str], times: list[float], text: str = "",
+                           origin: str = ORIGIN_USER, modo: str = "partes"):
+        """🔑 Pone los archivos en cada instante de una palabra clave, todo en UN solo paso de deshacer.
+        Vídeos (como B-roll, sin sonido, en una pista de video libre encima de la principal):
+          · modo «partes»: en cada marca un trozo distinto y consecutivo del video, con la duración de la frase;
+          · modo «entero»: desde el principio (tras logos) hasta la siguiente marca, el final del video o el de la
+            línea de tiempo, lo que llegue antes.
+        Imágenes: con la duración de la frase. Varios archivos: cada marca toma uno, cíclico."""
+        from .keyword_place import duracion_frase
+        starts = sorted({round(max(0.0, float(t)), 4) for t in times})
+        if not starts or not media_ids:
+            return None
+
+        def fn(p: Project):
+            n = len(media_ids)
+            fin_linea = p.duration()
+            por_video: dict[str, list[tuple[float, float, float]]] = {}
+            sig: dict[str, float] = {}      # por video (modo partes): dónde acabó el trozo anterior
+            created: list[str] = []
+            sin_sitio = 0
+            for i, t in enumerate(starts):
+                mid = media_ids[i % n]
+                m = p.media.get(mid)
+                if m is None:
+                    sin_sitio += 1
+                    continue
+                if mid in self.missing:
+                    raise EditError(f"No se encuentra el archivo «{m.name}».")
+                nxt = starts[i + 1] if i + 1 < len(starts) else math.inf
+                if m.kind != KIND_VIDEO:            # imagen (o audio): la frase y nunca hasta la marca siguiente
+                    d = min(duracion_frase(p, t), nxt - t)
+                    if d < 0.5:
+                        sin_sitio += 1
+                        continue
+                    created += self._place_media(p, [mid], None, t, origin, dur_override=d)
+                    continue
+                if m.duration <= 0:
+                    raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
+                s0 = min(3.0, 0.1 * float(m.duration))          # salta los logos del principio
+                if modo == "entero":
+                    d = min(m.duration - s0, nxt - t, fin_linea - t)
+                    src = s0
+                else:
+                    src = sig.setdefault(mid, s0)
+                    d = min(duracion_frase(p, t), nxt - t, m.duration - src)
+                if d < 0.5:
+                    sin_sitio += 1
+                    continue
+                por_video.setdefault(mid, []).append((t, d, src))
+                if modo != "entero":
+                    sig[mid] = src + d
+            for mid, items in por_video.items():
+                created += self._place_clip_items(p, mid, items)
+            if not created:
+                raise EditError("No hay sitio para ponerlo: el video no da para tantos trozos.")
+            if sin_sitio:
+                self.message.emit(f"⚠ {sin_sitio} momento(s) sin sitio (el video no da para más trozos): "
+                                  "se han omitido.")
+            return created
+
+        created = self._edit(text or ("Añadir en la palabra clave" if len(starts) == 1
+                                      else f"Añadir en {len(starts)} palabras clave"), fn)
+        if created:
+            self.clips_placed.emit(list(created))
+        return created
+
+    def _place_media(self, p: Project, media_ids: list[str], track_id: str | None, start: float,
+                     origin: str = ORIGIN_USER, overwrite: bool = False, new_track: bool = False,
+                     dur_override: float | None = None) -> list[str]:
+        """El trabajo de add_media (dentro de un _edit): coloca los archivos uno detrás de otro desde «start».
+        dur_override: duración fija para las imágenes (en vez de la de siempre)."""
+        t = max(0.0, start)
+        created = []
+        fresh: dict[str, str] = {}         # tipo de pista -> la pista nueva creada en este paso
+        for mid in media_ids:
+            m = p.media.get(mid)
+            if m is None:
+                continue
+            if mid in self.missing:
+                raise EditError(f"No se encuentra el archivo «{m.name}».")
+            if m.kind == KIND_IMAGE:
+                dur = dur_override or DEFAULT_IMAGE_DURATION
+            elif dur_override:          # audio con «donde lo dices»: solo la frase, no el archivo entero
+                dur = dur_override
+            elif m.duration > 0:
+                dur = m.duration
+            else:
+                raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
+            if new_track:
+                kind = self.track_kind_for(m)
+                if kind not in fresh:
+                    fresh[kind] = self._new_track_for(p, kind)
+                tid = fresh[kind]
+            else:
+                tid = self._compatible_track(p, m, track_id)
+            if overwrite:
+                self._clear_range(p, tid, t, t + dur)
+            else:
+                tid = self._free_track(p, p.track(tid).kind, tid, t, t + dur)
+            c = Clip(new_id(), mid, tid, t, 0.0, dur, origin=origin, layout=self._auto_layout(p, m, tid))
+            p.clips[c.id] = c
+            created.append(c.id)
+            ac = self._link_audio(p, c, m)   # el sonido, debajo y vinculado (como en Resolve)
+            if ac:
+                created.append(ac)
+            t += dur
         return created
 
     def insert_ranges(self, items: list[dict], track_id: str, text: str, origin: str = ORIGIN_USER,
@@ -2054,6 +2227,28 @@ class ProjectController(QObject):
         res = self._edit("Añadir pista", lambda p: self._role_track(p, role, create=True))
         return res if isinstance(res, str) else None
 
+    def ensure_video_above(self, track_id: str) -> str | None:
+        """Una pista de video ENCIMA de track_id (p. ej. el B-roll, V1): la más cercana que ya haya o, si no hay
+        ninguna (proyecto nuevo de una sola pista), una nueva «V2» justo encima. Un paso de deshacer."""
+        p = self.project
+        i = p.track_index(track_id)
+        if i < 0:
+            return None
+        above = [t for t in p.tracks[:i] if t.kind == TRACK_VIDEO]
+        if above:
+            return above[-1].id
+        res = self._edit("Añadir pista", lambda q: self._video_above(q, track_id))
+        return res if isinstance(res, str) else None
+
+    def _video_above(self, p: Project, track_id: str) -> str | None:
+        i = p.track_index(track_id)
+        if i < 0:
+            return None
+        n = sum(1 for t in p.tracks if t.kind == TRACK_VIDEO) + 1
+        nt = Track(new_id(), TRACK_VIDEO, f"V{n}")
+        p.tracks.insert(i, nt)
+        return nt.id
+
     def add_track(self, kind: str):
         def fn(p: Project):
             n = sum(1 for t in p.tracks if t.kind == kind) + 1
@@ -2139,9 +2334,10 @@ class ProjectController(QObject):
                     self._ripple_delete(p, a, b)
                 else:
                     d = b - a
+                    relink: dict = {}              # un vínculo nuevo por pareja de este tramo
                     for tid in tracks:
                         self._check_track(p, tid)
-                        self._clear_range(p, tid, a, b)
+                        self._clear_range(p, tid, a, b, relink=relink)
                         for c in p.clips_on(tid):
                             if c.start >= b - EPS:
                                 if c.locked:
@@ -2168,12 +2364,96 @@ class ProjectController(QObject):
         total = sum(b - a for a, b in regs)
         return self._edit(f"Eliminar silencio ({len(regs)} tramos, {total:.1f} s)", fn)
 
+    def move_range(self, a: float, b: float, to: float, copy: bool = False) -> bool:
+        """«Mover con el texto» / «Copiar con el texto» (panel Texto: Ctrl+X/C y Ctrl+V). Lo que hay en la línea de
+        tiempo entre a y b (en las pistas sin candado) pasa a `to`: al mover, lo de detrás se acerca; al copiar, se
+        duplica y lo de detrás se aparta. Lo que cruza a o b se parte (cada pareja imagen+sonido sigue vinculada solo
+        con su pareja) y los marcadores dentro viajan con el tramo. Un solo paso de deshacer. False si no hace nada."""
+        d = b - a
+        if d <= EPS:
+            return False
+        if a + EPS < to < b - EPS:
+            self.message.emit("No puedes pegar un trozo dentro de sí mismo.")
+            return False
+        if not copy and a - EPS <= to <= b + EPS:
+            self.message.emit("Ya está en ese sitio.")
+            return False
+        label = "Copiar con el texto" if copy else "Mover con el texto"
+
+        def fn(p: Project):
+            self._check_ripple(p, min(a, to))          # nada bloqueado detrás del punto más temprano
+            opened = {tr.id for tr in p.tracks if not tr.locked}
+            for t in (a, b):                            # 1) partir en a y en b (solo pistas sin candado)
+                for c in list(p.clips.values()):
+                    if c.track_id in opened and c.start < t - EPS < c.end - EPS:
+                        self._split_at(p, c, t)        # (las parejas se parten juntas y vuelven a vincularse)
+            block = [c for c in p.clips.values() if c.track_id in opened and c.start >= a - EPS and c.end <= b + EPS]
+            inside = [m for m in p.markers if a - EPS <= m.time < b - EPS]
+            if copy:
+                offs = [c.start - a for c in block]
+                dupes = [Clip(**asdict(c)) for c in block]
+                relink: dict = {}                       # un vínculo nuevo por pareja de la copia
+                for n in dupes:
+                    n.id = new_id()
+                    n.link = relink.setdefault(n.link, new_id()) if n.link else ""
+                marks = [Marker(**{**asdict(m), "id": new_id()}) for m in inside]
+                self._open_gap(p, to, d, opened)        # 2) hueco en `to` (lo de detrás se aparta)
+                for n, off in zip(dupes, offs):
+                    n.start = to + off
+                    p.clips[n.id] = n
+                for m in marks:
+                    m.time = m.time - a + to
+                    if m.end is not None:
+                        m.end = min(m.end, b) - a + to
+                    p.markers.append(m)
+            else:
+                for c in block:                         # 2) quitar el tramo y cerrar el hueco
+                    p.clips.pop(c.id, None)
+                gone = {id(m) for m in inside}
+                p.markers[:] = [m for m in p.markers if id(m) not in gone]
+                for c in p.clips.values():
+                    if c.track_id in opened and c.start >= b - EPS:
+                        c.start -= d
+                for m in p.markers:
+                    if m.time >= b - EPS:
+                        m.time -= d
+                    if m.end is not None and m.end >= b - EPS:
+                        m.end -= d
+                to_eff = to if to <= a else to - d     # `to` en la línea ya sin el tramo
+                self._open_gap(p, to_eff, d, opened)   # 3) hueco y colocar el tramo
+                for c in block:
+                    c.start = c.start - a + to_eff
+                    p.clips[c.id] = c
+                for m in inside:
+                    m.time = m.time - a + to_eff
+                    if m.end is not None:
+                        m.end = min(m.end, b) - a + to_eff
+                    p.markers.append(m)
+            return True
+
+        return bool(self._edit(label, fn))
+
+    def _open_gap(self, p: Project, t: float, d: float, opened: set):
+        """Abre d segundos en t en las pistas `opened` (parte lo que cruza t) y mueve lo de detrás y los marcadores."""
+        for c in list(p.clips.values()):
+            if c.track_id in opened and c.start < t - EPS < c.end - EPS:
+                self._split_at(p, c, t)
+        for c in p.clips.values():
+            if c.track_id in opened and c.start >= t - EPS:
+                c.start += d
+        for m in p.markers:
+            if m.time >= t - EPS:
+                m.time += d
+            if m.end is not None and m.end >= t - EPS:
+                m.end += d
+
     def _ripple_delete(self, p: Project, ta: float, tb: float):
         """Quita el tramo [ta, tb] de TODAS las pistas y adelanta lo que viene detrás."""
         d = tb - ta
         self._check_ripple(p, ta)
+        relink: dict = {}                   # imagen y sonido de cada corte quedan vinculados solo entre sí
         for tr in p.tracks:
-            self._clear_range(p, tr.id, ta, tb)
+            self._clear_range(p, tr.id, ta, tb, relink=relink)
             for c in p.clips_on(tr.id):
                 if c.start >= tb - EPS:
                     c.start -= d
@@ -2192,11 +2472,13 @@ class ProjectController(QObject):
     def _ripple_insert(self, p: Project, t: float, d: float):
         """Abre un hueco de d segundos en el momento t en TODAS las pistas."""
         self._check_ripple(p, t)
+        relink: dict = {}
         for tr in p.tracks:
             for c in p.clips_on(tr.id):
                 if c.start < t - EPS < c.end - EPS:  # el clip cruza el punto: se parte
                     right = replace(c, id=new_id(), start=t, duration=c.end - t,
-                                    source_in=0.0 if self._is_image(p, c) else c.piece_src(t - c.start, c.duration))
+                                    source_in=0.0 if self._is_image(p, c) else c.piece_src(t - c.start, c.duration),
+                                    link=self._new_link(c.link, relink))
                     if not self._is_image(p, c):
                         c.source_in = c.piece_src(0.0, t - c.start)
                     c.duration = t - c.start
@@ -3675,9 +3957,25 @@ class ProjectController(QObject):
         self._set_media_dirty()
         self.transcript_changed.emit(media_id)
 
-    def edit_words(self, media_id: str, indices: list[int], text: str):
+    def _transcript_step(self, media_id: str, label: str, fn):
+        """Corrección hecha por el usuario: fn() cambia la transcripción de media_id y, si cambió algo, queda como
+        UN paso de deshacer (Ctrl+Z / Ctrl+Y) en el historial del proyecto."""
+        tr0 = copy.deepcopy(self.project.transcripts.get(media_id))
+        emph0 = list(self.project.subtitles.emphasis)
+        result = fn()
+        tr1 = self.project.transcripts.get(media_id)
+        if tr1 == tr0:
+            return result
+        self.undo_stack.push(_TranscriptCommand(self, media_id, label, tr0, copy.deepcopy(tr1), emph0,
+                                                list(self.project.subtitles.emphasis)))
+        return result
+
+    def edit_words(self, media_id: str, indices: list[int], text: str, label: str = "Corregir texto"):
         """Corrige varias palabras seguidas (un bloque de lo que sale en pantalla). Con el mismo número de palabras,
         cada una conserva sus tiempos; si cambia, las nuevas se reparten en el mismo tramo (según su largo)."""
+        return self._transcript_step(media_id, label, lambda: self._edit_words(media_id, indices, text))
+
+    def _edit_words(self, media_id: str, indices: list[int], text: str):
         words = self.project.transcripts.get(media_id, {}).get("words", [])
         idx = sorted(i for i in indices if 0 <= i < len(words))
         new = text.split()
@@ -3707,8 +4005,12 @@ class ProjectController(QObject):
         """Corrige el texto de una palabra (los tiempos no cambian, así sigue sincronizada)."""
         self.edit_word_texts(media_id, {index: text})
 
-    def edit_word_texts(self, media_id: str, texts: dict[int, str]) -> int:
+    def edit_word_texts(self, media_id: str, texts: dict[int, str], label: str | None = None) -> int:
         """✎ Corrige varias palabras de una vez (p. ej. la misma en todo el texto); los tiempos no cambian."""
+        label = label or ("Corregir palabra" if len(texts) == 1 else "Corregir texto")
+        return self._transcript_step(media_id, label, lambda: self._edit_word_texts(media_id, texts))
+
+    def _edit_word_texts(self, media_id: str, texts: dict[int, str]) -> int:
         words = self.project.transcripts.get(media_id, {}).get("words", [])
         n = 0
         for i, t in texts.items():
@@ -3866,6 +4168,265 @@ class ProjectController(QObject):
 
         return self._edit("IA · Restaurar corte", fn)
 
+    # ---- ajustar a mano un corte de audio (las «líneas rojas», ver core/cut_check.py) ----
+    def _cut_pair(self, p: Project, track_id: str, t: float) -> tuple[Clip, Clip, float]:
+        """El clip que termina en t (L) y el que empieza en t (R) de esa pista, y el silencio cortado entre ambos."""
+        clips = p.clips_on(track_id)
+        L = next((c for c in clips if abs(c.end - t) <= mapping.TOL and not c.retimed), None)
+        R = next((c for c in clips if abs(c.start - t) <= mapping.TOL and not c.retimed), None)
+        if L is None or R is None or L.id == R.id or L.media_id != R.media_id:
+            raise EditError("Ese corte ya no está en la línea de tiempo (puede que lo hayas cambiado).")
+        self._check_clip(p, L)
+        self._check_clip(p, R)
+        return L, R, R.source_in - (L.source_in + L.duration)
+
+    def _open_cut_hole(self, p: Project, t: float, d: float, side: str, media_id: str):
+        """Abre un hueco de d segundos en t en TODAS las pistas, sin partir nada: lo que cruza t se alarga; lo que
+        empieza en t o después se mueve d; y el hueco se rellena con lo que hay en el archivo junto al corte: el clip
+        que termina en t (side «antes») o el que empieza en t, hacia atrás (side «despues»), si son del mismo archivo."""
+        for tr in p.tracks:
+            clips = p.clips_on(tr.id)
+            for c in clips:
+                if c.start >= t - EPS:
+                    c.start += d
+                elif c.end > t + EPS:                         # cruza t: se alarga
+                    c.duration += d
+                elif (side == "antes" and abs(c.end - t) <= mapping.TOL
+                      and c.media_id == media_id and not c.retimed):
+                    c.duration += d                           # termina en t: se alarga con lo que sigue en el archivo
+            if side == "despues":
+                for c in clips:                               # lo que estaba en t (ahora en t+d): se extiende atrás
+                    if (abs(c.start - (t + d)) <= mapping.TOL and c.media_id == media_id and not c.retimed
+                            and (self._is_image(p, c) or c.source_in - d >= -1e-3)):
+                        c.start -= d
+                        c.duration += d
+                        if not self._is_image(p, c):
+                            c.source_in -= d
+        for m in p.markers:                                   # los marcadores se mueven igual que en _ripple_insert
+            if m.time >= t:
+                m.time += d
+            if m.end is not None and m.end >= t:
+                m.end += d
+
+    def adjust_cut(self, track_id: str, t: float, side: str, delta: float):
+        """Ajusta a mano un corte de audio (la línea roja). side = "antes": el final del clip de la izquierda;
+        "despues": el principio del de la derecha. delta > 0 recupera audio del silencio cortado (como mucho, todo);
+        delta < 0 quita más. Un solo paso de deshacer."""
+        if side not in ("antes", "despues"):
+            raise ValueError("side debe ser «antes» o «despues»")
+        delta = float(delta)
+        if abs(delta) < 1e-4:
+            return None
+
+        def fn(p: Project):
+            L, R, gap = self._cut_pair(p, track_id, t)
+            if delta < 0:                                     # quitar más: se cierra el hueco como «Eliminar silencio»
+                d = -delta
+                if side == "antes":
+                    if d > L.duration - 0.02:
+                        raise EditError("No se puede quitar tanto: el clip de la izquierda se quedaría sin nada.")
+                    self._ripple_delete(p, t - d, t)
+                else:
+                    if d > R.duration - 0.02:
+                        raise EditError("No se puede quitar tanto: el clip de la derecha se quedaría sin nada.")
+                    self._ripple_delete(p, t, t + d)
+                return
+            if gap <= 1e-4:
+                raise EditError("Aquí no hay silencio cortado que recuperar.")
+            if delta > gap + 1e-4:
+                raise EditError(f"Solo hay {gap * 1000:.0f} ms cortados aquí: no se puede recuperar más.")
+            media = p.media.get(L.media_id)
+            if side == "antes":
+                if media is not None and media.duration > 0 and L.source_in + L.duration + delta > media.duration + 1e-3:
+                    raise EditError("No hay tanto audio después de ese punto en el archivo.")
+            elif R.source_in - delta < -1e-3:
+                raise EditError("No hay tanto audio antes de ese punto en el archivo.")
+            self._check_ripple(p, t)
+            self._open_cut_hole(p, t, delta, side, L.media_id)
+            if abs(gap - delta) <= 1e-4:                      # el silencio entero volvió: se unen los clips (como _heal)
+                t_new = t + delta if side == "antes" else t
+                for tr in p.tracks:
+                    self._heal(p, tr.id, t_new, 0.0)
+
+        return self._edit("Ajustar corte de audio", fn)
+
+    def approve_cut(self, key: str):
+        """«✓ Está bien así»: ese corte deja de tener línea roja (Ctrl+Z lo devuelve)."""
+        def fn(p: Project):
+            if key not in p.cut_ok:
+                p.cut_ok.append(key)
+
+        return self._edit("✓ Corte revisado: está bien así", fn)
+
+    # ------------------------------------------------- 🖼 imágenes encima de un video (overlay.py)
+    def add_image_overlay(self, media_ids: list[str], track_id: str, start: float) -> list[str] | None:
+        """Imágenes soltadas en una pista de video. Si hay video debajo en ese momento, cada una dura lo que dura la
+        frase que se dice (1,5–6 s) y lleva el estilo «Encima, fondo desenfocado y sombra». Si no hay nada debajo, se
+        añade como siempre. Todo en un solo paso de deshacer."""
+        from . import overlay
+
+        def fn(p: Project):
+            tr = p.track(track_id)
+            if tr is None or tr.kind != TRACK_VIDEO:
+                raise EditError("Las imágenes van a una pista de video.")
+            t = max(0.0, start)
+            created = []
+            for mid in media_ids:
+                m = p.media.get(mid)
+                if m is None or m.kind != KIND_IMAGE:
+                    continue
+                if mid in self.missing:
+                    raise EditError(f"No se encuentra el archivo «{m.name}».")
+                dur, _from_phrase = overlay.auto_duration(p, t)
+                under = bool(overlay.visual_under(p, track_id, t, t + dur))
+                if not under:
+                    dur = DEFAULT_IMAGE_DURATION
+                tid = self._free_track(p, TRACK_VIDEO, track_id, t, t + dur)
+                c = Clip(new_id(), mid, tid, t, 0.0, dur, origin=ORIGIN_USER, layout=self._auto_layout(p, m, tid))
+                p.clips[c.id] = c
+                created.append(c.id)
+                if under:
+                    self._image_style(p, c, "auto")
+                t += dur
+            if not created:
+                raise EditError("No hay imágenes que colocar.")
+            return created
+
+        created = self._edit("Imagen encima del video" if len(media_ids) == 1 else "Imágenes encima del video", fn)
+        if created:
+            self.clips_placed.emit(list(created))
+        return created
+
+    def set_image_style(self, clip_ids: list[str], style: str) -> int | None:
+        """🖼 Estilo de una o varias imágenes (menú «🖼 Estilo de imagen»). style = clave de overlay.STYLES, o
+        «phrase» (⏱ Ajustar a la frase: duración = la frase que se dice en el momento de la imagen)."""
+        from . import overlay
+
+        def fn(p: Project):
+            n = 0
+            for cid in clip_ids:
+                c = p.clips.get(cid)
+                m = p.media_of(c) if c is not None else None
+                if c is None or m is None or m.kind != KIND_IMAGE or c.text is not None:
+                    continue
+                self._check_clip(p, c)
+                if style == "phrase":
+                    d = overlay.voice_duration(p, c.start)
+                    if d is None:
+                        continue
+                    d = min(overlay.DUR_MAX, max(overlay.DUR_MIN, d))
+                    nxt = min((o.start for o in p.clips_on(c.track_id) if o.id != c.id and o.start >= c.start + EPS),
+                              default=math.inf)
+                    c.duration = max(MIN_CLIP, min(d, nxt - c.start))
+                    self._image_style(p, c, (c.fx or {}).get("ovl", {}).get("style", "auto"))
+                else:
+                    self._image_style(p, c, style)
+                n += 1
+            if not n:
+                raise EditError("No hay nada que cambiar: falta la transcripción de la voz o la imagen está bloqueada.")
+            return n
+
+        return self._edit("⏱ Ajustar a la frase" if style == "phrase" else "🖼 Estilo de imagen", fn)
+
+    def _image_style(self, p: Project, c: Clip, style: str):
+        """Pone a una imagen un estilo de 🖼 (overlay.py) y desenfoca —o devuelve— el video de debajo."""
+        from . import overlay
+        plan = overlay.style_plan(style, c.duration)
+        c.layout = plan["layout"]
+        c.layout_kf = plan["layout_kf"]
+        c.op_kf = plan["op_kf"]
+        fx = {k: v for k, v in (c.fx or {}).items() if k not in overlay.DECOR_KEYS}
+        fx.update(plan["fx"])
+        fx["ovl"] = {"style": style}
+        c.fx = fx
+        self._blur_under(p, c, plan["blur"])
+
+    def _blur_under(self, p: Project, ov: Clip, on: bool):
+        """Desenfoca el video de debajo de la imagen ov SOLO mientras dura (corta los clips si hace falta). Lo que
+        puso antes esta imagen se quita y el desenfoque que ya tuviera el clip se devuelve."""
+        from . import overlay
+        for b in list(p.clips.values()):
+            info = (b.fx or {}).get("ovl_bg")
+            if isinstance(info, dict) and info.get("ov") == ov.id:
+                fx = {k: v for k, v in b.fx.items() if k != "ovl_bg"}
+                if info.get("prev"):
+                    fx["blur"] = info["prev"]
+                else:
+                    fx.pop("blur", None)
+                b.fx = fx or None
+        if not on:
+            return
+        for b in overlay.visual_under(p, ov.track_id, ov.start, ov.end):
+            tr = p.track(b.track_id)
+            if b.locked or (tr is not None and tr.locked):
+                continue
+            cur = b
+            if cur.start + MIN_CLIP < ov.start < cur.end - MIN_CLIP:
+                cur = self._split_at(p, cur, ov.start)
+            if cur.start + MIN_CLIP < ov.end < cur.end - MIN_CLIP:
+                self._split_at(p, cur, ov.end)
+            fx = dict(cur.fx or {})
+            fx["ovl_bg"] = {"ov": ov.id, "prev": float(fx.get("blur", 0) or 0)}
+            fx["blur"] = overlay.BLUR
+            cur.fx = fx
+
+    def place_clip_at(self, media_id: str, times: list[float], durations: list[float],
+                      source_in: float) -> list[str]:
+        """📍 «Poner donde lo dices»: el clip (en silencio: es B-roll) en CADA momento (segundos de la línea de tiempo)
+        con su duración, en una pista de video libre POR ENCIMA de la principal (la de abajo, donde van la narración
+        y el B-roll). Si ninguna está libre en ese tramo, se crea una pista nueva justo encima de la principal.
+        Todo en un solo paso de deshacer. Devuelve los ids de los clips creados."""
+
+        def fn(p: Project):
+            ids = self._place_clip_items(p, media_id, [(t, d, source_in) for t, d in zip(times, durations)])
+            if not ids:
+                raise EditError("No hay sitio para ponerlo: los momentos son demasiado cortos.")
+            return ids
+
+        res = self._edit("📍 Poner donde lo dices", fn)
+        return res if isinstance(res, list) else []
+
+    def _place_clip_items(self, p: Project, media_id: str, items: list[tuple[float, float, float]]) -> list[str]:
+        """El trabajo de place_clip_at (dentro de un _edit). items = [(inicio, duración, source_in)], cada uno con SU
+        trozo del archivo. Van en la primera pista de video libre por encima de la principal en su tramo (si ninguna,
+        se crea una justo encima de la principal). Clips en silencio (B-roll). Devuelve los ids creados."""
+        m = p.media.get(media_id)
+        es_img = m is not None and m.kind == KIND_IMAGE
+        if m is None or m.kind not in (KIND_VIDEO, KIND_IMAGE):
+            raise EditError("Ese archivo no es un video ni una imagen.")
+        if m.kind == KIND_VIDEO and m.duration <= 0:
+            raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
+        vt = [t for t in p.tracks if t.kind == TRACK_VIDEO]
+        if not vt:
+            raise EditError("No hay pistas de video.")
+        main = vt[-1]
+        # las pistas de encima, de la más cercana a la principal a la más alta
+        arriba = sorted((t for t in vt if p.track_index(t.id) < p.track_index(main.id)),
+                        key=lambda t: -p.track_index(t.id))
+        ids: list[str] = []
+        for t0, d0, src0 in items:
+            a = max(0.0, float(t0))
+            if es_img:          # una imagen no tiene duración propia: va desde 0 y dura lo pedido
+                src, d = 0.0, float(d0)
+            else:
+                src = max(0.0, min(float(src0), max(0.0, m.duration - 0.5)))
+                d = min(float(d0), m.duration - src)
+            if d < 0.5:
+                continue
+            b = a + d
+            tid = next((t.id for t in arriba if not t.locked and not any(
+                c.start < b - EPS and c.end > a + EPS for c in p.clips_on(t.id))), None)
+            if tid is None:             # ninguna libre en ese tramo: una nueva justo encima de la principal
+                nt = Track(new_id(), TRACK_VIDEO, f"V{len(vt) + 1}")
+                p.tracks.insert(p.track_index(main.id), nt)
+                arriba.insert(0, nt)
+                tid = nt.id
+            c = Clip(new_id(), m.id, tid, a, src, d, volume=0.0, origin=ORIGIN_USER,
+                     layout=self._auto_layout(p, m, tid))
+            p.clips[c.id] = c
+            ids.append(c.id)
+        return ids
+
     # ---------------------------------------------------------- biblioteca
     def recheck_missing(self) -> int:
         """Los archivos que faltaban y ya vuelven a estar (recuperados de la Papelera, disco conectado…):
@@ -4018,6 +4579,51 @@ class ProjectController(QObject):
         self.media_changed.emit()
         return True
 
+    def remove_all_media(self, media_ids: list[str], with_clips: bool) -> int:
+        """⟲ Reiniciar todo: quita de la biblioteca esos medios (los archivos originales NO se tocan) y, si
+        with_clips, también sus clips de la línea de tiempo. Todo en UN paso de deshacer (Ctrl+Z devuelve la
+        biblioteca y los clips; lo que se borró de la caché no vuelve). Devuelve cuántos medios se quitaron."""
+        p = self.project
+        ids = [i for i in dict.fromkeys(media_ids) if i in p.media]
+        if not ids:
+            return 0
+        drop = set(ids)
+        before = self._library_snapshot()
+        if with_clips:
+            for cid in [c.id for c in p.clips.values() if c.media_id in drop]:
+                del p.clips[cid]
+        for mid in ids:
+            p.media.pop(mid, None)
+            p.transcripts.pop(mid, None)
+            self.clip_vecs.pop(mid, None)
+            self.clip_shots.pop(mid, None)
+        after = self._library_snapshot()
+        self.undo_stack.push(_LibraryCommand(self, before, after,
+                                             "Quitar medios de la biblioteca" if len(ids) > 1 else "Quitar medio"))
+        self._last_packed = None
+        self._set_media_dirty()
+        self.media_changed.emit()
+        self.project_changed.emit()
+        return len(ids)
+
+    def _library_snapshot(self) -> dict:
+        """Biblioteca + clips (para deshacer «Quitar todos los medios»): copias, no referencias."""
+        p = self.project
+        return {"tl": p.timeline_state(), "media": {k: copy.copy(v) for k, v in p.media.items()},
+                "tx": copy.deepcopy(p.transcripts), "cv": dict(self.clip_vecs), "shots": dict(self.clip_shots)}
+
+    def _library_restore(self, st: dict):
+        p = self.project
+        p.apply_timeline_state(st["tl"])
+        p.media = {k: copy.copy(v) for k, v in st["media"].items()}
+        p.transcripts = copy.deepcopy(st["tx"])
+        self.clip_vecs = dict(st["cv"])
+        self.clip_shots = dict(st["shots"])
+        self._last_packed = None
+        self._set_media_dirty()
+        self.media_changed.emit()
+        self.project_changed.emit()
+
     def set_deep_analysis(self, media_id: str, res: dict):
         """Guarda el análisis a fondo de un clip (un fotograma por segundo y sus planos)."""
         from ..ai.clip_analysis import classify
@@ -4045,6 +4651,7 @@ class ProjectController(QObject):
             m.ai_analyzed = False  # la caché se borró o el archivo cambió: hay que volver a analizar
 
     def _analyze(self, m: MediaItem):
+        """Lo barato al importar: ffprobe (duración, tamaño, sonido…) y la miniatura. Sin picos de onda."""
         self.analyzing.add(m.id)
         self._pool.start(_AnalyzeTask(m.id, m.path, m.kind, self._signals))
 
@@ -4068,7 +4675,115 @@ class ProjectController(QObject):
             self._obs_tracks(m, result["obs"])
         if result.get("error"):
             self.message.emit(f"No se pudo analizar «{m.name}»: {result['error'][:150]}")
+        if media_id in self._want_peaks:               # «Analizar a fondo»: ya tiene ffprobe, ahora su sonido
+            self._want_peaks.discard(media_id)
+            self.ensure_peaks(media_id)
+        self._queue_timeline_peaks()                   # (si ya está en la línea de tiempo, su onda ya se pide)
         self.media_changed.emit()
+
+    # ------------------------------------------------ picos de onda (bajo demanda)
+    def timeline_media_ids(self) -> set[str]:
+        """Los medios que tienen algún clip en la línea de tiempo de esta pestaña."""
+        return {c.media_id for c in self.project.clips.values() if c.media_id}
+
+    def _has_sound(self, m: MediaItem) -> bool:
+        return m.kind == KIND_AUDIO or (m.kind == KIND_VIDEO and bool(m.has_audio))
+
+    def _queue_timeline_peaks(self, *_a):
+        """Un medio que entra en la línea de tiempo: su forma de onda se calcula en segundo plano (una vez)."""
+        for mid in self.timeline_media_ids():
+            m = self.project.media.get(mid)
+            if m is None or not m.probed or not self._has_sound(m):
+                continue
+            if mid in self.peaks or mid in self._peaks_busy or mid in self._peaks_failed or mid in self.missing:
+                continue
+            self._start_peaks(m)
+
+    def _start_peaks(self, m: MediaItem):
+        """Pone en marcha los picos de un medio: si ya están en la caché del disco se cargan al momento."""
+        cached = media_tools.cached_peaks(m.path)
+        if cached is not None:
+            self.peaks[m.id] = cached
+            self.peaks_changed.emit()
+            return
+        self._peaks_busy.add(m.id)
+        self._peak_pool.start(_PeaksTask(m.id, m.path, self._signals))
+
+    def _on_peaks(self, media_id: str, result: dict):
+        self._peaks_busy.discard(media_id)
+        m = self.project.media.get(media_id)
+        if result.get("error"):
+            self._peaks_failed.add(media_id)
+            if m is not None:
+                self.message.emit(f"No se pudo leer el sonido de «{m.name}»: {result['error'][:150]}")
+            return
+        if result.get("peaks") is not None:
+            self.peaks[media_id] = result["peaks"]
+            self.peaks_changed.emit()
+
+    def wait_analysis(self, ms: int = 3000) -> bool:
+        """Espera (como mucho ms) a que terminen las lecturas en segundo plano (ffprobe, miniaturas, ondas): las que
+        tienen archivos abiertos impiden en Windows mover o mandar a la Papelera su carpeta."""
+        return bool(self._pool.waitForDone(ms) and self._peak_pool.waitForDone(ms))
+
+    def ensure_peaks(self, media_id: str, wait: bool = False):
+        """Los picos de onda de un medio. Lo llaman las funciones que los necesitan.
+        wait=False: los pide en segundo plano y devuelve None (llegan con peaks_changed).
+        wait=True: los calcula en ese momento (la acción del usuario los necesita ya; se muestra el cursor de espera)."""
+        if media_id in self.peaks:
+            return self.peaks[media_id]
+        m = self.project.media.get(media_id)
+        if m is None or not self._has_sound(m) or media_id in self.missing or media_id in self._peaks_failed:
+            return None
+        if not wait:
+            if media_id not in self._peaks_busy:
+                self._start_peaks(m)
+            return None
+        cached = media_tools.cached_peaks(m.path)
+        if cached is None:
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QGuiApplication
+            self.message.emit(f"Leyendo el sonido de «{m.name}»…")
+            QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                cached = media_tools.waveform_peaks(m.path)
+            except Exception as exc:  # noqa: BLE001 - se informa al usuario
+                self._peaks_failed.add(media_id)
+                self.message.emit(f"No se pudo leer el sonido de «{m.name}»: {str(exc)[:150]}")
+                return None
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+        self.peaks[media_id] = cached
+        self.peaks_changed.emit()
+        return cached
+
+    def ensure_timeline_peaks(self, wait: bool = True) -> dict:
+        """Los picos de todo lo que está en la línea de tiempo (para revisar cortes, auditar, etc.)."""
+        for mid in self.timeline_media_ids():
+            self.ensure_peaks(mid, wait=wait)
+        return self.peaks
+
+    def analyze_full(self, media_ids) -> int:
+        """🔬 «Analizar a fondo»: a petición del usuario, lo de siempre de un medio (ffprobe, miniatura, forma de onda
+        y, si es música, su ritmo). Devuelve cuántos empezó."""
+        n = 0
+        for mid in media_ids:
+            m = self.project.media.get(mid)
+            if m is None or mid in self.missing or not os.path.exists(m.path):
+                continue
+            self._peaks_failed.discard(mid)
+            self._want_peaks.add(mid)
+            self._analyze(m)
+            n += 1
+            if self.is_music_media(m):
+                self.analyze_rhythm([mid])
+        if n:
+            self.message.emit(f"🔬 Analizando a fondo {n} archivo(s) en segundo plano…")
+        return n
+
+    def is_music_media(self, m: MediaItem) -> bool:
+        cat = (m.category or "").lower()
+        return m.kind in (KIND_AUDIO, KIND_VIDEO) and any(w in cat for w in ("músic", "music", "canci", "song"))
 
     def separate_audio_tracks_now(self, media_id: str) -> dict:
         """🎵 «Separar audio» de una grabación con varias pistas (OBS: micrófono y juego), ya (bloquea: para pruebas y
@@ -4142,7 +4857,7 @@ class ProjectController(QObject):
 
     # ------------------------------------------------------ guardar / abrir
     def new_project(self):
-        self._replace(Project.new(), None)
+        self._replace(Project.new(minimal=True), None)
 
     def load(self, path: str, recovered: bool = False, keep_undo: bool = False):
         with open(path, encoding="utf-8") as f:
@@ -4153,12 +4868,15 @@ class ProjectController(QObject):
             self._set_media_dirty()
 
     def _replace(self, project: Project, path: str | None, keep_undo: bool = False):
+        project.reparar_vinculos()   # proyectos guardados con el vínculo compartido (ver Project.reparar_vinculos)
         self.project = project
         self.path = path
         if not keep_undo:            # 🗂 al volver a una pestaña se conserva su historial (Ctrl+Z sigue valiendo)
             self.undo_stack.clear()
         self.thumbs.clear()
         self.peaks.clear()
+        self._peaks_failed.clear()
+        self._want_peaks.clear()
         self.missing.clear()
         self.clip_vecs.clear()
         self.clip_shots.clear()

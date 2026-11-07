@@ -51,7 +51,8 @@ def main():
     apply_dark_theme(app)
     st = QSettings("EditorIA", "EditorIA")
     st.remove("espacios")
-    vid = os.path.join(out, "partida.mp4")
+    st.sync()                                   # sin esto, «espacios/actual» de una ejecución anterior sobrevivía
+    vid =os.path.join(out, "partida.mp4")
     subprocess.run([M.ffmpeg(), "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
                     "-pix_fmt", "yuv420p", vid], check=True)
 

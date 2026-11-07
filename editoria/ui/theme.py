@@ -9,9 +9,10 @@ from pathlib import Path
 # salen con «Segoe UI Symbol», del color del texto: como iconos de un programa profesional.
 os.environ.setdefault("QT_DISABLE_EMOJI_SEGMENTER", "1")
 
-from PySide6.QtCore import QObject, QRectF, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPixmap  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplication, QComboBox, QDialog,  # noqa: E402
+                               QSlider, QTabBar)
 
 FONT_FAMILIES = ["Segoe UI", "Segoe UI Symbol"]      # el texto y, para los símbolos, la fuente monocroma
 
@@ -203,23 +204,46 @@ def apply_fonts(app: QApplication) -> tuple[float, float]:
 
 
 class _WheelGuard(QObject):
-    """La rueda del ratón NO cambia casillas de números, listas desplegables ni deslizadores que no hayas tocado: así,
-    al desplazar el Inspector con el ratón encima de «Fundido de entrada», no se cambia (¡en todos los clips
-    seleccionados!) sin querer. La rueda desplaza el panel; para cambiar el valor con la rueda, haz clic antes."""
+    """La rueda del ratón NO cambia casillas de números, listas desplegables, deslizadores ni pestañas sin querer: así, al
+    desplazar un panel con el ratón encima de «Escala» o «Giro», no se cambia. La rueda desplaza el panel; para
+    cambiar un valor con la rueda, haz clic en él y gira la rueda sin sacar el ratón de encima. Tener el foco no
+    basta (el usuario: «estoy tratando de bajar y termino cambiando valores»): en cuanto el ratón sale del control,
+    la rueda vuelve a desplazar el panel."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._armed = None                         # el control al que le diste clic (mientras el ratón siga encima)
+
+    @staticmethod
+    def _target(obj):
+        """El control con valor al que pertenece obj (la casilla de texto de un número es hija del número)."""
+        w = obj
+        for _ in range(3):
+            if w is None or not hasattr(w, "parentWidget"):
+                return None
+            if isinstance(w, (QAbstractSpinBox, QComboBox, QSlider, QTabBar)):
+                return w
+            if w.isWindow():                       # (la lista abierta de un desplegable es su propia ventanita)
+                return None
+            w = w.parentWidget()
+        return None
 
     def eventFilter(self, obj, ev):
-        from PySide6.QtCore import QEvent
-        from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSpinBox, QComboBox, QSlider
-        if ev.type() == QEvent.Wheel and isinstance(obj, (QAbstractSpinBox, QComboBox, QSlider))                 and not obj.hasFocus():
-            w = obj.parentWidget()
-            while w is not None and not isinstance(w, QAbstractScrollArea):
-                w = w.parentWidget()
-            if w is not None:                      # que se desplace el panel, como esperas
-                QApplication.sendEvent(w.viewport(), ev)
-            return True
+        t = ev.type()
+        if t in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick) and obj.isWidgetType():
+            self._armed = self._target(obj)
+        elif t == QEvent.Leave and self._armed is not None and obj is self._armed:
+            self._armed = None                     # el ratón salió: la rueda vuelve a ser para el panel
+        elif t == QEvent.Wheel and obj.isWidgetType():
+            tgt = self._target(obj)
+            if tgt is not None and not (tgt is self._armed and tgt.hasFocus()):
+                w = tgt.parentWidget()
+                while w is not None and not isinstance(w, QAbstractScrollArea):
+                    w = w.parentWidget()
+                if w is not None:                  # que se desplace el panel, como esperas
+                    QApplication.sendEvent(w.viewport(), ev)
+                return True
         if ev.type() == QEvent.Show and obj.isWidgetType() and obj.isWindow():
-            from PySide6.QtCore import QTimer
-            from PySide6.QtWidgets import QDialog
             if isinstance(obj, QDialog):           # (y, de paso, ninguna ventana fuera de la pantalla)
                 QTimer.singleShot(0, lambda d=obj: fit_on_screen(d))
         return False

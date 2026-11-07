@@ -111,6 +111,41 @@ def _no_console_fix():
     os.environ.setdefault("TQDM_DISABLE", "1")
 
 
+_ultimo_congelado_ms = [0.0]
+
+
+def _congelar_memoria(win):
+    """Lo que ya vive (proyecto, ventanas, modelos cargados) sale del recolector de basura de Python: sus pausas de
+    la generación 2 (60–300 ms tras editar) dejan de caer en medio de la edición. Antes se descongela para que cada
+    vez se recoja la basura de verdad (si no, los objetos que mueren después se quedarían sin liberar)."""
+    import gc
+    import time
+    if _ultimo_congelado_ms[0] > 100:            # el aviso solo cuando suele tardar
+        win.statusBar().showMessage("Optimizando memoria…")
+        QApplication.processEvents()
+    t0 = time.perf_counter()
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+    _ultimo_congelado_ms[0] = (time.perf_counter() - t0) * 1000
+    if _ultimo_congelado_ms[0] > 100:
+        win.statusBar().clearMessage()
+
+
+def _instalar_congelado_memoria(win):
+    """Tras 3 s de arranque, y de nuevo (con un pequeño retardo, para que pase el trabajo) al abrir o cambiar de
+    proyecto. NO tras cada transcripción o cambio de medios: media_changed salta muy a menudo (cada clip analizado) y
+    cada pasada cuesta ~160 ms en un proyecto grande, así que crearía los tirones que quiere evitar."""
+    from PySide6.QtCore import QTimer
+    retardo = QTimer(win)
+    retardo.setSingleShot(True)
+    retardo.setInterval(2000)
+    retardo.timeout.connect(lambda: _congelar_memoria(win))
+    ctrl = win.ctrl
+    ctrl.project_replaced.connect(lambda *_: retardo.start())
+    QTimer.singleShot(3000, lambda: _congelar_memoria(win))
+
+
 def run(argv: list[str]) -> int:
     _no_console_fix()
     if sys.platform == "win32":
@@ -133,6 +168,7 @@ def run(argv: list[str]) -> int:
     _install_crash_log()
     win = MainWindow()
     win.show()
+    _instalar_congelado_memoria(win)
     win.try_recover()
     if len(argv) > 1 and argv[1].lower().endswith(".eia"):
         win.open_project(argv[1])

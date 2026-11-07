@@ -101,21 +101,23 @@ def downloaded() -> list[str]:
     return [str(p) for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)]
 
 
-def fetch(url: str) -> dict:
+def fetch(url: str, keep_bg: bool = False) -> dict:
+    """keep_bg=True (modo Fondo de la búsqueda): la imagen tal cual, sin quitarle el fondo liso."""
     from PIL import Image
     raw = _read(url)
     im = Image.open(io.BytesIO(raw)).convert("RGBA")
     rgba = np.asarray(im).copy()
     tr = float((rgba[..., 3] < 20).mean())
     cleaned = False
-    if tr < 0.05:                                   # sin transparencia: si el fondo es liso, se quita
+    if tr < 0.05 and not keep_bg:                   # sin transparencia: si el fondo es liso, se quita
         fixed = remove_flat_bg(rgba)
         if fixed is not None:
             tr2 = float((fixed[..., 3] < 20).mean())
             if 0.1 < tr2 < 0.95:
                 rgba, tr, cleaned = fixed, tr2, True
     folder = str(cache_dir("png_web"))
-    path = os.path.join(folder, hashlib.md5(np.asarray(im).tobytes()).hexdigest()[:16] + ".png")   # (misma imagen = mismo archivo)
+    key = np.asarray(im).tobytes() + (b"|fondo" if keep_bg else b"")   # (misma imagen = mismo archivo; el fondo aparte)
+    path = os.path.join(folder, hashlib.md5(key).hexdigest()[:16] + ".png")
     if os.path.isfile(url) and os.path.basename(os.path.dirname(url)).startswith("nav_"):
         __import__("shutil").rmtree(os.path.dirname(url), ignore_errors=True)   # (el temporal del navegador)
     Image.fromarray(rgba).save(path)

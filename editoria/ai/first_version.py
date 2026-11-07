@@ -13,6 +13,7 @@ Si hay música de fondo, los cortes caen en sus golpes (mejor al empezar compás
 from __future__ import annotations
 
 from ..core import transform
+from . import broll_selection
 
 # Qué se limpia de la voz automáticamente (las tomas repetidas: se queda la mejor, la que elige la IA)
 CLEAN_KINDS = ("silence", "noise", "filler", "repeat", "retake")
@@ -30,8 +31,44 @@ def cleanup_ids(suggestions, media_id: str, kinds=CLEAN_KINDS) -> list[str]:
             and (s.data or {}).get("auto", True) is not False]     # «muy muy», «no no»: pueden ser a propósito
 
 
-def broll_items(slots: list[dict], media: dict, start_at_zero: bool = True) -> list[dict]:
-    """El mejor clip de cada hueco, listo para insert_ranges. El primero empieza en 0 (sin negro)."""
+def _try_grow(taken: dict, it: dict, media: dict, before: float, after: float) -> bool:
+    """Alarga el plano `it` `before` s por delante (empieza antes) y `after` s por detrás, si su trozo del archivo
+    sigue libre en el registro. Las imágenes siempre pueden (son una sola vez)."""
+    m = media.get(it["media_id"])
+    if m is None:
+        return False
+    if m.kind == "image":
+        it["start"] -= before
+        it["duration"] += before + after
+        return True
+    ns = it["source_in"] - before
+    nd = it["duration"] + before + after
+    if ns < -1e-6 or (m.duration and ns + nd > m.duration + 1e-6):
+        return False
+    old = (it["source_in"], it["source_in"] + it["duration"])
+    rngs = taken.setdefault(it["media_id"], [])
+    if old in rngs:
+        rngs.remove(old)
+    if broll_selection._overlaps(rngs, ns, ns + nd):
+        rngs.append(old)
+        return False
+    rngs.append((ns, ns + nd))
+    it["start"] -= before
+    it["duration"] = nd
+    it["source_in"] = ns
+    return True
+
+
+def broll_items(slots: list[dict], media: dict, start_at_zero: bool = True,
+                taken: dict | None = None) -> list[dict]:
+    """El mejor clip de cada hueco, listo para insert_ranges. El primero empieza en 0 (sin negro).
+    Cada tramo se valida contra `taken` (registro de tramos usados): un trozo ya usado no se repite; si el hueco
+    no tiene nada libre, el plano anterior (o el siguiente) se alarga en vez de repetir."""
+    taken = {} if taken is None else taken
+    for s in slots:                       # las reservas de la propuesta se rehacen aquí, en orden
+        old = s.pop("_claim", None)
+        if old:
+            broll_selection.release(taken, old["media_id"], old["rng"])
     items = []
     for i, s in enumerate(slots):
         if not s.get("candidates"):
@@ -42,30 +79,44 @@ def broll_items(slots: list[dict], media: dict, start_at_zero: bool = True) -> l
         def room(cand):
             m_ = media.get(cand["media_id"])
             return want if (m_ is None or m_.kind == "image" or not m_.duration) else m_.duration
-        # el mejor candidato que LLENA el hueco (si el primero es más corto, quedaba negro hasta el siguiente)
-        c = next((x for x in s["candidates"] if room(x) >= want - 0.05), s["candidates"][0])
-        dur = want
-        m = media.get(c["media_id"])
-        src = c["source_in"]
-        if m is not None and m.kind != "image" and m.duration:
+        # primero los candidatos que LLENAN el hueco (si el primero es más corto, quedaba negro hasta el siguiente)
+        order = sorted(s["candidates"], key=lambda x: room(x) < want - 0.05)
+        for c in order:
+            m = media.get(c["media_id"])
+            if m is None:
+                continue
+            if m.kind == "image":
+                if c["media_id"] in taken:
+                    continue
+                broll_selection.claim(taken, c["media_id"], 0.0, 0.0, image=True)
+                items.append({"media_id": c["media_id"], "start": a, "duration": want, "source_in": 0.0,
+                              "note": f"B-roll IA: {c['reason']}"})
+                break
+            dur = want
+            src = c["source_in"]
             if a < s["start"]:          # se adelanta: empezar antes en el clip si se puede
                 src = max(0.0, src - (s["start"] - a))
-            if src + dur > m.duration:  # no cabe desde ahí: se empieza antes en el clip
-                src = max(0.0, m.duration - dur)
-            dur = min(dur, m.duration - src)
-        if dur > 0.3:
-            items.append({"media_id": c["media_id"], "start": a, "duration": dur, "source_in": src,
+            if m.duration:
+                if src + dur > m.duration:  # no cabe desde ahí: se empieza antes en el clip
+                    src = max(0.0, m.duration - dur)
+                dur = min(dur, m.duration - src)
+            if dur <= 0.3:
+                continue
+            cdur = m.duration if m.duration else src + dur
+            src2 = broll_selection.find_free(taken, c["media_id"], src, dur, cdur)
+            if src2 is None:            # todo el clip ya está en otros huecos: el siguiente candidato
+                continue
+            broll_selection.claim(taken, c["media_id"], src2, dur)
+            items.append({"media_id": c["media_id"], "start": a, "duration": dur, "source_in": src2,
                           "note": f"B-roll IA: {c['reason']}"})
-    # Si aun así queda un hueco (clip corto), el siguiente empieza antes (si su clip lo permite)
-    for x, y in zip(items, items[1:]):
+            break
+    # Si queda un hueco (nada libre, o clip corto): el plano siguiente empieza antes, o el anterior se alarga
+    for k in range(len(items) - 1):
+        x, y = items[k], items[k + 1]
         gap = y["start"] - (x["start"] + x["duration"])
         if gap > 0.04:
-            my = media.get(y["media_id"])
-            back = gap if (my is None or my.kind == "image") else min(gap, y["source_in"])
-            y["start"] -= back
-            y["duration"] += back
-            if my is not None and my.kind != "image":
-                y["source_in"] -= back
+            if not _try_grow(taken, y, media, before=gap, after=0.0):
+                _try_grow(taken, x, media, before=0.0, after=gap)
     return items
 
 
@@ -139,5 +190,25 @@ def music_items(music, start: float, end: float) -> list[dict]:
         dur = min(music.duration, end - t)
         items.append({"media_id": music.id, "start": t, "duration": dur, "source_in": 0.0,
                       "note": "Música de fondo (IA)"})
+        t += dur
+    return items
+
+
+def music_items_fit(music, start: float, end: float) -> list[dict]:
+    """Como music_items, pero si la canción tiene ritmo detectado se AJUSTA por compases (ai/music_fit.py):
+    secciones enteras quitadas o repetidas, y termina en su final. Sin ritmo, lo de siempre."""
+    if music is None or music.duration <= 1.0 or end - start < 1.0:
+        return []
+    from . import music_fit, rhythm
+    try:
+        info = rhythm.analyze(music.path)
+    except Exception:       # noqa: BLE001 (sin ritmo: la canción se repite como antes)
+        info = None
+    if not info or not info.get("downbeats"):
+        return music_items(music, start, end)
+    items, t = [], start
+    for src, dur in music_fit.plan_fit(info, music.duration, end - start):
+        items.append({"media_id": music.id, "start": t, "duration": dur, "source_in": src,
+                      "note": "Música de fondo (IA · por compases)"})
         t += dur
     return items

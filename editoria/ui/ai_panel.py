@@ -1004,9 +1004,11 @@ class AIPanel(QWidget):
             if m is None or m.kind == KIND_AUDIO or mid in self.ctrl.missing:
                 continue
             meta = clip_analysis.metadata_text(m.name, m.category, m.ai_type, m.ai_tags, m.tags)
+            # ai_type = lo que adivina la IA (o la categoría si no adivinó); category/user_tags = lo que pusiste tú
             out.append(broll_selection.ClipInfo(mid, m.name, "image" if m.kind == KIND_IMAGE else "video",
                                                 m.duration, m.ai_type or m.category, list(m.ai_tags) + m.tags,
-                                                times, vecs, meta, m.path))
+                                                times, vecs, meta, m.path, category=m.category or "",
+                                                user_tags=list(m.tags)))
         return out
 
     def propose(self, rng: tuple[float, float] | None = None, apply: bool = False):

@@ -89,6 +89,7 @@ class VoicePanel(QWidget):
     media_selected = Signal(str)        # narración elegida
     suggestion_selected = Signal(str)   # para resaltarla en la timeline
     cut_rules_changed = Signal()        # cambiaron las casillas de ⚡ (lo tachado en el texto cambia)
+    quick_review_requested = Signal()   # ⚡ Revisión rápida con teclas (ver ui/quick_review.py)
 
     def __init__(self, ctrl, engine, parent=None):
         super().__init__(parent)
@@ -296,6 +297,11 @@ class VoicePanel(QWidget):
         self.btn_apply_all = QPushButton("Aplicar todas las de la lista")
         self.btn_apply_all.clicked.connect(self.apply_all_visible)
         v3.addWidget(self.btn_apply_all)
+        self.btn_quick = QPushButton("⚡ Revisión rápida con teclas…")
+        self.btn_quick.setToolTip("Recorre una a una las propuestas pendientes y los cortes dudosos, con teclas: "
+                                  "Enter aceptar, Supr rechazar, → saltar (Ctrl+Shift+Q)")
+        self.btn_quick.clicked.connect(lambda: self.quick_review_requested.emit())
+        v3.addWidget(self.btn_quick)
         # Limpio, como Resolve: arriba la narración y cómo va; lo demás, en pestañas
         from .tabs import tabbed, untitle
         for sec in (self.sec1, self.sec2):

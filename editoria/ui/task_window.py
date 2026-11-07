@@ -312,8 +312,8 @@ def stop_all(wait_ms: int = 3000):
             pass
     end = time.monotonic() + wait_ms / 1000
     for j in jobs:
-        try:
-            left = int(max(0.0, end - time.monotonic()) * 1000)
+        try:      # como mucho 1,5 s por trabajo (y el total no pasa de wait_ms): el que no para, se suelta
+            left = min(1500, int(max(0.0, end - time.monotonic()) * 1000))
             if j.isRunning():
                 j.wait(left)
         except RuntimeError:

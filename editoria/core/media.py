@@ -153,11 +153,22 @@ def frame_rgb(path: str, t: float, width: int = 480) -> np.ndarray | None:
     return np.frombuffer(r.stdout, np.uint8).reshape(h, w, 3)
 
 
+def _peaks_file(path: str) -> Path:
+    return cache_dir("formas_de_onda") / f"{cache_key(path)}_v2.npy"
+
+
+def cached_peaks(path: str) -> np.ndarray | None:
+    """Los picos de la caché en disco, SOLO si ya existen (cargarlos es barato; calcularlos no)."""
+    out = _peaks_file(path)
+    return np.load(out).astype(np.float32) if out.exists() else None
+
+
 def waveform_peaks(path: str) -> np.ndarray | None:
-    """Picos de volumen (PEAK_RATE por segundo) para dibujar la forma de onda en la timeline."""
+    """Picos de volumen (PEAK_RATE por segundo) para dibujar la forma de onda en la timeline.
+    Es lo caro (decodifica todo el sonido): el controlador lo pide solo cuando hace falta (ver ensure_peaks)."""
     # (a 16 kHz: con 8 kHz se perdía casi todo lo de más de 4 kHz, justo donde suenan la «s», la «f» y la «z», y los
     # finales de palabra con esas letras no se veían)
-    out = cache_dir("formas_de_onda") / f"{cache_key(path)}_v2.npy"
+    out = _peaks_file(path)
     if out.exists():
         return np.load(out).astype(np.float32)
     sample_rate = 16000
@@ -167,5 +178,7 @@ def waveform_peaks(path: str) -> np.ndarray | None:
     if n == 0:
         return np.zeros(1, dtype=np.float32)
     peaks = np.abs(samples[: n * block].reshape(n, block)).max(axis=1)
-    np.save(out, peaks.astype(np.float16))
+    tmp = out.with_name(out.name + ".tmp.npy")     # (atómico: dos hilos no se leen a medias)
+    np.save(tmp, peaks.astype(np.float16))
+    os.replace(tmp, out)
     return peaks.astype(np.float32)

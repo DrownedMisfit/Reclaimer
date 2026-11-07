@@ -12,13 +12,24 @@ import json
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QGridLayout, QHBoxLayout,
-                               QInputDialog, QLabel, QPushButton, QRadioButton, QSlider, QSpinBox, QVBoxLayout)
+                               QInputDialog, QLabel, QPushButton, QRadioButton, QSlider, QSpinBox, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ..core import silence as S
 from ..core.model import TRACK_AUDIO, TRACK_VIDEO
 from .jobs import BackgroundJob
 
 KEY = "silencio/ajustes"
+MORE_KEY = "silencio/mas_opciones"                  # ⚙ Más opciones: abierto o plegado (lo recuerda)
+INFO_TIP = ("Los silencios se marcan en naranja en la línea de tiempo (en rojo, la voz que se cortaría). Si sale ⚠: "
+            "prueba «🎯 Respetar las palabras», la protección «Máxima» o el modo «🎚 Híbrido».")
+
+
+def _dur(s: float) -> str:
+    if s >= 59.5:
+        t = round(s)
+        return f"{t // 60} min {t % 60} s"
+    return f"{s:.1f} s"
 
 
 def saved_presets() -> dict:
@@ -64,51 +75,7 @@ class SilenceDialog(QDialog):
             if self.scope.currentData() == "pista":
                 self.clip_ids = list(self._track_all)
         self._update_who()
-        prow = QHBoxLayout()
-        self.preset = QComboBox()
-        self.preset.addItem("Ajustes guardados…", None)
-        for name in saved_presets():
-            self.preset.addItem(name, name)
-        self.preset.activated.connect(self._load_preset)
-        b_save = QPushButton("💾 Guardar como ajuste…")
-        b_save.clicked.connect(self._save_preset)
-        prow.addWidget(self.preset, 1)
-        prow.addWidget(b_save)
-        lay.addLayout(prow)
-        mrow = QHBoxLayout()
-        mrow.addWidget(QLabel("Detección"))
-        self.mode = QComboBox()
-        self.mode.addItem("🎚 Híbrido: volumen como Resolve + IA que protege tus palabras (lo más preciso)", "hibrido")
-        self.mode.addItem("🎙 Voz precisa (no se come el principio ni el final de las palabras)", "voz")
-        self.mode.addItem("🔊 Solo volumen (exactamente como DaVinci Resolve)", "volumen")
-        self.mode.setToolTip("Híbrido: todo lo de «Voz precisa» y además quita lo que Resolve quita por volumen y la IA "
-                             "deja: los microsilencios entre dos palabras dichas de corrido y el seguro de los bordes de "
-                             "cada frase cuando ahí ya es silencio de verdad (micro limpio). Nunca la pausa de una «p» o "
-                             "«t» dentro de una palabra (con transcripción lo sabe seguro).\n"
-                             "Voz precisa: una IA reconoce dónde hablas (no la engaña el ruido de fondo) y cada borde se "
-                             "ajusta cada 5 ms hasta que el sonido de verdad se apaga (también las «s» y «f» suaves).\n"
-                             "Solo volumen: corta todo lo que esté por debajo del umbral, como Resolve (con voz baja o "
-                             "ruido de fondo se puede comer palabras).")
-        self.mode.currentIndexChanged.connect(lambda _i: (self._sync_protect(), self._changed()))
-        mrow.addWidget(self.mode, 1)
-        lay.addLayout(mrow)
-        prow2 = QHBoxLayout()
-        prow2.addWidget(QLabel("🛡 Protección de la voz"))
-        self.protect = QComboBox()
-        self.protect.addItem("Máxima: nunca corta voz (con micro con puerta, el umbral casi no cambia nada)", "max")
-        self.protect.addItem("Media: el umbral manda, salvo en la voz que la IA reconoce seguro", "media")
-        self.protect.addItem("Como Resolve: el umbral manda en todo (puede comerse finales suaves)", "resolve")
-        self.protect.setToolTip(
-            "En una grabación con puerta de ruido las pausas ya son silencio total con cualquier umbral: lo único que "
-            "un umbral más alto puede quitar de más es voz (finales y sílabas suaves). Aquí eliges cuánto mandas tú:\n"
-            "· Máxima: no se come voz.\n"
-            "· Media: más cortes y el umbral se nota; la voz que la IA reconoce con seguridad no se toca (como mucho, "
-            "algún final muy suave).\n"
-            "· Como Resolve: el umbral decide todo, igual que DaVinci Resolve (solo se salvan las «s» y «f»).")
-        self.protect.currentIndexChanged.connect(lambda _i: self._changed())
-        prow2.addWidget(self.protect, 1)
-        lay.addLayout(prow2)
-
+        # ── lo esencial, arriba: los 4 controles, el fundido y el resumen
         grid = QGridLayout()
         self.ctl: dict[str, tuple[QSlider, object]] = {}
         rows = (("threshold_db", "Umbral", -60.0, 0.0, "dB", True),
@@ -147,20 +114,81 @@ class SilenceDialog(QDialog):
             self.ctl[key] = (sl, spin)
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
-        self.crossfade = QCheckBox("Fundido cruzado de audio (sin «clics» en los cortes)")
+        self.crossfade = QCheckBox("Fundido cruzado de audio")
+        self.crossfade.setToolTip("Sin «clics» en los cortes: el sonido se funde en cada uno de ellos.")
         lay.addWidget(self.crossfade)
-        self.clicks = QCheckBox("🖱 Quitar también los clics y tics (ratón, teclado…) que hay FUERA de tu voz")
-        self.clicks.setToolTip("Golpecitos de pocos milisegundos que destacan mucho de lo que hay alrededor. Solo se "
-                               "quitan si no hay voz a menos de 60 ms (nunca se toca una «p», «t» o «k» de tus "
-                               "palabras). Funciona con «🎚 Híbrido» y «🎙 Voz precisa».")
+        self.info = QLabel("Midiendo el sonido…")
+        self.info.setWordWrap(True)
+        self.info.setToolTip(INFO_TIP)
+        lay.addWidget(self.info)
+
+        # ── «⚙ Más opciones»: plegado por defecto (recuerda si lo dejaste abierto)
+        self.more_btn = QToolButton()
+        self.more_btn.setCheckable(True)
+        self.more_btn.setAutoRaise(True)
+        self.more_btn.setToolTip("Detección, protección de la voz, ajustes guardados, IA, palabras y qué se mueve.")
+        self.more_box = QWidget()
+        mb = QVBoxLayout(self.more_box)
+        mb.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.more_btn)
+        lay.addWidget(self.more_box)
+        prow = QHBoxLayout()
+        self.preset = QComboBox()
+        self.preset.addItem("Ajustes guardados…", None)
+        for name in saved_presets():
+            self.preset.addItem(name, name)
+        self.preset.activated.connect(self._load_preset)
+        b_save = QPushButton("💾 Guardar como ajuste…")
+        b_save.clicked.connect(self._save_preset)
+        prow.addWidget(self.preset, 1)
+        prow.addWidget(b_save)
+        mb.addLayout(prow)
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("Detección"))
+        self.mode = QComboBox()
+        self.mode.addItem("🎚 Híbrido (recomendado)", "hibrido")
+        self.mode.addItem("🎙 Voz precisa", "voz")
+        self.mode.addItem("🔊 Solo volumen (como Resolve)", "volumen")
+        self.mode.setToolTip("Híbrido: todo lo de «Voz precisa» y además quita lo que Resolve quita por volumen y la IA "
+                             "deja: los microsilencios entre dos palabras dichas de corrido y el seguro de los bordes de "
+                             "cada frase cuando ahí ya es silencio de verdad (micro limpio). Nunca la pausa de una «p» o "
+                             "«t» dentro de una palabra (con transcripción lo sabe seguro).\n"
+                             "Voz precisa: una IA reconoce dónde hablas (no la engaña el ruido de fondo) y cada borde se "
+                             "ajusta cada 5 ms hasta que el sonido de verdad se apaga (también las «s» y «f» suaves).\n"
+                             "Solo volumen: corta todo lo que esté por debajo del umbral, como Resolve (con voz baja o "
+                             "ruido de fondo se puede comer palabras).")
+        self.mode.currentIndexChanged.connect(lambda _i: (self._sync_protect(), self._changed()))
+        mrow.addWidget(self.mode, 1)
+        mb.addLayout(mrow)
+        prow2 = QHBoxLayout()
+        prow2.addWidget(QLabel("🛡 Protección de la voz"))
+        self.protect = QComboBox()
+        self.protect.addItem("Máxima", "max")
+        self.protect.addItem("Media", "media")
+        self.protect.addItem("Como Resolve", "resolve")
+        self.protect.setToolTip(
+            "Solo con «🎚 Híbrido». En una grabación con puerta de ruido las pausas ya son silencio total con cualquier "
+            "umbral: lo único que un umbral más alto puede quitar de más es voz (finales y sílabas suaves). Aquí eliges "
+            "cuánto mandas tú:\n"
+            "· Máxima: no se come voz (con micro con puerta, el umbral casi no cambia nada).\n"
+            "· Media: más cortes y el umbral se nota; la voz que la IA reconoce con seguridad no se toca (como mucho, "
+            "algún final muy suave).\n"
+            "· Como Resolve: el umbral decide todo, igual que DaVinci Resolve (puede comerse finales suaves; solo se "
+            "salvan las «s» y «f»).")
+        self.protect.currentIndexChanged.connect(lambda _i: self._changed())
+        prow2.addWidget(self.protect, 1)
+        mb.addLayout(prow2)
+        self.clicks = QCheckBox("🖱 Quitar clics y tics fuera de la voz")
+        self.clicks.setToolTip("Golpecitos de pocos milisegundos que destacan mucho de lo que hay alrededor (ratón, "
+                               "teclado…). Solo se quitan si no hay voz a menos de 60 ms (nunca se toca una «p», «t» o "
+                               "«k» de tus palabras). Funciona con «🎚 Híbrido» y «🎙 Voz precisa».")
         self.clicks.setChecked(True)
         self.clicks.toggled.connect(lambda _v: self._changed())
-        lay.addWidget(self.clicks)
+        mb.addWidget(self.clicks)
         from ..ai import voice_model as VM
         vinfo = VM.info() if VM.available() else None
-        self.voice_model = QCheckBox("◈ Usar la IA entrenada con tu voz"
-                                     + (f" ({vinfo.get('minutes', 0):.0f} min de ejemplos)" if vinfo else
-                                        " (aún sin entrenar)"))
+        self.voice_model = QCheckBox("◈ IA entrenada con tu voz"
+                                     + (f" ({vinfo.get('minutes', 0):.0f} min)" if vinfo else " (aún sin entrenar)"))
         self.voice_model.setToolTip("Un modelo que aprendió de TUS grabaciones dónde empiezan y acaban tus palabras: "
                                     "protege lo que es palabra y quita los restos de silencio que dejan los márgenes de "
                                     "seguridad. Aprende solo cada vez que transcribes (menú Voz → Entrenar). Funciona "
@@ -168,46 +196,51 @@ class SilenceDialog(QDialog):
         self.voice_model.setChecked(bool(vinfo))
         self.voice_model.setEnabled(bool(vinfo))
         self.voice_model.toggled.connect(lambda _v: self._changed())
-        lay.addWidget(self.voice_model)
+        mb.addWidget(self.voice_model)
         from ..ai import align as _al, transcription as _tr
         ok_words = _al.available()[0] and _tr.is_available()[0] and _tr.is_downloaded("equilibrado")
-        self.words_cb = QCheckBox("🎯 Respetar las palabras (transcribe y afina dónde empieza y acaba cada una; lo más "
-                                  "preciso)")
+        self.words_cb = QCheckBox("🎯 Respetar las palabras")
         self.words_cb.setToolTip(
-            "Antes de cortar, la IA transcribe (si hace falta) y marca cada palabra con ~20 ms de precisión: nada de "
-            "lo que está DENTRO de una palabra se corta, en ningún modo (tampoco «Como Resolve»: el umbral manda en "
-            "pausas, respiraciones y ruido). La primera vez tarda (unos 20 s por minuto de audio); queda guardado.\n"
+            "Lo más preciso. Antes de cortar, la IA transcribe (si hace falta) y marca cada palabra con ~20 ms de "
+            "precisión: nada de lo que está DENTRO de una palabra se corta, en ningún modo (tampoco «Como Resolve»: el "
+            "umbral manda en pausas, respiraciones y ruido). La primera vez tarda (unos 20 s por minuto de audio); "
+            "queda guardado.\n"
             "Además, la IA aprende tu voz con cada grabación.")
         self.words_cb.setChecked(ok_words and str(QSettings("EditorIA", "EditorIA").value("silencio/palabras", "true"))
                                  .lower() == "true")
         self.words_cb.setEnabled(ok_words)
         self.words_cb.toggled.connect(self._words_toggled)
-        lay.addWidget(self.words_cb)
+        mb.addWidget(self.words_cb)
         from ..core import silence_learn as SL
         self._learned = SL.learned()
         what = SL.describe(self._learned)
         n = self._learned["n_before"] + self._learned["n_after"]
-        self.learn_cb = QCheckBox("◈ Usar lo aprendido de tus retoques" + (f" ({what} · {n} retoques)" if what else
-                                  f" (aún nada: {n} retoque{'s' if n != 1 else ''}; hacen falta {SL.MIN_OBS} de un lado)"))
+        self.learn_cb = QCheckBox("◈ Usar lo aprendido de tus retoques" + (f" ({what})" if what else " (aún no)"))
         self.learn_cb.setToolTip("Si después de cortar alargas a mano el borde de un trozo (se fue el final de una "
                                  "palabra) o lo acortas más, Reclaimer lo apunta y la siguiente vez ajusta ese margen solo "
                                  "(la mediana de lo que moviste). Partir o borrar trozos no cuenta; deshacer tu retoque, "
-                                 "tampoco. Funciona con «🎚 Híbrido» y «🎙 Voz precisa».")
+                                 "tampoco. Funciona con «🎚 Híbrido» y «🎙 Voz precisa».\n"
+                                 f"Retoques hasta ahora: {n}" + ("" if what else
+                                                                 f" (hacen falta {SL.MIN_OBS} de un mismo lado)"))
         self.learn_cb.setChecked(bool(what))
         self.learn_cb.setEnabled(bool(what))
         self.learn_cb.toggled.connect(lambda _v: self._changed())
-        lay.addWidget(self.learn_cb)
-        self.scope_all = QRadioButton("Mover todo lo de detrás (todas las pistas: nada se desincroniza)")
-        self.scope_track = QRadioButton("Solo en estos clips (y su imagen o sonido vinculado)")
+        mb.addWidget(self.learn_cb)
+        self.scope_all = QRadioButton("Mover todo lo de detrás (todas las pistas)")
+        self.scope_all.setToolTip("Mover todo lo de detrás (todas las pistas: nada se desincroniza).")
+        self.scope_track = QRadioButton("Solo estos clips (y su imagen o sonido vinculado)")
+        self.scope_track.setToolTip("Solo en estos clips y su imagen o sonido vinculado: lo de detrás no se mueve.")
         self.scope_all.setChecked(True)
         grp = QButtonGroup(self)
         grp.addButton(self.scope_all)
         grp.addButton(self.scope_track)
-        lay.addWidget(self.scope_all)
-        lay.addWidget(self.scope_track)
-        self.info = QLabel("Midiendo el sonido…")
-        self.info.setWordWrap(True)
-        lay.addWidget(self.info)
+        mb.addWidget(self.scope_all)
+        mb.addWidget(self.scope_track)
+        qs_ui = QSettings("EditorIA", "EditorIA")
+        self.more_btn.setChecked(str(qs_ui.value(MORE_KEY, "false")).lower() == "true")
+        self._show_more(self.more_btn.isChecked())
+        self.more_btn.toggled.connect(self._toggle_more)
+
         brow = QHBoxLayout()
         brow.addStretch()
         b_cancel = QPushButton("Cancelar")
@@ -233,6 +266,17 @@ class SilenceDialog(QDialog):
         self._clips_all, self._paths = clips, paths
         self._job = None
         self._start_job()
+        if hasattr(self.win, "learn_voice_pending"):      # ◈ lo apuntado al transcribir se aprende ahora, que se usa
+            self.win.learn_voice_pending()
+
+    def _show_more(self, on: bool):
+        self.more_box.setVisible(bool(on))
+        self.more_btn.setText("⚙ Más opciones " + ("▾" if on else "▸"))
+        self.adjustSize()
+
+    def _toggle_more(self, on: bool):
+        self._show_more(on)
+        QSettings("EditorIA", "EditorIA").setValue(MORE_KEY, "true" if on else "false")
 
     def _start_job(self):
         """1) Rápido: escuchar dónde hablas (la IA y el volumen; se guarda): en cuanto acaba, ya puedes eliminar.
@@ -426,14 +470,16 @@ class SilenceDialog(QDialog):
         self.regions = S.plan(p, clips, self.fps, self.settings())
         total = sum(b - a for a, b in self.regions)
         hits = S.voice_hits(p, clips, self.regions)          # ⚠ la predicción: ¿se cortaría voz?
-        self.win.timeline.set_preview_regions(self.regions, hits)
+        # como Resolve: se oscurece solo en las pistas que se cortan (las demás llevan una marca fina en la regla)
+        tracks = list(dict.fromkeys(c.track_id for c in clips))
+        self.win.timeline.set_preview_regions(self.regions, hits, tracks=tracks or None)
         if self.regions:
             hv = sum(b - a for a, b in hits)
-            warn = (f"<br><span style='color:#ff6b66'><b>⚠ Cortaría {hv:.1f} s de tu voz</b> (en rojo en la línea "
-                    "de tiempo).</span> Prueba «🎯 Respetar las palabras», la protección «Máxima» o el modo «Híbrido»."
+            warn = (f"<br><span style='color:#ff6b66'><b>⚠ Cortaría {hv:.1f} s de tu voz</b></span>"
                     if hv >= 0.05 else "<br>✓ Sin tocar tu voz.")
-            self.info.setText(f"Se quitarán <b>{len(self.regions)}</b> silencios (<b>{total:.1f} s</b>). Están "
-                              "marcados en naranja en la línea de tiempo." + warn + getattr(self, "_words_note", ""))
+            n = len(self.regions)
+            self.info.setText(f"Se quitarán <b>{n} silencio{'s' if n != 1 else ''} · {_dur(total)}</b>"
+                              + warn + getattr(self, "_words_note", ""))
         else:
             self.info.setText("Con estos ajustes no hay silencios que quitar.")
         self.b_ok.setEnabled(bool(self.regions))
@@ -448,6 +494,8 @@ class SilenceDialog(QDialog):
         if n:
             if hasattr(self.win, "track_silence_edges"):       # ◈ para aprender de tus retoques
                 self.win.track_silence_edges(SL.new_edges(self.ctrl.project, before))
+            if hasattr(self.win, "learn_voice_pending"):  # ◈ y lo que se afinó al cortar, también
+                self.win.learn_voice_pending()
             self.accept()
 
     def done(self, r):

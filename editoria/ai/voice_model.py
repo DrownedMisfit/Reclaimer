@@ -222,11 +222,70 @@ def add_example(key: str, x: np.ndarray, words: list) -> float:
     return total
 
 
+# ---- pendientes: al transcribir solo se APUNTA la grabación (instantáneo); decodificar y aprender se hace cuando
+# se usa (al abrir «✂ Eliminar silencio» o con Voz → Entrenar). El usuario: «solo entro a subtitular y pierdo
+# rendimiento».
+def _pending_file() -> str:
+    return os.path.join(examples_dir(), "pendientes.json")
+
+
+def queue_example(path: str, words: list) -> int:
+    """Apunta una grabación con sus palabras afinadas para aprender más tarde. Devuelve cuántas hay pendientes."""
+    import json
+    items = [it for it in pending() if os.path.normcase(it.get("path", "")) != os.path.normcase(path)]
+    items.append({"path": path, "words": [list(w) for w in words]})
+    tmp = _pending_file() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items[-20:], f, ensure_ascii=False)
+    os.replace(tmp, _pending_file())
+    return len(items[-20:])
+
+
+def pending() -> list[dict]:
+    import json
+    try:
+        with open(_pending_file(), encoding="utf-8") as f:
+            items = json.load(f)
+        return [it for it in items if isinstance(it, dict) and it.get("path") and it.get("words")]
+    except (OSError, ValueError):
+        return []
+
+
+def process_pending(progress=None, cancelled=None) -> int:
+    """Convierte las grabaciones apuntadas en ejemplos (decodifica su audio). Devuelve cuántas se añadieron."""
+    from ..core import media as media_tools
+    items = pending()
+    hechas = 0
+    for i, it in enumerate(items):
+        if cancelled and cancelled():
+            break
+        if progress:
+            progress(0.02 + 0.08 * i / max(1, len(items)), f"◈ Preparando ejemplos de tu voz… {i + 1}/{len(items)}")
+        if os.path.exists(it["path"]):
+            try:
+                add_example(media_tools.cache_key(it["path"]), media_tools.decode_mono(it["path"], SR), it["words"])
+                hechas += 1
+            except Exception:  # noqa: BLE001 - una grabación rota no detiene las demás
+                pass
+    try:
+        os.remove(_pending_file())
+    except OSError:
+        pass
+    return hechas
+
+
+def learn_pending(progress=None, cancelled=None) -> dict | None:
+    """Pendientes → ejemplos → entrenar. None si no había nada nuevo o aún hay pocos minutos."""
+    if not process_pending(progress, cancelled):
+        return None
+    return train_from_examples(progress=progress)
+
+
 def examples() -> list[tuple[np.ndarray, np.ndarray, str]]:
     """[(log-mel, etiquetas, nombre)] del más viejo al más nuevo."""
     out = []
     for n in sorted(os.listdir(examples_dir()), key=lambda n: os.path.getmtime(os.path.join(examples_dir(), n))):
-        if not n.endswith(".npz"):
+        if not n.endswith(".npz"):            # (pendientes.json y demás no son ejemplos)
             continue
         try:
             with np.load(os.path.join(examples_dir(), n)) as z:

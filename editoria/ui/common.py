@@ -107,3 +107,35 @@ def pick_color(initial, parent=None, title: str = "Color", alpha: bool = False) 
     opts = QColorDialog.ColorDialogOption.ShowAlphaChannel if alpha else QColorDialog.ColorDialogOption(0)
     win = parent.window() if parent is not None else None
     return QColorDialog.getColor(QColor(initial), win, title, opts)
+
+
+def modo_archivo_suelto(parent) -> str | None:
+    """🔑 Un archivo suelto del Explorador en una palabra clave: «enlazar» (no copia) o «copiar». Pregunta una vez y
+    recuerda la elección (QSettings «palabras_clave/soltar_archivo»). None si cancela."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QCheckBox, QMessageBox
+    st = QSettings("EditorIA", "EditorIA")
+    guardado = str(st.value("palabras_clave/soltar_archivo", "") or "")
+    if guardado in ("enlazar", "copiar"):
+        return guardado
+    box = QMessageBox(parent)
+    box.setWindowTitle("Archivo suelto")
+    box.setText("¿Qué hago con el archivo?")
+    b_enl = box.addButton("Enlazar (no copia, recomendado para videos grandes)", QMessageBox.AcceptRole)
+    b_enl.setToolTip("La palabra apunta al archivo donde está. No ocupa más disco y no se mueve nada.")
+    b_cop = box.addButton("Copiar a la carpeta de la palabra", QMessageBox.AcceptRole)
+    b_cop.setToolTip("Hace una copia del archivo dentro de la carpeta de Reclaimer de esa palabra.")
+    box.addButton("Cancelar", QMessageBox.RejectRole).setToolTip("No añade el archivo.")
+    recordar = QCheckBox("Recordar mi elección")
+    box.setCheckBox(recordar)
+    box.exec()
+    pulsado = box.clickedButton()
+    if pulsado is b_enl:
+        modo = "enlazar"
+    elif pulsado is b_cop:
+        modo = "copiar"
+    else:
+        return None
+    if recordar.isChecked():
+        st.setValue("palabras_clave/soltar_archivo", modo)
+    return modo

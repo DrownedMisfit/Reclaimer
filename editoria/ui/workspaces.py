@@ -16,8 +16,8 @@ from __future__ import annotations
 import json
 import os
 
-from PySide6.QtCore import QObject, QSettings, Signal
-from PySide6.QtWidgets import QMessageBox, QTabBar
+from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtWidgets import QMenu, QMessageBox, QTabBar
 
 from ..core.paths import app_data_dir
 
@@ -60,6 +60,9 @@ class Workspaces(QObject):
         self.started = False                     # hasta start() (al abrir Reclaimer) no toca nada guardado
         self.stacks: dict = {}                   # historial de deshacer de cada pestaña (en memoria)
         self.bar.currentChanged.connect(self._tab_changed)
+        self.bar.setContextMenuPolicy(Qt.CustomContextMenu)     # clic derecho: «↪ Mover este proyecto a…»
+        self.bar.setProperty("own_menu", True)
+        self.bar.customContextMenuRequested.connect(self._bar_menu)
         self.ctrl.workspace_file = None
 
     # ------------------------------------------------------------ estado
@@ -188,6 +191,142 @@ class Workspaces(QObject):
         self.win.statusBar().showMessage(f"{title}: «{self.ctrl.project.name}». La otra pestaña quedó guardada."
                                          + (f" {added} medio(s) de la otra pestaña ya están aquí." if added else ""),
                                          6000)
+        return True
+
+    # ------------------------------------------------------------ mover el proyecto a otra pestaña
+    @staticmethod
+    def _label(fmt: str) -> str:
+        return dict(TABS)[fmt].split("  ", 1)[-1]          # «🎬  YouTube» → «YouTube»
+
+    @staticmethod
+    def _work_name(path: str):
+        """Nombre del proyecto guardado en ese archivo si tiene clips o medios; None si está vacío o no se lee."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or not (data.get("clips") or data.get("media")):
+            return None
+        return str(data.get("name") or "Proyecto sin título")
+
+    def _occupied(self, fmt: str):
+        """Lo que hay ya en la pestaña fmt (nombre del proyecto), o None si está libre."""
+        path = str(self.settings.value(self._key(fmt), "") or "")
+        if path and os.path.exists(path):
+            return os.path.splitext(os.path.basename(path))[0]
+        if os.path.exists(ws_file(fmt)):
+            return self._work_name(ws_file(fmt))
+        return None
+
+    def fill_move_menu(self, menu: QMenu):
+        """Archivo → «↪ Mover este proyecto a»: las tres pestañas; la actual, deshabilitada."""
+        menu.clear()
+        for key, title in TABS:
+            a = menu.addAction(title.replace("  ", " "))
+            a.setEnabled(key != self.current)
+            a.triggered.connect(lambda _=False, k=key: self.move_to(k))
+
+    def _bar_menu(self, pos):
+        """Clic derecho en las pestañas de trabajo: mover el proyecto a una de las otras dos."""
+        from . import help as help_ui
+        menu = QMenu(self.bar)
+        for key, _title in TABS:
+            if key != self.current:
+                menu.addAction(f"↪ Mover este proyecto a «{self._label(key)}»").triggered.connect(
+                    lambda _=False, k=key: self.move_to(k))
+        help_ui.exec_menu(menu, self.bar.mapToGlobal(pos))
+        menu.deleteLater()
+
+    def move_to(self, fmt: str, ask: bool = True) -> bool:
+        """Mueve el proyecto actual a la pestaña fmt cambiando su formato (Ctrl+Z lo devuelve).
+        La pestaña de origen queda vacía. Si el destino ya tenía trabajo: copia de seguridad y se reemplaza."""
+        if fmt == self.current or fmt not in KEYS:
+            return False
+        busy = self._busy()
+        if busy:
+            self.win.statusBar().showMessage(f"Espera a que termine (está {busy}) antes de mover el proyecto.", 7000)
+            return False
+        try:
+            self.win.engine.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        if getattr(self.win, "_thumb_page", None) is not None and getattr(self.win, "_thumb_editor", None):
+            self.win._thumb_editor.close()
+        c = self.ctrl
+        src, dst = self.current, fmt
+        dst_path = str(self.settings.value(self._key(dst), "") or "")
+        occupied = self._occupied(dst)
+        if occupied is not None and ask:
+            r = QMessageBox.question(
+                self.win, "Mover proyecto",
+                f"La pestaña «{self._label(dst)}» ya tiene «{occupied}». Se guardará una copia de seguridad y "
+                "este proyecto ocupará su lugar. ¿Continuar?",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if r != QMessageBox.Yes:
+                return False
+        if occupied is not None:                 # lo que había en el destino, a las copias (no se borra un .eia con nombre)
+            origin = dst_path if dst_path and os.path.exists(dst_path) else ws_file(dst)
+            try:
+                c.backup_now(origin, name=f"Proyecto ({dst})")
+            except OSError as exc:               # sin copia no se reemplaza nada (no se pierde trabajo)
+                QMessageBox.warning(self.win, "Mover proyecto",
+                                    f"No se pudo guardar la copia de seguridad de «{occupied}», así que no se movió "
+                                    f"nada.\n\n{exc}")
+                return False
+        # 3. formato del proyecto: un paso de deshacer (Ctrl+Z vuelve al formato anterior)
+        c.set_project_format(dst)
+        if c.project.format != dst:
+            return False
+        # 4. el historial se va con el proyecto
+        old = self.stacks.get(dst)
+        self.stacks[dst] = c.undo_stack
+        self.stacks.pop(src, None)
+        if old is not None and old is not c.undo_stack:
+            c.undo_group.removeStack(old)
+        # 5. asociaciones: el proyecto ocupa el destino; el origen queda vacío
+        if c.path:
+            self.settings.setValue(self._key(dst), c.path)
+            if c.dirty:
+                from .saving import _cfg
+                if _cfg()["live"]:
+                    c.save(c.path, backup=False)
+        else:
+            from ..core.controller import _atomic_write_json
+            self.settings.setValue(self._key(dst), "")
+            data = c.project.to_dict()
+            data["_espacio"] = dst
+            _atomic_write_json(ws_file(dst), data)
+            c.undo_stack.setClean()
+            c._media_dirty = False
+            c.dirty_changed.emit()
+        self.settings.setValue(self._key(src), "")
+        if c.path and self._occupied(src) is not None:   # un proyecto sin nombre antiguo en el origen: a las copias
+            try:
+                c.backup_now(ws_file(src), name=f"Proyecto ({src})")
+            except OSError:
+                pass
+        try:
+            os.remove(ws_file(src))
+        except OSError:
+            pass
+        if c.path:                               # con nombre: su .eia ya no es de la pestaña de origen
+            try:
+                os.remove(ws_file(dst))          # (el sin nombre que hubiera en el destino ya está en las copias)
+            except OSError:
+                pass
+        # 6. cambiar la pestaña sin recargar el proyecto (ya es el bueno)
+        self.current = dst
+        self.started = True
+        self.settings.setValue("espacios/actual", dst)
+        c.workspace_file = ws_file(dst)
+        self._set_bar(dst)
+        self.switched.emit(dst)
+        # 7. aviso
+        ratio = "9:16" if c.project.height > c.project.width else "16:9"
+        nombre = c.project.name or "Proyecto sin título"
+        self.win.statusBar().showMessage(f"↪ «{nombre}» ahora está en {self._label(dst)} ({ratio}). "
+                                         "Ctrl+Z devuelve el formato anterior.", 8000)
         return True
 
     def _backup_unnamed(self):
