@@ -684,7 +684,9 @@ class ProjectController(QObject):
     def add_media_at_times(self, media_ids: list[str], times: list[float], text: str = "",
                            origin: str = ORIGIN_USER, modo: str = "partes"):
         """🔑 Pone los archivos en cada instante de una palabra clave, todo en UN solo paso de deshacer.
-        Vídeos (como B-roll, sin sonido, en una pista de video libre encima de la principal):
+        Todos los clips (vídeos e imágenes) van en la MISMA pista de palabras clave: si un clip nuevo empieza antes de
+        que acabe el anterior, el nuevo corta al anterior. Sin sonido (nunca se añade el audio del archivo).
+        Vídeos (como B-roll):
           · modo «partes»: en cada marca un trozo distinto y consecutivo del video, con la duración de la frase;
           · modo «entero»: desde el principio (tras logos) hasta la siguiente marca, el final del video o el de la
             línea de tiempo, lo que llegue antes.
@@ -697,7 +699,7 @@ class ProjectController(QObject):
         def fn(p: Project):
             n = len(media_ids)
             fin_linea = p.duration()
-            por_video: dict[str, list[tuple[float, float, float]]] = {}
+            tandas: list[tuple[str, float, float, float]] = []   # (archivo, marca, duración, source_in)
             sig: dict[str, float] = {}      # por video (modo partes): dónde acabó el trozo anterior
             created: list[str] = []
             sin_sitio = 0
@@ -710,18 +712,22 @@ class ProjectController(QObject):
                 if mid in self.missing:
                     raise EditError(f"No se encuentra el archivo «{m.name}».")
                 nxt = starts[i + 1] if i + 1 < len(starts) else math.inf
-                if m.kind != KIND_VIDEO:            # imagen (o audio): la frase y nunca hasta la marca siguiente
+                if m.kind == KIND_AUDIO:        # nunca se añade su sonido: un audio no entra aquí
+                    sin_sitio += 1
+                    continue
+                if m.kind == KIND_IMAGE:        # la frase y nunca hasta la marca siguiente
                     d = min(duracion_frase(p, t), nxt - t)
                     if d < 0.5:
                         sin_sitio += 1
                         continue
-                    created += self._place_media(p, [mid], None, t, origin, dur_override=d)
+                    tandas.append((mid, t, d, 0.0))
                     continue
                 if m.duration <= 0:
                     raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
                 s0 = min(3.0, 0.1 * float(m.duration))          # salta los logos del principio
                 if modo == "entero":
-                    d = min(m.duration - s0, nxt - t, fin_linea - t)
+                    fin = fin_linea if fin_linea - t >= 0.5 else math.inf   # (en la cola o sin nada: el video entero)
+                    d = min(m.duration - s0, nxt - t, fin - t)
                     src = s0
                 else:
                     src = sig.setdefault(mid, s0)
@@ -729,11 +735,10 @@ class ProjectController(QObject):
                 if d < 0.5:
                     sin_sitio += 1
                     continue
-                por_video.setdefault(mid, []).append((t, d, src))
+                tandas.append((mid, t, d, src))
                 if modo != "entero":
                     sig[mid] = src + d
-            for mid, items in por_video.items():
-                created += self._place_clip_items(p, mid, items)
+            created += self._place_batch(p, tandas)      # todo en la misma pista de palabras clave
             if not created:
                 raise EditError("No hay sitio para ponerlo: el video no da para tantos trozos.")
             if sin_sitio:
@@ -4373,9 +4378,9 @@ class ProjectController(QObject):
     def place_clip_at(self, media_id: str, times: list[float], durations: list[float],
                       source_in: float) -> list[str]:
         """📍 «Poner donde lo dices»: el clip (en silencio: es B-roll) en CADA momento (segundos de la línea de tiempo)
-        con su duración, en una pista de video libre POR ENCIMA de la principal (la de abajo, donde van la narración
-        y el B-roll). Si ninguna está libre en ese tramo, se crea una pista nueva justo encima de la principal.
-        Todo en un solo paso de deshacer. Devuelve los ids de los clips creados."""
+        con su duración. Todos en la MISMA pista de palabras clave (ver _place_clip_items): si un clip nuevo empieza
+        antes de que acabe el anterior, el nuevo corta al anterior. Sin sonido. Todo en un solo paso de deshacer.
+        Devuelve los ids de los clips creados."""
 
         def fn(p: Project):
             ids = self._place_clip_items(p, media_id, [(t, d, source_in) for t, d in zip(times, durations)])
@@ -4386,42 +4391,71 @@ class ProjectController(QObject):
         res = self._edit("📍 Poner donde lo dices", fn)
         return res if isinstance(res, list) else []
 
-    def _place_clip_items(self, p: Project, media_id: str, items: list[tuple[float, float, float]]) -> list[str]:
-        """El trabajo de place_clip_at (dentro de un _edit). items = [(inicio, duración, source_in)], cada uno con SU
-        trozo del archivo. Van en la primera pista de video libre por encima de la principal en su tramo (si ninguna,
-        se crea una justo encima de la principal). Clips en silencio (B-roll). Devuelve los ids creados."""
-        m = p.media.get(media_id)
-        es_img = m is not None and m.kind == KIND_IMAGE
-        if m is None or m.kind not in (KIND_VIDEO, KIND_IMAGE):
-            raise EditError("Ese archivo no es un video ni una imagen.")
-        if m.kind == KIND_VIDEO and m.duration <= 0:
-            raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
+    def _place_clip_items(self, p: Project, media_id: str, items: list[tuple[float, float, float]],
+                          note: str = "🔑 Palabra clave") -> list[str]:
+        """El trabajo de place_clip_at (dentro de un _edit) para UN archivo. items = [(inicio, duración, source_in)],
+        cada uno con SU trozo del archivo. Todo va en la misma pista de palabras clave (ver _place_batch).
+        Clips en silencio (B-roll). Devuelve los ids creados."""
+        return self._place_batch(p, [(media_id, t, d, src) for t, d, src in items], note)
+
+    def _place_batch(self, p: Project, tandas: list[tuple[str, float, float, float]],
+                     note: str = "🔑 Palabra clave") -> list[str]:
+        """Coloca los clips de palabra clave de UNA tanda (dentro de un _edit). tandas = [(archivo, inicio, duración,
+        source_in)], de uno o varios archivos (vídeos e imágenes). Reglas:
+          · todos van en UNA sola pista de video, la de palabras clave: a) una pista por encima de la principal, no
+            bloqueada, con clips de palabra clave (la que más tenga); b) si no, la primera por encima de la principal
+            (de la más cercana a la más alta) libre en todos los tramos de la tanda; c) si no, una nueva justo encima
+            de la principal. Nunca se apilan en pistas distintas;
+          · en orden de inicio, cada clip corta lo que haya en su tramo de ESA pista (el anterior se acorta);
+          · cada clip empieza exactamente en su marca, en silencio (volume=0) y sin clip de audio vinculado.
+        Devuelve los ids de los clips creados."""
         vt = [t for t in p.tracks if t.kind == TRACK_VIDEO]
         if not vt:
             raise EditError("No hay pistas de video.")
         main = vt[-1]
-        # las pistas de encima, de la más cercana a la principal a la más alta
         arriba = sorted((t for t in vt if p.track_index(t.id) < p.track_index(main.id)),
                         key=lambda t: -p.track_index(t.id))
-        ids: list[str] = []
-        for t0, d0, src0 in items:
+        pendientes: list[tuple[float, float, float, MediaItem]] = []
+        for mid, t0, d0, src0 in tandas:
+            m = p.media.get(mid)
+            if m is None or m.kind not in (KIND_VIDEO, KIND_IMAGE):
+                raise EditError("Ese archivo no es un video ni una imagen.")
+            if m.kind == KIND_VIDEO and m.duration <= 0:
+                raise EditError(f"Todavía se está analizando «{m.name}». Prueba en un momento.")
             a = max(0.0, float(t0))
-            if es_img:          # una imagen no tiene duración propia: va desde 0 y dura lo pedido
+            if m.kind == KIND_IMAGE:        # una imagen no tiene duración propia: va desde 0 y dura lo pedido
                 src, d = 0.0, float(d0)
             else:
                 src = max(0.0, min(float(src0), max(0.0, m.duration - 0.5)))
                 d = min(float(d0), m.duration - src)
             if d < 0.5:
                 continue
-            b = a + d
-            tid = next((t.id for t in arriba if not t.locked and not any(
-                c.start < b - EPS and c.end > a + EPS for c in p.clips_on(t.id))), None)
-            if tid is None:             # ninguna libre en ese tramo: una nueva justo encima de la principal
-                nt = Track(new_id(), TRACK_VIDEO, f"V{len(vt) + 1}")
-                p.tracks.insert(p.track_index(main.id), nt)
-                arriba.insert(0, nt)
-                tid = nt.id
-            c = Clip(new_id(), m.id, tid, a, src, d, volume=0.0, origin=ORIGIN_USER,
+            pendientes.append((a, d, src, m))
+        if not pendientes:
+            return []
+        pendientes.sort(key=lambda x: x[0])
+
+        def libre(tid: str, a: float, b: float) -> bool:
+            return not any(c.start < b - EPS and c.end > a + EPS for c in p.clips_on(tid))
+
+        def es_kw(c: Clip) -> bool:
+            return (c.note or "").startswith("🔑")
+
+        cand = [t for t in arriba if not t.locked]
+        con_kw = [t for t in cand if any(es_kw(c) for c in p.clips_on(t.id))]
+        tid = None
+        if con_kw:                           # a) la pista de palabras clave que ya existe (la que más tenga)
+            tid = max(con_kw, key=lambda t: sum(1 for c in p.clips_on(t.id) if es_kw(c))).id
+        if tid is None:                      # b) la primera libre en todos los tramos de la tanda
+            tid = next((t.id for t in cand if all(libre(t.id, a, a + d) for a, d, _, _ in pendientes)), None)
+        if tid is None:                      # c) ninguna: una nueva justo encima de la principal
+            nt = Track(new_id(), TRACK_VIDEO, f"V{len(vt) + 1}")
+            p.tracks.insert(p.track_index(main.id), nt)
+            tid = nt.id
+        ids: list[str] = []
+        for a, d, src, m in pendientes:
+            self._clear_range(p, tid, a, a + d)          # el nuevo corta lo que hubiera en su tramo
+            c = Clip(new_id(), m.id, tid, a, src, d, volume=0.0, origin=ORIGIN_USER, note=note,
                      layout=self._auto_layout(p, m, tid))
             p.clips[c.id] = c
             ids.append(c.id)

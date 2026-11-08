@@ -23,7 +23,7 @@ import re
 from dataclasses import replace
 
 import numpy as np
-from PySide6.QtCore import QEvent, QLineF, QPointF, QRect, QRectF, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, QLineF, QPointF, QRect, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QInputDialog, QMenu, QScrollBar, QToolTip, QWidget
 
@@ -67,6 +67,9 @@ class TimelineWidget(QWidget):
     EDGE_PX = 7
     SNAP_PX = 10
     DRAG_START_PX = 4
+    NUDGE_PX = 18          # ⇆ Alt + rueda: píxeles que avanza el clip por cada paso de la rueda (según el zoom)
+    NUDGE_TAU_MS = 38.0    # suavidad: cuánto tarda en alcanzar el destino (constante de tiempo)
+    NUDGE_COMMIT_MS = 450  # sin girar este rato: se aplica el movimiento
 
     def __init__(self, ctrl, hbar: QScrollBar, parent=None):
         super().__init__(parent)
@@ -143,6 +146,17 @@ class TimelineWidget(QWidget):
         self._rueda_fin.setSingleShot(True)
         self._rueda_fin.setInterval(150)
         self._rueda_fin.timeout.connect(self.update)
+        # ⇆ Alt + rueda sobre un clip elegido: se desliza en la línea de tiempo (mismo tamaño), suave (ver _nudge_*)
+        self._nudge: dict | None = None
+        self._nudge_anim = QTimer(self)               # animación: el clip va hacia donde le lleva la rueda
+        self._nudge_anim.setTimerType(Qt.PreciseTimer)
+        self._nudge_anim.setInterval(8)
+        self._nudge_anim.timeout.connect(self._nudge_step)
+        self._nudge_fin = QTimer(self)                # al dejar de girar: se aplica (un solo Ctrl+Z)
+        self._nudge_fin.setSingleShot(True)
+        self._nudge_fin.setInterval(self.NUDGE_COMMIT_MS)
+        self._nudge_fin.timeout.connect(self._nudge_commit)
+        self._nudge_prev_armed = False
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)   # Qt desplaza píxeles (QWidget.scroll) solo si es opaco
         hbar.valueChanged.connect(self._on_hbar)
         self._on_project_changed()
@@ -556,6 +570,8 @@ class TimelineWidget(QWidget):
 
     def _on_project_changed(self):
         self._shown_cache = None
+        if getattr(self, "_nudge", None) is not None:   # otro cambio a mitad del ⇆ Alt + rueda: se descarta
+            self._nudge_cancel()
         self._rhythm_pts.clear()
         if self.sel_trans is not None:   # la transición seleccionada ya no existe
             from ..core import transitions as _TR
@@ -876,6 +892,7 @@ class TimelineWidget(QWidget):
         W, H = self.width(), self.height()
         self._rueda_fin.start()
         if (abs(dxf - dx) > 1e-3 or dx == 0 or abs(dx) >= W - self.HEADER_W - 24 or self._drag is not None
+                or self._nudge is not None
                 or self._drop is not None or self._fx_drop or self.preview_regions or self.preview_voice):
             self.update()
             return
@@ -918,6 +935,9 @@ class TimelineWidget(QWidget):
             e.ignore()  # que lo gestione el área de scroll vertical
             return
         elif e.modifiers() & Qt.AltModifier:     # Alt + rueda: las pistas suben / bajan (scroll vertical)
+            if self._nudge_wheel(e, dy):        # … salvo encima de un clip elegido: el clip se desliza
+                e.accept()
+                return
             sa = self._scroll_area()
             if sa is None:
                 e.ignore()
@@ -927,6 +947,174 @@ class TimelineWidget(QWidget):
         else:
             self.hbar.setValue(self.hbar.value() - int(dy))
         e.accept()
+
+    # ------------------------------------------------------------- ⇆ Alt + rueda: deslizar el clip elegido
+    def _nudge_wheel(self, e, dy: float) -> bool:
+        """⇆ Alt + rueda encima de un clip elegido: los clips elegidos (con su sonido vinculado) se deslizan hacia
+        atrás o hacia delante sin cambiar de tamaño. Suave (se anima hacia el destino), se detiene al tocar otro clip,
+        se pega un instante a las palabras clave y al cabezal, y el visor enseña el cuadro en vivo. Al dejar de girar
+        (o al soltar Alt) se aplica en un solo paso de Ctrl+Z. False = no es el caso (la rueda hace lo de siempre)."""
+        if not dy:
+            return False
+        if self._nudge is None:
+            if self._drag is not None:
+                return False
+            pos = self._rmap(e.position())
+            if pos.y() < self.RULER_H:
+                return False
+            c, _zone = self.clip_at(pos)
+            if c is None or c.id not in self.selected or not self._nudge_begin(c):
+                return False
+        n = self._nudge
+        paso = -float(dy) / 120.0 * self.NUDGE_PX / max(self.pps, 1e-6)   # rueda arriba = antes (como el scroll)
+        n["target"] = min(max(n["target"] + paso, n["lo"]), n["hi"])
+        self._nudge_fin.start()
+        if not self._nudge_anim.isActive():
+            n["clock"].restart()
+            self._nudge_anim.start()
+        return True
+
+    def _nudge_begin(self, anchor) -> bool:
+        proj = self.ctrl.project
+        ids = [i for i in sorted(self.selected) if i in proj.clips]
+        clips = [proj.clips[i] for i in ids]
+        if not clips:
+            return False
+        for c in clips:
+            tr = proj.track(c.track_id)
+            if c.locked or (tr is not None and tr.locked):
+                self.ctrl.message.emit("🔒 Ese clip (o su pista) está bloqueado: no se puede mover.")
+                return False
+        sel = set(ids)
+        lo, hi = -min(c.start for c in clips), math.inf      # nunca antes del segundo 0
+        for c in clips:                                      # ni encima de otro clip: se detiene al tocarlo
+            for o in proj.clips_on(c.track_id):
+                if o.id in sel:
+                    continue
+                if o.end <= c.start + 1e-6:
+                    lo = max(lo, o.end - c.start)
+                elif o.start >= c.end - 1e-6:
+                    hi = min(hi, o.start - c.end)
+        lo, hi = min(lo, 0.0), max(hi, 0.0)
+        p0 = float(self.playhead)
+        mags = sorted({float(t) for t, _l in self.hint_marks} | {p0})    # 🔑 palabras clave y el cabezal
+        d = {"type": "move", "active": True, "nudge": True, "ids": ids, "anchor": anchor.id,
+             "dt": 0.0, "dtrack": 0, "kind0": None}
+        clock = QElapsedTimer()
+        clock.start()
+        self._nudge = {"d": d, "ids": ids, "a0": anchor.start, "a1": anchor.end, "lo": lo, "hi": hi,
+                       "target": 0.0, "cur": 0.0, "mags": np.asarray(mags, dtype=float), "p0": p0,
+                       "clock": clock, "previewed": False}
+        return True
+
+    def _nudge_snap(self, x: float) -> float:
+        """Imán suave: si el principio o el final del clip pasa cerca (SNAP_PX) de una palabra clave o del cabezal,
+        se queda ahí hasta que la rueda lo saca."""
+        n = self._nudge
+        arr = n["mags"]
+        if not self.snapping or not len(arr):
+            return x
+        best = None
+        for edge in (n["a0"], n["a1"]):
+            t = edge + x
+            i = int(np.searchsorted(arr, t))
+            for j in (i - 1, i):
+                if 0 <= j < len(arr):
+                    dpx = abs(float(arr[j]) - t) * self.pps
+                    if dpx <= self.SNAP_PX and (best is None or dpx < best[0]):
+                        best = (dpx, float(arr[j]) - edge)
+        return best[1] if best else x
+
+    def _nudge_step(self):
+        """Un fotograma de la animación (cada ~8 ms): se acerca al destino con suavizado exponencial, que no depende
+        de lo que tarde cada paso. Solo se repinta lo que cambia (ver _update_drag)."""
+        n = self._nudge
+        if n is None:
+            self._nudge_anim.stop()
+            return
+        ms = max(1, n["clock"].restart())
+        k = 1.0 - math.exp(-ms / self.NUDGE_TAU_MS)
+        n["cur"] += (n["target"] - n["cur"]) * k
+        if abs(n["target"] - n["cur"]) * self.pps < 0.3:
+            n["cur"] = n["target"]
+        dt = min(max(self._nudge_snap(n["cur"]), n["lo"]), n["hi"])
+        d = n["d"]
+        if abs(dt - d["dt"]) * self.pps >= 0.05:
+            d["dt"] = dt
+            self._update_drag(d)
+            self._nudge_preview()
+        if n["cur"] == n["target"]:
+            self._nudge_anim.stop()
+
+    def _nudge_preview(self):
+        if not self._nudge_prev_armed:
+            self._nudge_prev_armed = True
+            QTimer.singleShot(24, self._nudge_flush_preview)
+
+    def _nudge_time(self) -> float:
+        """Qué instante enseña el visor: el cabezal si el clip (ya deslizado) pasa por él; si no, su borde más
+        cercano al cabezal (su primer cuadro si queda a la derecha, el último si queda a la izquierda)."""
+        n = self._nudge
+        a, b = n["a0"] + n["d"]["dt"], n["a1"] + n["d"]["dt"]
+        p0 = n["p0"]
+        if a <= p0 < b:
+            return p0
+        fr = 1.0 / max(1.0, float(self.ctrl.project.fps or 30))
+        return a if p0 < a else max(a, b - fr)
+
+    def _nudge_flush_preview(self):
+        """El visor enseña el cuadro en vivo: los clips se ponen en su sitio nuevo SOLO durante la llamada al visor
+        (síncrona, en este mismo hilo) y vuelven enseguida; nada más ve el cambio hasta que se aplica."""
+        self._nudge_prev_armed = False
+        n = self._nudge
+        if n is None:
+            return
+        eng = getattr(self.window(), "engine", None)
+        if eng is not None and getattr(eng, "playing", False):
+            return                                   # reproduciendo: no se salta el cabezal
+        proj = self.ctrl.project
+        dt = n["d"]["dt"]
+        orig: dict[str, float] = {}
+        try:
+            for cid in n["ids"]:
+                c = proj.clips.get(cid)
+                if c is not None:
+                    orig[cid] = c.start
+                    c.start = c.start + dt
+            n["previewed"] = True
+            self.seek_requested.emit(self._nudge_time())
+        finally:
+            for cid, s0 in orig.items():
+                c = proj.clips.get(cid)
+                if c is not None:
+                    c.start = s0
+
+    def _nudge_stop(self) -> dict | None:
+        n, self._nudge = self._nudge, None
+        self._nudge_anim.stop()
+        self._nudge_fin.stop()
+        return n
+
+    def _nudge_cancel(self):
+        n = self._nudge_stop()
+        if n is not None:
+            self.update()
+
+    def _nudge_commit(self):
+        """Aplica el deslizamiento (un solo Ctrl+Z) y el visor vuelve al cabezal de antes."""
+        n = self._nudge_stop()
+        if n is None:
+            return
+        proj = self.ctrl.project
+        dt = n["d"]["dt"]
+        if abs(dt) > 1e-6:
+            moves = {cid: (proj.clips[cid].start + dt, proj.clips[cid].track_id)
+                     for cid in n["ids"] if cid in proj.clips}
+            if moves:
+                self.ctrl.move_clips(moves)
+        self.update()
+        if n.get("previewed"):
+            self.seek_requested.emit(n["p0"])
 
     # ------------------------------------------------------------- dibujo
     def paintEvent(self, _e):
@@ -960,7 +1148,7 @@ class TimelineWidget(QWidget):
         # Clips
         p.save()
         p.setClipRect(QRectF(self.HEADER_W, self.RULER_H, W - self.HEADER_W, H - self.RULER_H))
-        d = self._drag
+        d = self._nudge["d"] if self._nudge is not None else self._drag
         moving = d and d["type"] == "move" and d.get("active")
         # Rendimiento con muchos clips: cuántos clips comparten cada vínculo (una vez, no clip contra clip) y
         # solo se dibujan los que tocan la zona que hay que repintar (al moverse el cabezal es una franja)
@@ -990,7 +1178,8 @@ class TimelineWidget(QWidget):
                 if not (moving and c.id in d["ids"]):
                     continue
             if moving and c.id in d["ids"]:
-                self._paint_clip(p, c, self.clip_rect(c), dim=True)
+                if not d.get("nudge"):           # (⇆ Alt + rueda: el clip se desliza, no deja copia atenuada)
+                    self._paint_clip(p, c, self.clip_rect(c), dim=True)
             elif d and d["type"] == "trim" and d.get("active") and (c.id == d["clip"] or c.id in d.get("partners", [])):
                 continue                              # se dibuja abajo, ya recortado
             else:
@@ -999,7 +1188,8 @@ class TimelineWidget(QWidget):
             for cid in d["ids"]:
                 c = proj.clips.get(cid)
                 if c:
-                    self._paint_clip(p, c, self.clip_rect(c, c.start + d["dt"], self._dest_track(c, d)), ghost=True)
+                    self._paint_clip(p, c, self.clip_rect(c, c.start + d["dt"], self._dest_track(c, d)),
+                                     ghost=not d.get("nudge"))
         if d and d["type"] == "trim" and d.get("active"):
             for cid in [d["clip"]] + d.get("partners", []):
                 c = proj.clips.get(cid)
@@ -2213,6 +2403,8 @@ class TimelineWidget(QWidget):
 
     # ------------------------------------------------------------- ratón
     def mousePressEvent(self, e):
+        if self._nudge is not None:      # ⇆ un clic aplica el deslizamiento pendiente
+            self._nudge_commit()
         apos = e.position()             # (real: los rombos de efectos van bajo la regla fija)
         pos = self._rmap(apos)          # (en la regla fija, y dentro de la regla = como siempre)
         self.setFocus()
@@ -2738,7 +2930,19 @@ class TimelineWidget(QWidget):
         if m:
             self._rename_marker(m)
 
+    def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key_Alt and self._nudge is not None:   # ⇆ al soltar Alt se aplica ya
+            self._nudge_commit()
+        super().keyReleaseEvent(e)
+
+    def focusOutEvent(self, e):
+        if self._nudge is not None:
+            self._nudge_commit()
+        super().focusOutEvent(e)
+
     def leaveEvent(self, _e):
+        if self._nudge is not None:
+            self._nudge_commit()
         if getattr(self, "_hover_clip", ""):
             self._hover_clip = ""
             self.update()

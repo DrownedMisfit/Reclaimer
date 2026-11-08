@@ -1269,3 +1269,10 @@ y Ayuda → Diagnóstico dice qué eligió (fila «Equipo»).
     categorías (sin borrar tus archivos; pregunta qué hacer con los que estén en la línea de tiempo y, si marcas la
     casilla, borra también sus miniaturas y datos guardados). Las guías del visor empiezan en 9:16 en Edits y
     Shorts (16:9 en YouTube) y se recuerdan por pestaña.
+  · 🔑 Los clips de las palabras clave van todos en la MISMA pista, uno tras otro: si uno nuevo empieza antes de que
+    acabe el anterior, el nuevo lo corta. Nunca se añade su sonido (tampoco al hacer doble clic o «▶ Añadir a la
+    timeline» en un archivo de una palabra clave: va en el cabezal, en esa pista y en silencio).
+  · ⇆ **Alt + rueda encima de un clip elegido**: el clip (con su sonido vinculado) se desliza hacia atrás o hacia
+    delante sin cambiar de tamaño, suave. Se detiene al tocar el clip de al lado, se pega un instante a las palabras
+    clave y al cabezal, y el visor enseña el cuadro en vivo. Al dejar de girar (o al soltar Alt, o con un clic) se
+    aplica: un solo Ctrl+Z. En otro sitio, Alt + rueda sigue subiendo / bajando las pistas.

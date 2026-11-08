@@ -69,7 +69,7 @@ a pantalla completa. <b>Alt + arrastrar / Alt + rueda</b> = mover o acercar la i
 <li><b>Arrastrar</b> un clip = moverlo · <b>arrastrar su borde</b> = recortarlo · <b>S</b> = dividir en el cabezal.</li>
 <li><b>Supr</b> = eliminar · <b>Mayús+Supr</b> = eliminar y cerrar el hueco · <b>Ctrl+L</b> = bloquear el clip.</li>
 <li><b>J / K / L</b> = atrás / parar / adelante · <b>I / O</b> = entrada / salida del tramo · <b>R</b> = velocidad · <b>Mayús+R</b> = congelar la imagen.</li>
-<li><b>M</b> = marcador · <b>T</b> = texto en pantalla · <b>Ctrl+rueda</b> = zoom de la timeline.</li>
+<li><b>M</b> = marcador · <b>T</b> = texto en pantalla · <b>Ctrl+rueda</b> = zoom de la timeline · <b>Alt+rueda</b> encima de un clip elegido = deslizarlo hacia atrás / delante (mismo tamaño; se para al tocar otro clip y se pega a las palabras clave y al cabezal); en otro sitio = subir / bajar las pistas.</li>
 <li><b>✨ Ideas para esto</b> (clic derecho en uno o varios clips): entrada animada, sombra, contorno y dónde
 ponerlo, con un clic. Las capturas de texto se proponen como tarjeta; varios clips, escalonados. Ctrl+Z.</li>
 <li><b>⊞ Composición</b> (botón del visor): elige cuántos huecos (2, 3, 4, 6, 9) y arrastra desde Medios a cada

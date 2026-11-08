@@ -685,10 +685,10 @@ class LibraryPanel(QWidget):
     # ----------------------------------------------------------- acciones
     def _on_double_click(self, item, _col):
         mid = item.data(0, ROLE_MEDIA)
-        if not mid and item.data(0, ROLE_KW_KIND) == "file":      # archivo de una palabra: se importa y se añade
+        if not mid and item.data(0, ROLE_KW_KIND) == "file":      # archivo de una palabra: clip de palabra clave en el cabezal
             ids = self._kw_ids([item.data(0, ROLE_PATH)])
             if ids:
-                self.add_requested.emit(ids)
+                self.ctrl.add_media_at_times(ids, [self._playhead()], "Añadir clip de palabra clave", modo="entero")
             return
         if not mid:
             return
@@ -1264,9 +1264,10 @@ class LibraryPanel(QWidget):
         return bool(puestos)
 
     def _kw_add_file(self, path: str):
+        """▶ Añadir a la timeline (en el cabezal): como clip de palabra clave (misma pista, en silencio)."""
         ids = self._kw_ids([path])
         if ids:
-            self.add_requested.emit(ids)
+            self.ctrl.add_media_at_times(ids, [self._playhead()], "Añadir clip de palabra clave", modo="entero")
 
     def _keyword_actions(self, menu: QMenu, get_ids):
         """🔑 «Añadir en la palabra clave seleccionada» y, si esa palabra sale más veces en la línea de tiempo,
