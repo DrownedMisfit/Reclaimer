@@ -162,7 +162,7 @@ def prueba_panel_y_verificacion(panel):
 
 
 def prueba_clic_no(panel):
-    _clic_derecho(panel, "Vive Coding", "✕ No es palabra clave")
+    _clic_derecho(panel, "Vive Coding", "👎 No es palabra clave")
     assert not any(t.startswith("Vive Coding ·") for t in _textos(panel)), _textos(panel)
     g = KG.load()
     assert "vive coding" in g["no"], g
@@ -171,7 +171,7 @@ def prueba_clic_no(panel):
 
 
 def prueba_clic_si(panel):
-    _clic_derecho(panel, "Pradera Lunar", "✓ Es palabra clave")
+    _clic_derecho(panel, "Pradera Lunar", "👍 Es palabra clave")
     g = KG.load()
     assert "pradera lunar" in g["si"], g["si"]
     fila = _fila(panel, "Pradera Lunar")

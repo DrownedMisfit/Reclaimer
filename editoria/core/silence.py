@@ -412,7 +412,15 @@ def _dips(an: dict, sp: np.ndarray, threshold_db: float, words: list | None) -> 
 #   · "resolve": el umbral manda en todo, como DaVinci Resolve (solo se salvan las «s» y «f» por sus agudos).
 # Medido con su micro (-18…-50 dB · 0/1/2): máxima 113 s siempre; media 112–122 s sin cortar voz clara; como Resolve
 # 125–284 s cortando 0–144 s de voz clara. Voz sintética (15 frases): media como mucho 63 ms; como Resolve, ~3,3 s.
-PROTECT = ("max", "media", "resolve")
+PROTECT = ("davinci", "max", "media", "resolve")
+# 🎚 «Como DaVinci» (la de entrada): el UMBRAL decide, igual que en Resolve (moverlo cambia lo que se quita), y solo se
+# protege la voz CLARA: donde la IA está segura de que hablas (≥ DAVINCI_VAD) y suena a menos de DAVINCI_DB de tu voz (el
+# mismo criterio del aviso «⚠ Cortaría voz»). Antes, con «Media», el umbral casi no cambiaba nada (medido con la voz
+# del usuario: 1 silencio a −40, −32 o −20 dB) y moverlo no servía.
+DAVINCI_VAD, DAVINCI_DB = 0.7, 22.0
+# …y los finales y sílabas suaves que la IA da por voz y quedan como mucho DAVINCI_SOFT dB por debajo del umbral (sin
+# esto se comía hasta ~0,5 s de finales en las pruebas; con 26 dB, ≤ 20 ms y el umbral se sigue notando; medido)
+DAVINCI_SOFT = 26.0
 PROTECT_SOFT, PROTECT_DIP = 18.0, 30.0
 
 
@@ -480,10 +488,25 @@ def _with_voice_model(an: dict, keep: np.ndarray, pv: np.ndarray) -> np.ndarray:
     return keep
 
 
-def _protect(an: dict, sp: np.ndarray, threshold_db: float, words: list | None, level: str) -> np.ndarray:
+def _word_bounds(words: list | None) -> list[float]:
+    """Dónde acaba cada palabra y empieza la siguiente (para saber si un hueco cae ENTRE dos palabras)."""
+    if not words:
+        return []
+    ws = []
+    for w in words:
+        try:
+            ws.append((float(w[0]), float(w[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    ws.sort()
+    return sorted({round(x, 4) for p, q in zip(ws, ws[1:]) for x in (p[1], q[0])})
+
+
+def _protect(an: dict, sp: np.ndarray, threshold_db: float, words: list | None, level: str,
+             pv: np.ndarray | None = None) -> np.ndarray:
     """Dónde hay sonido que conservar (cada 5 ms) en modo híbrido, según la protección de la voz elegida."""
     import bisect
-    if level not in ("media", "resolve"):
+    if level not in ("media", "resolve", "davinci"):
         return sp & ~_dips(an, sp, threshold_db, words)
     full, hi, vad = an["full"], an["hi"], an["vad"]
     n = len(full)
@@ -492,6 +515,27 @@ def _protect(an: dict, sp: np.ndarray, threshold_db: float, words: list | None, 
     thr_hi = threshold_db + (lvl_hi - lvl)            # el mismo umbral, en los agudos (relativo a tu voz)
     if level == "resolve":
         return _close_gaps((full >= threshold_db) | (hi >= thr_hi), 0.02)
+    if level == "davinci":                             # el umbral manda; la voz clara, protegida
+        clara = _close_gaps((vad >= DAVINCI_VAD) & (full > lvl - DAVINCI_DB), 0.02)
+        suave = sp & ((full > threshold_db - DAVINCI_SOFT) | (hi > thr_hi - DAVINCI_SOFT))
+        keep = _close_gaps((full >= threshold_db) | (hi >= thr_hi), 0.02) | clara | suave
+        # el cierre de una «p», «t» o «k» DENTRO de una palabra (50–120 ms de silencio en mitad de la voz) no se toca:
+        # un hueco dentro de la voz solo se quita si cae entre dos palabras (con transcripción) o si dura DIP_NOWORDS
+        bordes = _word_bounds(words)
+        for i, j in _runs(~keep):
+            if i == 0 or j >= n or not (sp[i - 1] and sp[j]):
+                continue
+            a, b = i * HOP, j * HOP
+            if bordes:
+                k = bisect.bisect_left(bordes, a - DIP_WORD)
+                if k < len(bordes) and bordes[k] <= b + DIP_WORD:
+                    continue
+            elif b - a >= DIP_NOWORDS:
+                continue
+            if pv is not None and j <= len(pv) and float(np.mean(pv[i:j])) < PV_OFF:
+                continue                       # ◈ la IA entrenada con tu voz dice que ahí NO hay palabra: es una pausa
+            keep[i:j] = True
+        return keep
     core = np.zeros(n, bool)                           # la voz que la IA reconoce con seguridad
     for i, j in _runs(vad >= VAD_ON):
         if (j - i) * HOP >= MIN_SPEECH:
@@ -590,11 +634,14 @@ def silent_ranges_voice(an: dict, fps: float, threshold_db: float, before: int, 
     siguiente, y es plan() quien las junta y mira el mínimo con la pausa ENTERA."""
     sp = speech_mask(an, threshold_db)
     if hybrid:
-        sp = _protect(an, sp, threshold_db, words, protect)
-        if pv is not None and protect != "resolve":
+        sp = _protect(an, sp, threshold_db, words, protect, pv if protect == "davinci" else None)
+        if pv is not None and protect not in ("resolve", "davinci"):
             sp = _with_voice_model(an, sp, pv)
         if words_locked and words:
-            sp = sp | _word_frames(an, sp, words)
+            wf = _word_frames(an, sp, words)
+            if protect == "davinci":            # (solo lo que suena cerca del umbral: si no, el umbral dejaba de mandar
+                wf &= an["full"] > threshold_db - DAVINCI_SOFT   # en cuanto se afinaban las palabras)
+            sp = sp | wf
     n = len(sp)
     i0 = max(0, int(np.floor(a / HOP)))
     i1 = n if b is None else min(n, int(np.ceil(b / HOP)))
@@ -748,3 +795,30 @@ def plan(project, clips, fps: float, settings: dict) -> list[tuple[float, float]
     # mitades, con sus márgenes) llega al mínimo
     min_s = max(1, int(settings.get("min_frames", 1))) / fps
     return [(a, b) for a, b, only_edges, rl in merged if b - a > 1e-3 and not (only_edges and rl < min_s - 1e-6)]
+
+
+def short_pauses(project, clips, fps: float, settings: dict) -> dict:
+    """Para explicar por qué no se quita algo: las pausas por debajo del umbral en lo elegido (por volumen, al
+    fotograma) y cuántas no llegan al mínimo o se las comen los márgenes. {"total", "cortas", "margenes", "min_frames"}."""
+    thr = float(settings.get("threshold_db", -32.0))
+    minf = max(1, int(settings.get("min_frames", 1)))
+    marg = int(settings.get("before", 0)) + int(settings.get("after", 0))
+    total = cortas = margenes = 0
+    for c in clips:
+        m = project.media_of(c)
+        if m is None or c.speed <= 0 or c.reverse or not (m.kind == "audio" or m.has_audio):
+            continue
+        try:
+            db = frame_levels(m.path, fps)
+        except Exception:  # noqa: BLE001 - sin audio legible: no cuenta
+            continue
+        f0 = max(0, int(round(c.source_in * fps)))
+        f1 = min(len(db), int(round((c.source_in + c.src_len) * fps)))
+        for i, j in _runs(db[f0:f1] < thr):
+            total += 1
+            if j - i < minf:
+                cortas += 1
+            elif j - i <= marg:
+                margenes += 1
+    return {"total": total, "cortas": cortas, "margenes": margenes, "min_frames": minf}
+

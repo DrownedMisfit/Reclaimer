@@ -16,9 +16,13 @@ import math
 import os
 import time
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFontComboBox,
+import cv2
+import numpy as np
+
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut,
+                           QTextCursor)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFontComboBox,
                                QFormLayout, QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QListView, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTabWidget,
@@ -52,6 +56,41 @@ class _ColorButton(QPushButton):
             name = c.name(QColor.HexArgb) if c.alpha() < 255 else c.name()
             self.set_color(name)
             self.changed.emit(name)
+
+
+EFECTOS_COLOR = ("outline", "shadow", "glow")
+HISTORIAL_COLORES = 12
+
+
+class _ColorHistory(QWidget):
+    """Los últimos colores usados en un efecto: una fila de muestras; clic = usar ese color."""
+
+    def __init__(self, editor, key: str, usar):
+        super().__init__()
+        self.editor, self.key, self.usar = editor, key, usar
+        self.fila = QHBoxLayout(self)
+        self.fila.setContentsMargins(26, 0, 0, 2)
+        self.fila.setSpacing(4)
+        self.refresh()
+
+    def refresh(self):
+        while self.fila.count():
+            w = self.fila.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        colores = self.editor.color_history(self.key)
+        for c in colores:
+            b = QPushButton()
+            b.setFixedSize(18, 18)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setToolTip(f"Usar este color ({c})")
+            b.setStyleSheet(f"QPushButton {{ background:{c}; border:1px solid #666; border-radius:3px; padding:0; "
+                            "min-height:0; min-width:0; } QPushButton:hover { border:1px solid white; }")
+            b.clicked.connect(lambda _=False, col=c: self.usar(col))
+            self.fila.addWidget(b)
+        self.fila.addStretch()
+        self.setVisible(bool(colores))
 
 
 class _SliderNum(QWidget):
@@ -170,7 +209,10 @@ class Canvas(QGraphicsView):
             self.viewport().update()
         lay = self.editor.layer(hit)
         if lay is not None and lay["kind"] == "text" and not lay.get("locked"):
-            self.editor.edit_text(lay)                 # (en un texto, además, a escribirlo: como siempre)
+            palabra = self.word_at(lay, self.mapToScene(e.position().toPoint()))
+            if palabra is not None:                    # doble clic en una palabra: esa queda elegida (barra = solo ella)
+                self.set_words({palabra}, lay, panel=False)
+            self.editor.edit_text(lay, palabra)        # (en un texto, además, a escribirlo: como siempre)
             return
         if changed:
             return
@@ -196,6 +238,20 @@ class Canvas(QGraphicsView):
         self._liq_finishing: dict[str, int] = {}   # capa → turno: su versión buena se está haciendo en segundo plano
         self._liq_jobs: list = []
         self._draft_memo = None           # (id, licuado, reducción, imagen): la vista rápida del último toque
+        self._last: dict[str, tuple] = {}  # capa → la última imagen buena (se sigue viendo mientras se hace la nueva)
+        self._bg_jobs: dict[str, object] = {}   # capa → su dibujo en segundo plano (como mucho uno por capa)
+        self._size_live = ""              # la capa a la que se le está cambiando el tamaño (no se redibuja hasta soltar)
+        self._size_timer = QTimer(self)   # Alt + rueda: «terminó» cuando deja de girar un momento
+        self._size_timer.setSingleShot(True)
+        self._size_timer.setInterval(180)
+        self._size_timer.timeout.connect(self._size_end)
+        self._words: set[int] = set()     # palabras elegidas del texto elegido (la barra y el panel solo las cambian a ellas)
+        self._words_of = ""               # de qué capa son
+        self._ink: QImage | None = None   # 🖌 el trazo en curso, a tamaño de pantalla (solo se le añade lo nuevo)
+        self._ink_key = None
+        self._ink_done = True
+        self._bs: dict | None = None      # 🖌 Recuperar: lo borrado visible y lo pintado (se actualiza solo lo tocado)
+        self._bs_job = None
         self.setScene(QGraphicsScene(self))
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setBackgroundBrush(QColor("#0b0b0d"))
@@ -262,6 +318,8 @@ class Canvas(QGraphicsView):
             lay = self.editor.layer(self.sel)
             delta = e.angleDelta().y() or e.angleDelta().x()     # (con Alt, Windows manda la rueda «de lado»)
             if lay is not None and not lay.get("locked") and delta:
+                self._size_live = lay["id"]             # ⚡ se ve al vuelo; la imagen buena, al dejar de girar
+                self._size_timer.start()
                 lay["scale"] = round(max(0.02, float(lay["scale"]) * 1.06 ** (delta / 120.0)), 4)
                 self.viewport().update()
                 self.editor.on_live_change()
@@ -282,9 +340,12 @@ class Canvas(QGraphicsView):
     def drawBackground(self, p: QPainter, rect: QRectF):
         super().drawBackground(p, rect)
         d = self.doc
+        marco = QRectF(0, 0, d["w"], d["h"])
         for lay in d["layers"]:                                 # lo que se sale del encuadre, en tenue
             if not lay.get("visible", True):
                 continue
+            if not lay.get("blur_area") and marco.contains(self._outer(lay)):
+                continue                                        # ⚡ entera dentro: esta pasada no se vería
             p.save()
             p.setOpacity(float(lay.get("opacity", 1.0)) * 0.28)
             self._draw_layer(p, lay)
@@ -297,6 +358,8 @@ class Canvas(QGraphicsView):
                 continue
             p.save()
             p.setOpacity(float(lay.get("opacity", 1.0)))
+            if not lay.get("blur_area"):
+                p.setCompositionMode(T.blend_mode(lay))         # 🎚 modo de fusión (multiplicar, trama…)
             self._draw_layer(p, lay)
             p.restore()
         p.restore()
@@ -317,6 +380,9 @@ class Canvas(QGraphicsView):
         img, _w, _h = self._render(lay)
         p.setTransform(T.layer_transform(lay, img), True)
         p.drawImage(0, 0, img)
+        bs = self._brush_view(lay, img)
+        if bs is not None:                                      # 🖌 Recuperar: en su sitio entre las capas (el texto, encima)
+            p.drawImage(QPointF((img.width() - bs["w"]) / 2, (img.height() - bs["h"]) / 2), bs["qimg"])
 
     def _view(self) -> float:
         """Píxeles de pantalla por píxel del lienzo (el zoom de la vista)."""
@@ -339,7 +405,216 @@ class Canvas(QGraphicsView):
             img, cw, ch, st = T.draft_render(lay, kd, m[4] if same else None)   # solo lo tocado desde el toque anterior
             self._draft_memo = (lay.get("id"), liq, kd, (img, cw, ch), st)
             return img, cw, ch
-        return T.render_layer(lay)
+        lid = lay.get("id")
+        got = self._last.get(lid)
+        forma = (lay.get("path"), lay.get("crop"), lay.get("text"))                        # (recortar o cambiar de archivo
+        last = got[0] if got is not None and got[1] == forma else None                    # no se puede ver con la vieja)
+        if last is not None and not lay.get("blur_area") and not T.is_rendered(lay):
+            # ⚡ Nunca se congela por dibujar: mientras llega la imagen buena se sigue viendo la última, ya con su sitio y
+            # su tamaño nuevos. El tamaño, hasta soltar (dibujarla en cada movimiento del ratón no serviría de nada);
+            # las imágenes, además, en segundo plano.
+            if lid == self._size_live:
+                return last
+            if lay.get("kind") == "image":
+                self._render_bg(lay)
+                return last
+        res = T.render_layer(lay)
+        self._last[lid] = (res, forma)
+        return res
+
+    def _render_bg(self, lay: dict):
+        """Dibuja la capa en segundo plano. Al terminar se repinta: si mientras tanto volvió a cambiar, _render lo pide
+        otra vez (así nunca hay más de un dibujo por capa, por deprisa que muevas el deslizador)."""
+        lid = lay["id"]
+        if lid in self._bg_jobs:
+            return
+        from .jobs import BackgroundJob
+        snap = copy.deepcopy(lay)
+        job = BackgroundJob(lambda _p, _c: T.render_layer(snap), self)
+
+        def fin(*_a):
+            if self._bg_jobs.get(lid) is job:
+                self._bg_jobs.pop(lid, None)
+            try:
+                actual = self.editor.layer(lid)
+                if actual is not None and T.is_rendered(actual):
+                    self._last[lid] = (T.render_layer(actual), (actual.get("path"), actual.get("crop"),
+                                                                actual.get("text")))
+                self.viewport().update()
+                if self._drag is None and not self._bg_jobs:
+                    self.editor._refresh_layers()
+            except RuntimeError:                       # (la ventana ya se cerró)
+                pass
+        job.done.connect(fin)
+        job.failed.connect(fin)
+        self._bg_jobs[lid] = job
+        job.start()
+
+    def wait_renders(self, ms: int = 3000):
+        """Espera a que acaben los dibujos en segundo plano (al cerrar el taller)."""
+        for job in list(self._bg_jobs.values()):
+            job.wait(ms)
+
+    def _size_end(self):
+        if self._size_live:
+            self._size_live = ""
+            self.viewport().update()
+
+    # ------------------------------------------------------------- 🖌 pincel: solo se dibuja lo nuevo
+    def _brush_key(self, lay: dict, img: QImage) -> tuple:
+        return (lay["id"], lay.get("path"), tuple(lay.get("crop") or ()), lay.get("mask"),
+                json.dumps(lay.get("adj"), sort_keys=True), T.image_k(img))
+
+    def _brush_view(self, lay: dict, img: QImage) -> dict | None:
+        """🖌 Recuperar: lo borrado de la capa, tenue, y lo que vas pintando, ya como la imagen real."""
+        if self.tool != "restore" or lay.get("id") != self.sel or lay.get("kind") != "image" or lay.get("liquify") \
+                or not lay.get("mask"):
+            return None
+        bs = self._bs
+        if bs is not None and bs["pending"] is not None and self._drag is None and not self.editor.brush_busy() \
+                and T.is_rendered(lay):
+            m, bs["pending"] = bs["pending"], None      # ya está dibujada la buena: lo pintado pasa a ser parte de ella
+            bs["live"][:] = 0
+            bs["ghost"] = ((255 - m.astype(np.uint16)) * 90 // 255).astype(np.uint8)
+            bs["ov"][..., 3] = (bs["ghost"].astype(np.uint16) * bs["src_a"] // 255).astype(np.uint8)
+        key = self._brush_key(lay, img)
+        if bs is None or bs["key"] != key:
+            self._brush_prepare(lay, img, key)
+            return None
+        return bs
+
+    def _brush_prepare(self, lay: dict, img: QImage, key: tuple):
+        """Prepara en segundo plano la imagen sin máscara (al activar el pincel: el primer trazo no espera)."""
+        if self._bs_job is not None:
+            return
+        from .jobs import BackgroundJob
+        snap, k = copy.deepcopy(lay), T.image_k(img)
+        cw, ch = T._core_size(lay, img)
+
+        def work(_p, _c):
+            rgba = T.image_unmasked(snap, k)
+            return rgba, T.mask_core(snap, k, rgba.shape[1], rgba.shape[0])
+        job = BackgroundJob(work, self)
+
+        def fin(res=None):
+            self._bs_job = None
+            if not isinstance(res, tuple):
+                return
+            rgba, m = res
+            h, w = rgba.shape[:2]
+            if abs(w - cw) > 1 or abs(h - ch) > 1:
+                return
+            ghost = ((255 - m.astype(np.uint16)) * 90 // 255).astype(np.uint8)      # lo borrado, a un 35 %
+            src_a = rgba[..., 3].copy()
+            ov = rgba.copy()
+            ov[..., 3] = (ghost.astype(np.uint16) * src_a // 255).astype(np.uint8)
+            self._bs = {"key": key, "w": w, "h": h, "ov": ov, "src_a": src_a, "ghost": ghost,
+                        "live": np.zeros((h, w), np.uint8), "pending": None,
+                        "qimg": QImage(ov.data, w, h, w * 4, QImage.Format_RGBA8888)}
+            try:
+                self.viewport().update()
+            except RuntimeError:
+                pass
+        job.done.connect(fin)
+        job.failed.connect(lambda _m: fin())
+        self._bs_job = job
+        job.start()
+
+    def _bs_ink(self, a: QPointF, b: QPointF) -> bool:
+        """Pinta el tramo a–b sobre la vista de Recuperar (solo el trocito tocado). False = aún no está lista."""
+        lay = self.editor.layer(self.sel)
+        if lay is None or self.tool != "restore":
+            return False
+        img, _cw, _ch = self._render(lay)
+        bs = self._bs
+        if bs is None or bs["key"] != self._brush_key(lay, img):
+            return False
+        inv, ok = T.layer_transform(lay, img).inverted()
+        if not ok:
+            return False
+        x0, y0 = (img.width() - bs["w"]) / 2, (img.height() - bs["h"]) / 2
+        pa, pb = inv.map(a), inv.map(b)
+        r = max(1, int(self.brush / max(T.layer_scale(lay, img), 1e-6)))
+        p0, p1 = (int(pa.x() - x0), int(pa.y() - y0)), (int(pb.x() - x0), int(pb.y() - y0))
+        cv2.line(bs["live"], p0, p1, int(255 * self.editor.brush_opt("alpha")), 2 * r + 1, cv2.LINE_AA)
+        xa, xb = max(0, min(p0[0], p1[0]) - r - 3), min(bs["w"], max(p0[0], p1[0]) + r + 4)
+        ya, yb = max(0, min(p0[1], p1[1]) - r - 3), min(bs["h"], max(p0[1], p1[1]) + r + 4)
+        if xa < xb and ya < yb:
+            roi = np.maximum(bs["live"][ya:yb, xa:xb], bs["ghost"][ya:yb, xa:xb]).astype(np.uint16)
+            bs["ov"][ya:yb, xa:xb, 3] = (roi * bs["src_a"][ya:yb, xa:xb] // 255).astype(np.uint8)
+        return True
+
+    def _ink_seg(self, a: QPointF, b: QPointF):
+        """Añade el tramo a–b a la tinta del trazo (rojo = borrar). Volver a dibujar el trazo entero en cada movimiento
+        era lo que lo hacía ir a saltos: cuanto más largo, más lento."""
+        vp = self.viewport().size()
+        vt = self.viewportTransform()
+        key = (vp.width(), vp.height(), vt.m11(), vt.m22(), vt.m31(), vt.m32())
+        tramos = [(a, b)]
+        if self._ink is None or self._ink_key != key:         # (zoom o tamaño nuevos: la tinta se rehace)
+            self._ink = QImage(max(1, vp.width()), max(1, vp.height()), QImage.Format_ARGB32_Premultiplied)
+            self._ink.fill(Qt.transparent)
+            self._ink_key = key
+            tramos = list(zip(self._stroke, self._stroke[1:])) or [(a, b)]
+        col = QColor(229, 65, 60) if self.tool == "erase" else QColor(80, 200, 120)
+        p = QPainter(self._ink)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(col, self.brush * 2 * vt.m11(), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        for u, v in tramos:
+            p.drawLine(vt.map(u), vt.map(v))
+        p.end()
+
+    def _brush_seg(self, a: QPointF, b: QPointF):
+        if not self._bs_ink(a, b):
+            self._ink_seg(a, b)
+
+    def _brush_dirty(self, *pts) -> QRect:
+        """La zona de pantalla que tocan esos puntos con el pincel: solo esa se repinta."""
+        r = QRect()
+        rad = self.brush + 4 / max(self.transform().m11(), 1e-6)
+        for pt in pts:
+            if pt is not None:
+                q = self.mapFromScene(QRectF(pt.x() - rad, pt.y() - rad, 2 * rad, 2 * rad)).boundingRect()
+                r = r.united(q.adjusted(-3, -3, 3, 3))
+        return r
+
+    def brush_done(self, lid: str, mask: str, core):
+        """Llegó el resultado de un trazo."""
+        bs = self._bs
+        if bs is not None and bs["key"][0] == lid and core is not None:
+            bs["key"] = bs["key"][:3] + (mask,) + bs["key"][4:]
+            bs["pending"] = core if core.shape == (bs["h"], bs["w"]) else None
+        self._ink_done = True
+        self.viewport().update()
+
+    # ------------------------------------------------------------- palabras del texto elegido
+    def active_words(self, lay: dict | None = None) -> set[int]:
+        """Las palabras elegidas de esa capa (de la elegida si no se dice); vacío si son de otra o ya no existen."""
+        lay = lay if lay is not None else self.editor.layer(self.sel)
+        if lay is None or lay.get("kind") != "text" or lay.get("id") != self._words_of or lay.get("id") != self.sel:
+            return set()
+        return {i for i in self._words if i < len(T.word_spans(lay.get("text", "")))}
+
+    def set_words(self, words: set[int], lay: dict | None = None, panel: bool = True):
+        """Elige esas palabras. panel=False: sin rehacer el panel (cuando el cambio viene del propio cuadro de texto)."""
+        lay = lay if lay is not None else self.editor.layer(self.sel)
+        lid = lay.get("id", "") if lay is not None and words else ""
+        if words == self._words and lid == self._words_of:
+            return
+        self._words, self._words_of = set(words), lid
+        self.viewport().update()
+        if panel:
+            self.editor._fill_props()
+
+    def word_at(self, lay: dict, pt: QPointF) -> int | None:
+        """La palabra de ese texto que hay en ese punto del lienzo (None = ninguna)."""
+        if lay is None or lay.get("kind") != "text":
+            return None
+        img, cw, ch = self._render(lay)
+        for i, q in T.word_quads(lay, img, cw, ch):
+            if q.containsPoint(pt, Qt.OddEvenFill):
+                return i
+        return None
 
     def _finish_liquify(self, lay: dict):
         """Al soltar: la versión buena (con los efectos rehechos sobre lo licuado) se dibuja en segundo plano; mientras,
@@ -430,6 +705,11 @@ class Canvas(QGraphicsView):
         x0, y0 = (img.width() - cw) / 2, (img.height() - ch) / 2
         return t.map(QPolygonF(QRectF(x0, y0, cw, ch)))
 
+    def _outer(self, lay: dict) -> QRectF:
+        """Lo que ocupa la capa en el lienzo, con sus márgenes de sombra y brillo."""
+        img, _cw, _ch = self._render(lay)
+        return T.layer_transform(lay, img).mapRect(QRectF(0, 0, img.width(), img.height()))
+
     def _handles(self, lay: dict) -> dict:
         poly = self._box(lay)
         pts = [poly.at(i) for i in range(4)]
@@ -446,11 +726,18 @@ class Canvas(QGraphicsView):
             self.editor.text_bar.update_pos()             # la barra de texto sigue a lo elegido (se oculta si no aplica)
         d = self.doc
         k = 1 / max(self.transform().m11(), 1e-6)
+        if self._ink is not None:
+            cur_ink = self.editor.layer(self.sel)
+            if self._ink_done and not self.editor.brush_busy() and self._drag is None and (
+                    cur_ink is None or T.is_rendered(cur_ink)):
+                self._ink = None                 # el resultado ya se ve: fuera la tinta
+            else:
+                p.save()
+                p.resetTransform()
+                p.setOpacity(0.43 * max(0.3, self.editor.brush_opt("alpha")))
+                p.drawImage(0, 0, self._ink)
+                p.restore()
         if self.tool in ("erase", "restore"):
-            col = QColor(229, 65, 60, 110) if self.tool == "erase" else QColor(80, 200, 120, 110)
-            if len(self._stroke) > 1:
-                p.setPen(QPen(col, self.brush * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                p.drawPolyline(QPolygonF(self._stroke))
             if self._hover is not None:
                 p.setPen(QPen(QColor("white"), 1.2 * k))
                 p.setBrush(Qt.NoBrush)
@@ -469,6 +756,16 @@ class Canvas(QGraphicsView):
                 p.drawEllipse(r)
             else:
                 p.drawRect(r)
+        for sl in d["layers"]:                            # 🖼 huecos de plantilla: qué hacer con ellos
+            if sl.get("slot") and sl.get("visible", True):
+                r = self._box(sl).boundingRect()
+                p.save()
+                f = p.font()
+                f.setPixelSize(max(6, int(min(r.width(), r.height()) * 0.09)))
+                p.setFont(f)
+                p.setPen(QColor(225, 225, 235))
+                p.drawText(r, Qt.AlignCenter | Qt.TextWordWrap, "🖼\nSuelta aquí una imagen")
+                p.restore()
         self._paint_guides(p, k)
         p.setPen(QPen(QColor(232, 116, 47, 160), 0, Qt.DashLine))
         for g in self._guides:
@@ -490,6 +787,15 @@ class Canvas(QGraphicsView):
         p.setPen(QPen(QColor("#e8742f"), 1.5 * k))
         p.setBrush(Qt.NoBrush)
         p.drawPolygon(QPolygonF(h["corners"]))
+        elegidas = self.active_words(lay)
+        if elegidas:                             # las palabras elegidas, resaltadas
+            img, cw, ch = self._render(lay)
+            p.setPen(QPen(QColor("#ffb27a"), 1.5 * k))
+            p.setBrush(QColor(232, 116, 47, 70))
+            for i, q in T.word_quads(lay, img, cw, ch):
+                if i in elegidas:
+                    p.drawPolygon(q)
+            p.setBrush(Qt.NoBrush)
         if lay.get("locked"):
             return
         if self.warp_mode:                       # ◇ Deformar: rombos naranjas en las esquinas (sin asa de giro)
@@ -630,10 +936,20 @@ class Canvas(QGraphicsView):
             if self.tool in ("box", "blurzone"):
                 self._drag = {"mode": "box", "p0": pt, "p1": pt}
             else:
+                if self._ink_done:
+                    self._ink = None
+                self._ink_done = False
                 self._stroke = [pt]
                 self._drag = {"mode": "brush"}
+                self._brush_seg(pt, pt)
+                self.viewport().update(self._brush_dirty(pt))
+                return
             self.viewport().update()
             return
+        if e.button() == Qt.LeftButton and e.modifiers() & Qt.ControlModifier and self._word_press(pt):
+            return
+        if e.button() == Qt.LeftButton:          # un clic normal deja de elegir palabras
+            self.set_words(set())
         lay = self.editor.layer(self.sel)
         if lay is not None and not lay.get("locked") and e.button() == Qt.LeftButton:
             h = self._handles(lay)
@@ -663,6 +979,7 @@ class Canvas(QGraphicsView):
                     self._drag = {"mode": "crop", "lay": lay}
                 else:
                     d0 = math.hypot(pt.x() - h["center"].x(), pt.y() - h["center"].y()) or 1
+                    self._size_live = lay["id"]  # ⚡ se ve al vuelo; la imagen buena, al soltar
                     self._drag = {"mode": "scale", "lay": lay, "c": h["center"], "s0": lay["scale"], "d0": d0}
                 return
         hit = self._hit(pt)
@@ -700,8 +1017,33 @@ class Canvas(QGraphicsView):
             for g in group[1:]:
                 bb = bb.united(self._box(g).boundingRect())
             self._drag = {"mode": "move", "lay": lay, "p0": pt, "x0": lay["x"], "y0": lay["y"],
-                          "group": [(g, g["x"], g["y"]) for g in group], "bb": bb, "others": others}
+                          "group": [(g, g["x"], g["y"]) for g in group], "bb": bb, "others": others,
+                          "word": self.word_at(lay, pt) if e.modifiers() & Qt.ControlModifier else None}
         self.viewport().update()
+
+    def _word_press(self, pt: QPointF) -> bool:
+        """Con alguna palabra ya elegida, Ctrl + clic añade otra (o la quita) y arrastrando va añadiendo las que toque.
+        Sin ninguna elegida, Ctrl sigue siendo «mover sin que se pegue» (y un Ctrl + clic sin mover elige la palabra)."""
+        if self.tool or not self.active_words():
+            return False
+        lay = self.editor.layer(self.sel)
+        palabra = self.word_at(lay, pt) if lay is not None and not lay.get("locked") else None
+        if palabra is None:                      # no era el texto elegido: ¿otro texto?
+            otra = self.editor.layer(self._hit(pt))
+            if otra is None or otra.get("locked"):
+                return False
+            palabra = self.word_at(otra, pt)
+            if palabra is None:
+                return False
+            lay = otra
+            self.multi.clear()
+            self.sel = lay["id"]
+            self.selected.emit(lay["id"])
+        ahora = set(self.active_words(lay))
+        ahora ^= {palabra}
+        self.set_words(ahora, lay)
+        self._drag = {"mode": "words", "lay": lay}
+        return True
 
     def mouseMoveEvent(self, e):
         if self._pan is not None:
@@ -713,10 +1055,13 @@ class Canvas(QGraphicsView):
         d = self._drag
         pt = self.mapToScene(e.position().toPoint())
         if self.tool in ("erase", "restore"):
-            self._hover = pt
-            if d is not None:
+            antes, self._hover = self._hover, pt
+            previo = None
+            if d is not None and self._stroke:
+                previo = self._stroke[-1]
                 self._stroke.append(pt)
-            self.viewport().update()
+                self._brush_seg(previo, pt)
+            self.viewport().update(self._brush_dirty(antes, previo, pt))    # ⚡ solo la zona tocada
             return
         if self.tool == "liquify":
             self._hover = pt
@@ -745,6 +1090,11 @@ class Canvas(QGraphicsView):
             return
         if d is None:
             self._hover_cursor(pt)
+            return
+        if d["mode"] == "words":
+            palabra = self.word_at(d["lay"], pt)
+            if palabra is not None and palabra not in self.active_words(d["lay"]):
+                self.set_words(self.active_words(d["lay"]) | {palabra}, d["lay"])
             return
         lay = d["lay"]
         doc = self.doc
@@ -848,9 +1198,15 @@ class Canvas(QGraphicsView):
             self.viewport().update()
             return
         if self._drag is not None:
+            d = self._drag
+            era_palabras = d.get("mode") == "words"
             self._drag = None
+            if d.get("word") is not None and (d["lay"]["x"], d["lay"]["y"]) == (d["x0"], d["y0"]):
+                self.set_words({d["word"]}, d["lay"])     # Ctrl + clic sin mover: esa palabra
             self._guides = []
-            self.committed.emit("Mover / tamaño / giro")
+            self._size_live = ""
+            if not era_palabras:
+                self.committed.emit("Mover / tamaño / giro")
             self.viewport().update()
 
     def _hover_cursor(self, pt: QPointF):
@@ -1051,6 +1407,9 @@ class ThumbnailEditor(QMainWindow):
         p = self.ctrl.project
         fmt = fmt or ("short" if p.format in ("short", "edit") else "youtube")
         self.doc = copy.deepcopy(p.thumbnails.get(fmt)) if p.thumbnails.get(fmt) else T.new_doc(fmt)
+        self._brush_q: list = []          # 🖌 trazos por aplicar (en segundo plano y en orden)
+        self._brush_job = None
+        self._hist_rows: list = []        # filas de colores usados del panel (se actualizan sin rehacer el panel)
         self.history: list[str] = [json.dumps(self.doc)]
         self.pos = 0
         self._last_label, self._last_t = "", 0.0
@@ -1187,6 +1546,11 @@ class ThumbnailEditor(QMainWindow):
         if self.job is not None:
             self.job.cancel()
             self.job.wait(3000)
+        t0 = time.time()
+        while self.brush_busy() and time.time() - t0 < 6:         # (los trazos que falten: que no se pierdan)
+            QApplication.processEvents()
+            time.sleep(0.01)
+        self.canvas.wait_renders()
         self._learn()
         self._save()
         super().closeEvent(e)
@@ -2100,6 +2464,8 @@ class ThumbnailEditor(QMainWindow):
             self._fill_props()
 
     def _on_select(self, lid: str):
+        if lid != self.canvas._words_of:
+            self.canvas.set_words(set(), panel=False)
         self._tool_off_if_other(lid)
         self._refresh_layers()
         self._fill_props()
@@ -2341,6 +2707,10 @@ class ThumbnailEditor(QMainWindow):
     def add_image(self, path: str, name: str = "Imagen", fill: bool = False):
         if not path or not os.path.exists(path):
             return
+        hueco = self.cur()
+        if not fill and hueco is not None and hueco.get("slot") and not hueco.get("locked"):
+            self.replace_image(hueco, path)              # 🖼 con un hueco elegido, la imagen va a él
+            return
         self._recordar(path)
         lay = T.image_layer(path, self.doc, name[:30], fill=fill)
         if fill:   # un fondo va detrás de todo
@@ -2423,6 +2793,15 @@ class ThumbnailEditor(QMainWindow):
                     bytes(q.constBits())[:65536]).hexdigest()[:12] + ".png")
                 q.save(out)
                 imgs.append(out)
+        destino = self.layer(self.canvas._hit(pt)) if imgs else None
+        alt = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+        puestas = 0
+        if destino is not None and not destino.get("locked") and (
+                destino.get("slot") or (alt and destino["kind"] == "image" and not destino.get("blur_area"))):
+            self.replace_image(destino, imgs.pop(0))     # 🖼 en un hueco (o Alt sobre una imagen): la sustituye
+            puestas = 1
+            if not imgs:
+                return 1
         from ..core.paths import cache_dir as _cache_dir
         png_dir = os.path.normcase(os.path.normpath(str(_cache_dir("png_web"))))
         for i, p in enumerate(imgs[:12]):
@@ -2440,9 +2819,9 @@ class ThumbnailEditor(QMainWindow):
             self._drop_pos = pt
             self.use_png(web[0])
             return 1
-        if not imgs:
+        if not imgs and not puestas:
             self.statusBar().showMessage("Eso no es una imagen (ni un video del que sacar un fotograma).", 5000)
-        return len(imgs)
+        return len(imgs) + puestas
 
     def add_from_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Imagen", "", "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp)")
@@ -2604,6 +2983,7 @@ class ThumbnailEditor(QMainWindow):
     def select_tool(self):
         """Deja cualquier herramienta (Licuar, Deformar, pinceles, recuadro) y vuelve al ratón normal."""
         self.canvas.multi.clear()
+        self.canvas.set_words(set(), panel=False)
         self.act_liq.setChecked(False)
         self.act_warp.setChecked(False)
         self.canvas.warp_mode = False
@@ -2872,17 +3252,46 @@ class ThumbnailEditor(QMainWindow):
             ids = {self.canvas.sel}
         return [l for l in self.doc["layers"] if l["id"] in ids and not l.get("locked")]
 
-    def edit_text(self, lay: dict):
-        """Doble clic en un texto del lienzo: el cuadro para escribirlo, con todo el texto elegido."""
+    def edit_text(self, lay: dict, palabra: int | None = None):
+        """Doble clic en un texto del lienzo: el cuadro para escribirlo, con la palabra (o todo el texto) elegida."""
         self.canvas.sel = lay["id"]
         self._fill_props()
         ed = getattr(self, "_text_edit", None)
         try:
             if ed is not None:
                 ed.setFocus()
-                ed.selectAll()
+                spans = T.word_spans(lay.get("text", ""))
+                if palabra is not None and palabra < len(spans):
+                    self._select_in_box(ed, spans[palabra][0], spans[palabra][1])
+                else:
+                    ed.selectAll()
         except RuntimeError:
             pass
+
+    @staticmethod
+    def _select_in_box(ed, a: int, b: int):
+        """Marca [a, b) en el cuadro de texto sin que eso cambie las palabras elegidas en el lienzo."""
+        cur = ed.textCursor()
+        cur.setPosition(a)
+        cur.setPosition(b, QTextCursor.KeepAnchor)
+        ed.blockSignals(True)
+        ed.setTextCursor(cur)
+        ed.blockSignals(False)
+
+    def _box_selection(self, ed, lay: dict):
+        """Lo que marcas en el cuadro de texto queda elegido en el lienzo."""
+        if self._loading or self.canvas.sel != lay.get("id"):
+            return
+        cur = ed.textCursor()
+        self.canvas.set_words(T.words_in_span(ed.toPlainText(), cur.selectionStart(), cur.selectionEnd())
+                              if cur.hasSelection() else set(), lay, panel=False)
+
+    def _set_text(self, lay: dict, nuevo: str):
+        """Reescribir el texto: cada estilo propio sigue a su palabra."""
+        kv = {"text": nuevo, "name": nuevo[:20]}
+        if lay.get("word_styles"):
+            kv["word_styles"] = T.remap_word_styles(lay.get("text", ""), nuevo, lay["word_styles"])
+        self._set(lay, "Texto", **kv)
 
     def select_all(self):
         """Ctrl+A: todas las capas visibles (para moverlas o borrarlas juntas)."""
@@ -2955,15 +3364,26 @@ class ThumbnailEditor(QMainWindow):
                     out.append((t.get("name") or f[:-5], os.path.join(self.templates_dir(), f)))
         return out
 
-    def save_template(self, name: str) -> str:
+    def save_template(self, name: str, slots: bool = False) -> str:
+        """Guarda la composición. slots: las imágenes (no los PNG de adorno) quedan como 🖼 huecos donde poner otras."""
         import re
         name = name.strip() or "Plantilla"
         slug = re.sub(r"[^\w\- ]+", "", name).strip()[:60] or "plantilla"
         path = os.path.join(self.templates_dir(), f"{slug}.json")
-        json.dump({"name": name, "format": self.doc["format"], "doc": self.doc}, open(path, "w", encoding="utf-8"),
-                  ensure_ascii=False)
+        doc = copy.deepcopy(self.doc)
+        capas = []
+        for l in doc["layers"]:
+            if l.get("kind") == "image" and not l.get("blur_area"):
+                if slots and not l.get("element"):
+                    l = T.slot_from(l)
+                else:
+                    l["box"] = [round(v, 1) for v in T.box_size(l)]   # (si un día falta la imagen: hueco de su tamaño)
+            capas.append(l)
+        doc["layers"] = capas
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"name": name, "format": doc["format"], "doc": doc}, fh, ensure_ascii=False)
         try:
-            T.render(self.doc, 320 / self.doc["w"]).save(path[:-5] + ".png")
+            T.render(doc, 320 / doc["w"]).save(path[:-5] + ".png")
         except Exception:  # noqa: BLE001 - sin vista previa, la plantilla sirve igual
             pass
         self.statusBar().showMessage(f"📐 Plantilla «{name}» guardada", 5000)
@@ -2977,8 +3397,11 @@ class ThumbnailEditor(QMainWindow):
         for l in doc.get("layers", []):
             if l.get("kind") == "image" and not os.path.exists(l.get("path", "")):
                 faltan += 1
+                if l.get("box"):                         # 🖼 la imagen ya no está: queda un hueco de su tamaño
+                    layers.append(T.slot_from({**l, "id": __import__("uuid").uuid4().hex[:10]}, tuple(l["box"])))
                 continue
             c = copy.deepcopy(l)
+            c.pop("box", None)
             c["id"] = __import__("uuid").uuid4().hex[:10]
             layers.append(c)
         self.doc["layers"] = layers
@@ -2990,8 +3413,10 @@ class ThumbnailEditor(QMainWindow):
         self.commit("Usar plantilla")
         self.canvas.viewport().update()
         self._fill_props()
+        huecos = sum(1 for l in layers if l.get("slot"))
         self.statusBar().showMessage(f"📐 Plantilla «{t.get('name', '')}»" + (
-            f" ({faltan} imagen(es) ya no estaban en tu PC)" if faltan else "") + " · Ctrl+Z la quita", 6000)
+            f" ({faltan} imagen(es) ya no estaban en tu PC)" if faltan else "") + (
+            f" · 🖼 {huecos} hueco(s): suelta una imagen en cada uno" if huecos else "") + " · Ctrl+Z la quita", 8000)
         return len(layers)
 
     def _templates_menu(self, menu):
@@ -3000,6 +3425,12 @@ class ThumbnailEditor(QMainWindow):
         menu.addAction("💾 Guardar esta miniatura como plantilla…", lambda: (
             lambda r: self.save_template(r[0]) if r[1] and r[0].strip() else None)(
             QInputDialog.getText(self, "Plantilla", "Nombre de la plantilla:")))
+        a = menu.addAction("🖼 Guardar como plantilla con huecos…", lambda: (
+            lambda r: self.save_template(r[0], slots=True) if r[1] and r[0].strip() else None)(
+            QInputDialog.getText(self, "Plantilla con huecos", "Nombre de la plantilla:")))
+        a.setToolTip("Las imágenes quedan como huecos: al usarla, sueltas tus imágenes en ellos y toman su tamaño, "
+                     "sitio y efectos; los textos y formas se quedan")
+        menu.setToolTipsVisible(True)
         menu.addSeparator()
         ts = self.templates()
         if not ts:
@@ -3197,14 +3628,21 @@ class ThumbnailEditor(QMainWindow):
     # ----------------------------------------------------------- recorte del sujeto
     def to_source(self, lay: dict, pt: QPointF) -> tuple[float, float]:
         """Un punto del lienzo → píxel de la imagen ORIGINAL de esa capa (para recuadros y pincel)."""
-        img, cw, ch = T.render_layer(lay)
-        inv, ok = T.layer_transform(lay, img).inverted()
-        q = inv.map(pt)
+        return self._to_source_many(lay, [pt])[0]
+
+    def _to_source_many(self, lay: dict, pts: list) -> list[tuple[float, float]]:
+        """to_source de muchos puntos. ⚡ Antes abría la imagen entera POR CADA punto del trazo: decenas de segundos."""
+        img, cw, ch = self.canvas._render(lay)
+        inv, _ok = T.layer_transform(lay, img).inverted()
         k = T.image_k(img)                                          # (la imagen dibujada puede ir reducida)
-        cx, cy = (q.x() - (img.width() - cw) / 2) / k, (q.y() - (img.height() - ch) / 2) / k
-        src = QImage(lay["path"])
-        x0, y0 = lay["crop"][0] * src.width(), lay["crop"][1] * src.height()
-        return x0 + cx, y0 + cy
+        sz = QImageReader(lay["path"]).size()
+        x0, y0 = lay["crop"][0] * sz.width(), lay["crop"][1] * sz.height()
+        mx, my = (img.width() - cw) / 2, (img.height() - ch) / 2
+        out = []
+        for pt in pts:
+            q = inv.map(pt)
+            out.append((x0 + (q.x() - mx) / k, y0 + (q.y() - my) / k))
+        return out
 
     def _bg_job(self, fn, done, label):
         from .jobs import BackgroundJob
@@ -3466,16 +3904,82 @@ class ThumbnailEditor(QMainWindow):
         lay = self.cur()
         if not lay or lay["kind"] != "image" or not pts:
             return
-        from ..ai import bg_removal as BR
-        src_pts = [self.to_source(lay, p) for p in pts]
         radius = self.canvas.brush / max(lay["scale"], 1e-3)
-        m = BR.paint(lay.get("mask"), lay["path"], src_pts, radius, restore)
-        self._set_mask(lay["id"], m, "Pincel")
+        self._brush_q.append((lay["id"], self._to_source_many(lay, pts), radius, restore, restore and self.brush_smart(),
+                              self.brush_opt("hard"), self.brush_opt("alpha")))
+        self._brush_next()
+
+    def brush_busy(self) -> bool:
+        return self._brush_job is not None or bool(self._brush_q)
+
+    @staticmethod
+    def brush_smart() -> bool:
+        from PySide6.QtCore import QSettings
+        return str(QSettings("EditorIA", "EditorIA").value("miniatura/recuperar_sujeto", "true")).lower() == "true"
+
+    @staticmethod
+    def set_brush_smart(on: bool):
+        from PySide6.QtCore import QSettings
+        QSettings("EditorIA", "EditorIA").setValue("miniatura/recuperar_sujeto", "true" if on else "false")
+
+    BRUSH_OPTS = {"hard": ("miniatura/pincel_dureza", 1.0, 0.0), "alpha": ("miniatura/pincel_opacidad", 1.0, 0.05)}
+
+    def brush_opt(self, name: str) -> float:
+        """🖌 Dureza (1 = borde nítido) u opacidad (1 = del todo) del pincel; se recuerdan entre sesiones."""
+        memo = self.__dict__.setdefault("_brush_opts", {})
+        if name not in memo:
+            from PySide6.QtCore import QSettings
+            clave, defecto, minimo = self.BRUSH_OPTS[name]
+            try:
+                memo[name] = max(minimo, min(1.0, float(QSettings("EditorIA", "EditorIA").value(clave, defecto))))
+            except (TypeError, ValueError):
+                memo[name] = defecto
+        return memo[name]
+
+    def set_brush_opt(self, name: str, v: float):
+        from PySide6.QtCore import QSettings
+        clave, _defecto, minimo = self.BRUSH_OPTS[name]
+        v = max(minimo, min(1.0, float(v)))
+        self.__dict__.setdefault("_brush_opts", {})[name] = v
+        QSettings("EditorIA", "EditorIA").setValue(clave, v)
+
+    def _brush_next(self):
+        """Los trazos se aplican en segundo plano y en orden: se puede seguir pintando sin esperar."""
+        if self._brush_job is not None or not self._brush_q:
+            return
+        lid, src_pts, radius, restore, smart, hard, alpha = self._brush_q.pop(0)
+        lay = self.layer(lid)
+        if lay is None:
+            return self._brush_next()
+        from ..ai import bg_removal as BR
+        from .jobs import BackgroundJob
+        snap = copy.deepcopy(lay)
+        img, cw, ch = self.canvas._render(lay)
+        k = T.image_k(img)
+
+        def work(_p, _c):
+            m = BR.paint(snap.get("mask"), snap["path"], src_pts, radius, restore, smart=smart, hard=hard, alpha=alpha)
+            return m, T.mask_core({**snap, "mask": m}, k, int(cw), int(ch))
+        job = BackgroundJob(work, self)
+
+        def fin(res=None):
+            self._brush_job = None
+            if isinstance(res, tuple):
+                self._set_mask(lid, res[0], "Pincel")
+                self.canvas.brush_done(lid, res[0], res[1])
+            else:
+                self.canvas.brush_done(lid, "", None)
+            self._brush_next()
+        job.done.connect(fin)
+        job.failed.connect(lambda m: (self.statusBar().showMessage(f"No se pudo aplicar el pincel: {m}", 8000), fin()))
+        self._brush_job = job
+        job.start()
 
     def _set_mask(self, lid: str, mask: str | None, label: str):
         lay = self.layer(lid)
         if lay is None:
             return
+        tenia = lay.get("mask")
         lay["mask"] = mask
         if mask and label in ("Quitar fondo", "Recortar sujeto"):
             if not lay["outline"]["on"]:
@@ -3485,7 +3989,8 @@ class ThumbnailEditor(QMainWindow):
         self._last_label = ""
         self.commit(label)
         self.canvas.viewport().update()
-        self._fill_props()
+        if label != "Pincel" or not tenia:              # (cada trazo no rehace el panel: se puede seguir pintando)
+            self._fill_props()
         self.statusBar().showMessage("✓ Listo. Retoca con el pincel si hace falta (Ctrl+Z para deshacer).", 6000)
 
     def _fit(self, lay: dict) -> bool:
@@ -3622,6 +4127,7 @@ class ThumbnailEditor(QMainWindow):
 
     # ----------------------------------------------------------- propiedades
     def _fill_props(self):
+        self._hist_rows = []
         while self.props_lay.count():
             w = self.props_lay.takeAt(0).widget()
             if w is not None:   # quitarlo ya (si no, se ve encima del nuevo hasta que Qt lo borre)
@@ -3639,10 +4145,13 @@ class ThumbnailEditor(QMainWindow):
         self._loading = True
         title = QLabel(f"<b>{lay['name']}</b>")
         self.props_lay.addWidget(title)
+        self._styles_props(lay)
         if lay["kind"] == "text":
             self._text_props(lay)
         elif lay.get("blur_area"):
             self._zone_props(lay)
+        elif lay.get("slot"):
+            self._slot_props(lay)
         elif lay["kind"] == "shape":
             self._shape_props(lay)
         else:
@@ -3658,14 +4167,45 @@ class ThumbnailEditor(QMainWindow):
     def _set(self, lay: dict, label: str, **kv):
         if self._loading:
             return
-        for k, v in kv.items():
-            if "." in k:
-                a, b = k.split(".")
-                lay[a][b] = v
-            else:
-                lay[k] = v
-        self.commit(label)
+        efectos = [k for k in EFECTOS_COLOR if any(x.split(".")[0] == k for x in kv)]
+        antes = {k: self._word_props(lay)[k].get("color") for k in efectos}
+        palabras = self.canvas.active_words(lay)
+        if palabras and all(k.split(".")[0] in T.WORD_KEYS for k in kv):     # solo a las palabras elegidas
+            T.set_word_style(lay, palabras, **kv)
+            self.commit(f"{label} (palabra)")
+        else:
+            for k, v in kv.items():
+                if "." in k:
+                    a, b = k.split(".")
+                    lay[a][b] = v
+                else:
+                    lay[k] = v
+            self.commit(label)
+        for k in efectos:                                    # 🎨 los colores usados, para cada efecto
+            ahora = self._word_props(lay)[k].get("color")
+            if ahora != antes[k]:
+                self.remember_color(k, antes[k], ahora)
         self.on_live_change()
+
+    def color_history(self, key: str) -> list[str]:
+        return self._ajustes_lista(f"miniatura/colores_{key}")[:HISTORIAL_COLORES]
+
+    def remember_color(self, key: str, *colores):
+        """Apunta los colores (el último, el primero de la fila) sin repetir, y actualiza las filas del panel."""
+        lista = self.color_history(key)
+        for c in colores:
+            if c:
+                lista = [c] + [x for x in lista if x.casefold() != str(c).casefold()]
+        self._guardar_lista(f"miniatura/colores_{key}", lista[:HISTORIAL_COLORES])
+        vivas = []
+        for fila in self._hist_rows:
+            try:
+                if fila.key == key:
+                    fila.refresh()
+                vivas.append(fila)
+            except RuntimeError:                              # (panel rehecho)
+                pass
+        self._hist_rows = vivas
 
     def _slider(self, form, label, lay, key, lo, hi, val, scale=100, sub=None):
         """Barrita con su número a la derecha (el número va en centésimas: 0.45 → 45)."""
@@ -3675,29 +4215,38 @@ class ThumbnailEditor(QMainWindow):
         form.addRow(label, s)
         return s
 
+    def _word_props(self, lay: dict) -> dict:
+        """Lo que enseña el panel: la capa o, con palabras elegidas, la primera de ellas."""
+        elegidas = self.canvas.active_words(lay)
+        return T.word_view(lay, min(elegidas)) if elegidas else lay
+
     def _text_props(self, lay):
         box = QGroupBox("Texto")
         f = QFormLayout(box)
         ed = QPlainTextEdit(lay["text"])
         ed.setFixedHeight(64)
+        ed.setToolTip("Marca aquí una o varias palabras (o haz doble clic en una en el lienzo; Ctrl + clic para añadir "
+                      "más) y lo que cambies se aplica solo a ellas.")
         self._text_edit = ed                       # (doble clic en el texto del lienzo → aquí, para escribir)
-        ed.textChanged.connect(lambda: self._set(lay, "Texto", text=ed.toPlainText(), name=ed.toPlainText()[:20]))
+        ed.textChanged.connect(lambda: self._set_text(lay, ed.toPlainText()))
+        ed.selectionChanged.connect(lambda: self._box_selection(ed, lay))
+        vista = self._word_props(lay)              # (con palabras elegidas, el panel enseña cómo son ellas)
         f.addRow(ed)
         from .spellcheck import attach as _spell
         f.addRow(_spell(ed))
         font = QFontComboBox()
-        font.setCurrentFont(lay["font"])
+        font.setCurrentFont(vista["font"])
         font.currentFontChanged.connect(lambda fnt: self._set(lay, "Fuente", font=fnt.family()))
         f.addRow("Fuente", font)
         size = QSpinBox()
         size.setRange(8, 600)
-        size.setValue(int(lay["size"]))
+        size.setValue(int(vista["size"]))
         size.valueChanged.connect(lambda v: self._set(lay, "Tamaño", size=v))
         f.addRow("Tamaño", size)
         wt = QComboBox()
         for label, v in (("Normal", 400), ("Semi", 600), ("Negrita", 700), ("Extra", 900)):
             wt.addItem(label, v)
-        wt.setCurrentIndex(max(0, wt.findData(int(lay["weight"]))))
+        wt.setCurrentIndex(max(0, wt.findData(int(vista["weight"]))))
         wt.currentIndexChanged.connect(lambda _i: self._set(lay, "Grosor", weight=wt.currentData()))
         f.addRow("Grosor", wt)
         self._slider(f, "Espaciado", lay, "spacing", 0.7, 1.6, lay["spacing"])
@@ -3708,9 +4257,10 @@ class ThumbnailEditor(QMainWindow):
         al.setCurrentIndex(max(0, al.findData(lay["align"])))
         al.currentIndexChanged.connect(lambda _i: self._set(lay, "Alineación", align=al.currentData()))
         f.addRow("Alineación", al)
-        col = _ColorButton(lay["color"])
+        col = _ColorButton(vista["color"])
         col.changed.connect(lambda c: self._set(lay, "Color", color=c))
         f.addRow("Color", col)
+        self._text_fill_rows(f, lay)
         acc = _ColorButton(lay.get("accent", T.MY_RED))         # lo escrito *entre asteriscos*
         acc.setToolTip("Color de lo que escribas *entre asteriscos* (p. ej. «ESTO ES *MALO*»)")
         acc.changed.connect(lambda c: self._set(lay, "Color de acento", accent=c))
@@ -3720,6 +4270,10 @@ class ThumbnailEditor(QMainWindow):
         up.toggled.connect(lambda v: self._set(lay, "Mayúsculas", uppercase=v))
         f.addRow(up)
         self.props_lay.addWidget(box)
+        elegidas = self.canvas.active_words(lay)
+        spans = T.word_spans(lay.get("text", ""))
+        if elegidas and max(elegidas) - min(elegidas) + 1 == len(elegidas):   # (contiguas: también marcadas en el cuadro)
+            self._select_in_box(ed, spans[min(elegidas)][0], spans[max(elegidas)][1])
 
     def _zone_props(self, lay):
         box = QGroupBox("🌫 Zona borrosa")
@@ -3790,6 +4344,25 @@ class ThumbnailEditor(QMainWindow):
         size.setSuffix(" px")
         size.setValue(self.canvas.brush)
         size.valueChanged.connect(lambda v: setattr(self.canvas, "brush", v))
+        lista = QCheckBox("Recuperar solo el sujeto")
+        lista.setChecked(self.brush_smart())
+        lista.setToolTip("Pinta por encima sin miedo: se recupera solo lo que se parece a lo que ya se ve (el personaje), "
+                         "siguiendo sus bordes, y no el fondo. Desactívalo para recuperar exactamente lo que pintes.")
+        lista.toggled.connect(self.set_brush_smart)
+        self._lista_sujeto = lista
+        cg.addWidget(lista, 9, 0, 1, 2)
+        dur = _SliderNum(0, 1, self.brush_opt("hard"), 100, suffix=" %")
+        dur.setToolTip("Dureza del borde del pincel: 100 % = nítido; menos = suave (borrar o recuperar sin que se note "
+                       "el corte)")
+        dur.applied.connect(lambda v: self.set_brush_opt("hard", v))
+        opa = _SliderNum(0.05, 1, self.brush_opt("alpha"), 100, suffix=" %")
+        opa.setToolTip("Cuánto borra o recupera cada trazo: 100 % = del todo; 50 % = la mitad (queda semitransparente). "
+                       "Dentro de un mismo trazo no se suma")
+        opa.applied.connect(lambda v: self.set_brush_opt("alpha", v))
+        cg.addWidget(QLabel("Dureza"), 4, 0)
+        cg.addWidget(dur, 4, 1)
+        cg.addWidget(QLabel("Opacidad"), 5, 0)
+        cg.addWidget(opa, 5, 1)
         b_fit = QPushButton("Encuadrar al sujeto")
         b_fit.clicked.connect(self.fit_to_subject)
         b_fit.setEnabled(bool(lay.get("mask")))
@@ -3819,6 +4392,7 @@ class ThumbnailEditor(QMainWindow):
                                        self.on_live_change(), self._fill_props()))
         f.addRow(reset)
         self.props_lay.addWidget(box)
+        self._soft_props(lay)
         self._upscale_props(lay)
         self._combine_props(lay)
         crop = QGroupBox("Recortar (%)")
@@ -3847,6 +4421,16 @@ class ThumbnailEditor(QMainWindow):
         if not lay.get("blur_area"):                 # (una zona borrosa ya es el desenfoque: sin este)
             bl = self._slider(f, "Desenfoque", lay, "blur", 0, 60, float(lay.get("blur", 0) or 0), scale=1)
             bl.setToolTip("🌫 Desenfoca toda la capa (0 = nítida). También con clic derecho → «Desenfocar»")
+        if not lay.get("blur_area"):
+            fu = QComboBox()
+            for clave, nombre, _m in T.BLENDS:
+                fu.addItem(nombre, clave)
+            fu.setCurrentIndex(max(0, fu.findData(lay.get("blend") or "normal")))
+            fu.setToolTip("Cómo se mezcla con lo de debajo. Multiplicar oscurece (sombras, texturas, manchas); Trama "
+                          "aclara (fuego, chispas, humo o luces sobre fondo negro: el negro desaparece); Superponer y "
+                          "Luz suave dan contraste y color sin tapar")
+            fu.activated.connect(lambda _i: self._set(lay, "Fusión", blend=fu.currentData()))
+            f.addRow("Fusión", fu)
         sc = QDoubleSpinBox()
         sc.setRange(0.02, 20)
         sc.setSingleStep(0.05)
@@ -3854,6 +4438,11 @@ class ThumbnailEditor(QMainWindow):
         sc.valueChanged.connect(lambda v: self._set(lay, "Tamaño", scale=v))
         f.addRow("Escala", sc)
         if lay["kind"] == "image":
+            b_swap = QPushButton("🔁 Cambiar la imagen…")
+            b_swap.setToolTip("Pone otra imagen en su lugar: mismo sitio, tamaño, giro y efectos (también: Alt + soltar "
+                              "una imagen encima de esta)")
+            b_swap.clicked.connect(lambda: self.replace_image(lay))
+            f.addRow(b_swap)
             b_fill = QPushButton("⛶ Llenar el lienzo")
             b_fill.setToolTip("Agranda la imagen hasta cubrir toda la miniatura y la centra (lo que sobra queda fuera)")
             b_fill.clicked.connect(lambda: self.fill_canvas(lay))
@@ -3882,7 +4471,7 @@ class ThumbnailEditor(QMainWindow):
                                    ("shadow", "Sombra", (("blur", "Difuminado", 0, 80), ("dx", "Desplaz. X", -60, 60),
                                                          ("dy", "Desplaz. Y", -60, 60), ("opacity", "Opacidad", 0, 1))),
                                    ("glow", "Brillo", (("radius", "Radio", 2, 120), ("opacity", "Opacidad", 0, 1)))):
-            e = lay[key]
+            e = self._word_props(lay)[key]
             on = QCheckBox(label)
             on.setChecked(bool(e["on"]))
             on.toggled.connect(lambda v, k=key, lb=label: self._set(lay, lb, **{f"{k}.on": v}))
@@ -3893,6 +4482,13 @@ class ThumbnailEditor(QMainWindow):
             row.addStretch()
             row.addWidget(col)
             f.addRow(row)
+
+            def usar(c, k=key, lb=label, boton=col):
+                boton.set_color(c)
+                self._set(lay, lb, **{f"{k}.color": c})
+            hist = _ColorHistory(self, key, usar)                # 🎨 los colores que ya usaste en este efecto
+            self._hist_rows.append(hist)
+            f.addRow(hist)
             for fk, fl, lo, hi in fields:
                 pct = fk == "opacity"                          # (la opacidad, en %)
                 sp = _SliderNum(lo, hi, float(e.get(fk, 0.7 if pct else 0)), 100 if pct else 1,
@@ -3900,5 +4496,258 @@ class ThumbnailEditor(QMainWindow):
                 sp.applied.connect(lambda v, k=key, kk=fk, lb=label, p=pct:
                                    self._set(lay, lb, **{f"{k}.{kk}": round(v, 3) if p else int(v)}))
                 f.addRow("    " + fl, sp)
+            if key == "outline" and lay["kind"] in ("text", "image"):
+                self._extra_outline_rows(f, lay)
         self.props_lay.addWidget(box)
+
+    # ----------------------------------------------------------- ➕ contornos apilados
+    def _extra_outline_rows(self, form, lay):
+        extras = list(lay.get("outlines") or [])
+
+        def cambiar(i, **kv):
+            lst = copy.deepcopy(lay.get("outlines") or [])
+            if i < len(lst):
+                lst[i].update(kv)
+                self._set(lay, "Contorno de más", outlines=lst)
+
+        def quitar(i):
+            self._set(lay, "Quitar contorno", outlines=[o for j, o in enumerate(lay.get("outlines") or []) if j != i])
+            QTimer.singleShot(0, self._fill_props)
+        for i, o in enumerate(extras[:T.EXTRA_OUTLINES_MAX]):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"    {i + 2}.º"))
+            col = _ColorButton(o.get("color", "#000000"))
+            col.setToolTip("Color de este contorno (va por fuera del anterior)")
+            col.changed.connect(lambda c, i=i: (cambiar(i, color=c), self.remember_color("outline", c)))
+            row.addWidget(col)
+            sp = _SliderNum(1, 60, float(o.get("width", 8)), 1)
+            sp.setToolTip("Grosor de este contorno")
+            sp.applied.connect(lambda v, i=i: cambiar(i, width=int(v)))
+            row.addWidget(sp, 1)
+            x = QPushButton("✕")
+            x.setFixedWidth(28)
+            x.setToolTip("Quitar este contorno")
+            x.clicked.connect(lambda _=False, i=i: quitar(i))
+            row.addWidget(x)
+            form.addRow(row)
+        if len(extras) < T.EXTRA_OUTLINES_MAX:
+            b = QPushButton("➕ Otro contorno por fuera")
+            b.setToolTip("Apila otro contorno alrededor del anterior (p. ej. blanco y, por fuera, negro: el clásico de "
+                         "YouTube). Hasta 3 de más")
+            b.clicked.connect(lambda: self.add_outline(lay))
+            form.addRow(b)
+
+    def add_outline(self, lay: dict):
+        lst = copy.deepcopy(lay.get("outlines") or [])
+        if len(lst) >= T.EXTRA_OUTLINES_MAX:
+            return
+        prev = lst[-1]["color"] if lst else lay["outline"].get("color", "#000000")
+        lst.append({"color": "#000000" if QColor(prev).lightness() > 128 else "#FFFFFF",
+                    "width": int(lst[-1]["width"]) if lst else max(6, int(lay["outline"].get("width", 8)))})
+        self._set(lay, "Otro contorno", outlines=lst)
+        QTimer.singleShot(0, self._fill_props)
+
+    # ----------------------------------------------------------- 🎨 relleno de las letras
+    def _pick_image(self, titulo: str) -> str:
+        path, _ = QFileDialog.getOpenFileName(self, titulo, self._ajustes_lista("miniatura/carpeta_imagenes")[0]
+                                              if self._ajustes_lista("miniatura/carpeta_imagenes") else "",
+                                              "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp *.jfif)")
+        if path:
+            self._guardar_lista("miniatura/carpeta_imagenes", [os.path.dirname(path)])
+        return path
+
+    def _text_fill_rows(self, f, lay):
+        tf = dict(lay.get("text_fill") or {})
+        tipo = tf.get("type", "color")
+        rel = QComboBox()
+        for nombre, v in (("Color", "color"), ("Degradado", "gradient"), ("Imagen", "image")):
+            rel.addItem(nombre, v)
+        rel.setCurrentIndex(max(0, rel.findData(tipo)))
+        rel.setToolTip("Con qué se rellenan las letras: un color, un degradado o una imagen (fuego, metal, una "
+                       "captura del juego…). Las palabras con color propio lo conservan")
+
+        def cambiar(_i):
+            t = rel.currentData()
+            nuevo = {"c1": "#FFD400", "c2": "#E5232A", "angle": 90, "path": "", "zoom": 1.0,
+                     **(lay.get("text_fill") or {}), "type": t}
+            if t == "image" and not (nuevo["path"] and os.path.exists(nuevo["path"])):
+                ruta = self._pick_image("Imagen para rellenar las letras")
+                if not ruta:
+                    rel.setCurrentIndex(max(0, rel.findData((lay.get("text_fill") or {}).get("type", "color"))))
+                    return
+                nuevo["path"] = ruta
+            self._set(lay, "Relleno de letras", text_fill=nuevo)
+            QTimer.singleShot(0, self._fill_props)
+        rel.activated.connect(cambiar)
+        f.addRow("Relleno", rel)
+
+        def poner(**kv):
+            self._set(lay, "Relleno de letras", text_fill={**(lay.get("text_fill") or {}), **kv})
+        if tipo == "gradient":
+            c1, c2 = _ColorButton(tf.get("c1", "#FFD400")), _ColorButton(tf.get("c2", "#E5232A"))
+            c1.changed.connect(lambda c: poner(c1=c))
+            c2.changed.connect(lambda c: poner(c2=c))
+            row = QHBoxLayout()
+            row.addWidget(c1)
+            row.addWidget(QLabel("→"))
+            row.addWidget(c2)
+            row.addStretch()
+            f.addRow("    De → a", row)
+            ang = _SliderNum(0, 360, float(tf.get("angle", 90)), 1, suffix="°")
+            ang.setToolTip("Dirección del degradado: 90° = de arriba a abajo; 0° = de izquierda a derecha")
+            ang.applied.connect(lambda v: poner(angle=int(v)))
+            f.addRow("    Ángulo", ang)
+        elif tipo == "image":
+            b = QPushButton("📂 " + (os.path.basename(tf.get("path", "")) or "Elegir imagen…")[:28])
+            b.setToolTip("Cambiar la imagen de dentro de las letras")
+            b.clicked.connect(lambda: (lambda r: (poner(path=r), QTimer.singleShot(0, self._fill_props)) if r else None)(
+                self._pick_image("Imagen para rellenar las letras")))
+            f.addRow("    Imagen", b)
+            zo = _SliderNum(0.5, 4, float(tf.get("zoom", 1.0)), 100, suffix=" %")
+            zo.setToolTip("Acercar la imagen de dentro de las letras")
+            zo.applied.connect(lambda v: poner(zoom=round(v, 3)))
+            f.addRow("    Zoom", zo)
+
+    # ----------------------------------------------------------- 🌗 bordes suaves
+    def _soft_props(self, lay):
+        box = QGroupBox("🌗 Bordes suaves")
+        f = QFormLayout(box)
+        fe = _SliderNum(0, 1, float(lay.get("feather", 0) or 0), 100, suffix=" %")
+        fe.setToolTip("Difumina el borde de la imagen hacia dentro (también el del sujeto recortado): se funde con lo "
+                      "de detrás sin un corte duro")
+        fe.applied.connect(lambda v: self._set(lay, "Bordes suaves", feather=round(v, 3)))
+        f.addRow("Difuminar borde", fe)
+        for lado, nombre in (("bottom", "Fundir abajo"), ("top", "Fundir arriba"), ("left", "Fundir izquierda"),
+                             ("right", "Fundir derecha")):
+            sl = _SliderNum(0, 1, float((lay.get("fade") or {}).get(lado, 0) or 0), 100, suffix=" %")
+            sl.setToolTip("Hasta dónde se va desvaneciendo la imagen desde ese lado (p. ej. un personaje que se funde "
+                          "con el fondo por abajo)")
+            sl.applied.connect(lambda v, ld=lado: self._set(lay, "Fundido",
+                                                            fade={**(lay.get("fade") or {}), ld: round(v, 3)}))
+            f.addRow(nombre, sl)
+        self.props_lay.addWidget(box)
+
+    # ----------------------------------------------------------- ⭐ mis estilos
+    def _styles_props(self, lay):
+        from ..core import thumb_styles as S
+        kind = S.kind_of(lay)
+        if not kind:
+            return
+        box = QGroupBox("⭐ Mis estilos")
+        g = QGridLayout(box)
+        g.setSpacing(4)
+        estilos = S.of_kind(kind)[:24]
+        for i, est in enumerate(estilos):
+            b = QPushButton(est["name"])
+            b.setToolTip(f"Ponerle el estilo «{est['name']}» a lo elegido · clic derecho = renombrar, actualizar o "
+                         "borrar")
+            if kind == "text":
+                b.setIcon(self._style_icon(est))
+                b.setIconSize(QSize(44, 20))
+            b.clicked.connect(lambda _=False, e=est: self.apply_style(e))
+            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.customContextMenuRequested.connect(lambda pos, e=est, btn=b: self._style_menu(e, btn.mapToGlobal(pos)))
+            g.addWidget(b, i // 2, i % 2)
+        guardar = QPushButton("💾 Guardar este estilo…")
+        guardar.setToolTip("Guarda el aspecto de lo elegido (fuente, colores, contornos, sombra, brillo, relleno, "
+                           "fusión…) para ponérselo a otra capa con un clic. No guarda el texto, la imagen ni el sitio")
+        guardar.clicked.connect(lambda: self.save_style_dialog(lay))
+        g.addWidget(guardar, (len(estilos) + 1) // 2, 0, 1, 2)
+        self.props_lay.addWidget(box)
+
+    def _style_icon(self, est: dict) -> QIcon:
+        memo = self.__dict__.setdefault("_style_icons", {})
+        clave = json.dumps(est, sort_keys=True, default=str)
+        if clave not in memo:
+            muestra = T.text_layer(self.doc, "Aa")
+            muestra.update(copy.deepcopy(est["style"]))
+            muestra["size"] = 64
+            try:
+                img, _cw, _ch = T.render_layer(muestra)
+                memo[clave] = QIcon(QPixmap.fromImage(img).scaled(88, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            except Exception:  # noqa: BLE001 - sin muestra, el botón sirve igual
+                memo[clave] = QIcon()
+        return memo[clave]
+
+    def save_style_dialog(self, lay: dict):
+        from PySide6.QtWidgets import QInputDialog
+        from ..core import thumb_styles as S
+        n = len(S.of_kind(S.kind_of(lay) or ""))
+        name, ok = QInputDialog.getText(self, "Guardar estilo", "Nombre del estilo:", text=f"Estilo {n + 1}")
+        if ok and name.strip():
+            self.save_style(name, lay)
+
+    def save_style(self, name: str, lay: dict) -> dict | None:
+        from ..core import thumb_styles as S
+        est = S.add(name, lay)
+        if est:
+            self.statusBar().showMessage(f"⭐ Estilo «{est['name']}» guardado: clic en él para ponérselo a otra capa", 6000)
+            self._fill_props()
+        return est
+
+    def apply_style(self, est: dict) -> int:
+        """Pone ese estilo a lo elegido (a todas las capas de su tipo; en un texto con palabras elegidas, solo a ellas)."""
+        from ..core import thumb_styles as S
+        cur = self.cur()
+        capas = [l for l in self.selected_layers() if S.kind_of(l) == est["kind"]]
+        if not capas:
+            return 0
+        palabras = self.canvas.active_words(cur) if cur is not None else set()
+        for l in capas:
+            cambios = S.changes(l, est)
+            if l is cur and palabras:
+                T.set_word_style(l, palabras, **{k: v for k, v in cambios.items() if k in T.WORD_KEYS})
+            else:
+                l.update(cambios)
+        self._last_label = ""
+        self.commit(f"Estilo «{est['name']}»")
+        self.on_live_change()
+        self._fill_props()
+        return len(capas)
+
+    def _style_menu(self, est: dict, pos):
+        from PySide6.QtWidgets import QInputDialog, QMenu
+        from ..core import thumb_styles as S
+        m = QMenu(self)
+        m.addAction("✏ Renombrar…", lambda: (lambda r: (S.rename(est["name"], est["kind"], r[0]), self._fill_props())
+                                             if r[1] and r[0].strip() else None)(
+            QInputDialog.getText(self, "Renombrar estilo", "Nombre:", text=est["name"])))
+        cur = self.cur()
+        if cur is not None and S.kind_of(cur) == est["kind"]:
+            m.addAction("↻ Actualizar con lo elegido", lambda: self.save_style(est["name"], cur))
+        m.addSeparator()
+        m.addAction("🗑 Borrar este estilo", lambda: (S.remove(est["name"], est["kind"]), self._fill_props()))
+        m.exec(pos)
+
+    # ----------------------------------------------------------- 🖼 huecos y cambiar la imagen
+    def _slot_props(self, lay):
+        box = QGroupBox("🖼 Hueco para una imagen")
+        v = QVBoxLayout(box)
+        b = QPushButton("📂 Poner una imagen…")
+        b.setToolTip("La imagen ocupa justo el hueco (se recorta por el centro, sin deformarse) y toma sus efectos. "
+                     "También: suelta una imagen encima, o con el hueco elegido haz clic en una de «🖼 Material»")
+        b.clicked.connect(lambda: self.replace_image(lay))
+        v.addWidget(b)
+        self.props_lay.addWidget(box)
+
+    def replace_image(self, lay: dict, path: str | None = None) -> dict | None:
+        """Pone esa imagen en lugar de la capa (un hueco o una imagen), con su caja, su sitio y sus efectos."""
+        if lay is None or lay.get("locked"):
+            return None
+        path = path or self._pick_image("Elegir imagen")
+        if not path or not os.path.exists(path):
+            return None
+        idx = next((i for i, l in enumerate(self.doc["layers"]) if l is lay or l["id"] == lay["id"]), None)
+        if idx is None:
+            return None
+        nueva = T.fill_box(lay, path, self.doc)
+        self.doc["layers"][idx] = nueva
+        self._recordar(path)
+        self.canvas.sel = nueva["id"]
+        self.canvas.multi.clear()
+        self._last_label = ""
+        self.commit("Poner imagen en el hueco" if lay.get("slot") else "Cambiar la imagen")
+        self.canvas.viewport().update()
+        self._fill_props()
+        return nueva
 

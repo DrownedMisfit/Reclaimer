@@ -1615,6 +1615,8 @@ class InspectorPanel(QWidget):
         c = self._clip()
         if c is not None:
             self.ctrl.add_zoom_keyframe(c.id, self._now())
+        else:
+            self.ctrl.message.emit("Elige antes un clip en la línea de tiempo para ponerle un fotograma clave.")
 
     def _del_kf(self):
         c = self._clip()
@@ -1624,6 +1626,9 @@ class InspectorPanel(QWidget):
     def _jump_kf(self, direction: int):
         c = self._clip()
         if c is None or self.engine is None or not c.zoom_kf:
+            if self.engine is not None:
+                self.ctrl.message.emit("Este clip aún no tiene fotogramas clave de zoom: ponle uno con ◆."
+                                       if c is not None else "Elige antes un clip en la línea de tiempo.")
             return
         m = self.ctrl.project.media_of(c)
         offset = c.start - (0.0 if (m and m.kind == "image") else c.source_in)

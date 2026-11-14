@@ -10,8 +10,12 @@ control al usuario. La interfaz se parece a DaVinci Resolve (páginas abajo, Ins
 
 ## Cómo abrirlo
 
-Doble clic en **`INICIAR.bat`**.
-(Si algún día mueves la carpeta a otro PC: primero `INSTALAR.bat`, después `INICIAR.bat`.)
+Doble clic en **`INICIAR.bat`** (o en el acceso directo «Reclaimer» del escritorio).
+En un PC nuevo basta con **`INSTALAR.bat`** (o directamente `INICIAR.bat`, que lo llama si falta algo): instala solo
+lo que falte, **Python 3.12 y FFmpeg con winget** (pregunta antes), el entorno `.venv`, lo de la tarjeta NVIDIA,
+comprueba que todo carga y crea los accesos directos. Se puede repetir; lo que ya está no se repite. Registro:
+`instalar.log`. Para probar el instalador sin cambiar nada: `powershell -ExecutionPolicy Bypass -File instalar.ps1
+-Simular -SinPreguntas [-FingirFalta python,ffmpeg,venv]`.
 
 ## Uso básico
 
@@ -552,7 +556,7 @@ rápido); si no, se convierte a AAC 256 kbps. Se guarda en `F:\Reclaimer\Audio e
 ## 🚀 Exportar (botón «Exportar» / pestaña «Entrega»)
 
 Eliges **para dónde es** con un clic y listo:
-- **▶ YouTube**: H.264 High, 60 FPS, 24 Mbps en 1080p (40 en 1440p, 80 en 4K), audio AAC 384 kbps, color BT.709,
+- **▶ YouTube**: H.264 High, 60 FPS, 24 Mbps en 1080p (40 en 1440p, 80 en 4K), audio AAC 320–384 kbps (320 con el AAC de Windows, más rápido), color BT.709,
   fotograma clave cada medio segundo y «faststart»: lo que recomienda YouTube (también para Shorts).
 - **♪ TikTok**: siempre vertical 1080×1920, 60 FPS, H.264 a 20 Mbps, AAC 256 kbps (vale para Reels y Shorts).
 - **🪟 Para ver en Windows**: H.264 + AAC, se abre con doble clic en cualquier PC o móvil.
@@ -1276,3 +1280,56 @@ y Ayuda → Diagnóstico dice qué eligió (fila «Equipo»).
     delante sin cambiar de tamaño, suave. Se detiene al tocar el clip de al lado, se pega un instante a las palabras
     clave y al cabezal, y el visor enseña el cuadro en vivo. Al dejar de girar (o al soltar Alt, o con un clic) se
     aplica: un solo Ctrl+Z. En otro sitio, Alt + rueda sigue subiendo / bajando las pistas.
+
+- **09/11 · Miniaturas**:
+  · Ya no se congela: cambiar el tamaño de una imagen con sombra, brillo y contorno costaba ~2 s por cada movimiento del
+    ratón y ahora se ve al vuelo (la imagen buena llega al soltar). Los cambios en imágenes pesadas se dibujan en segundo
+    plano y la memoria de capas dibujadas tiene un tope.
+  · ✍ **Palabras sueltas**: doble clic en una palabra del lienzo la elige (después, Ctrl + clic añade o quita y Ctrl + arrastrar
+    elige las que toques, o márcalas en el cuadro de texto). La barra flotante y el panel cambian solo lo elegido: color,
+    fuente, tamaño, negrita, cursiva, contorno, sombra y brillo. **↺** la devuelve al estilo del texto; un clic normal
+    deja de elegir. Cada estilo sigue a su palabra aunque reescribas el texto.
+  · 🖌 **Pincel**: fluido aunque el trazo sea larguísimo, y al soltar ya no se congela (antes abría la imagen entera por
+    cada punto del trazo); puedes seguir pintando sin esperar.
+  · 🖌 **Recuperar**: sin mancha verde. Lo borrado se ve tenue y lo que pintas ya es la imagen real. Con «Recuperar solo
+    el sujeto» (activado) puedes pintar a lo bruto: vuelve lo que se parece a lo que ya se ve, siguiendo sus bordes, y
+    el fondo que toques no. Desactívalo para recuperar exactamente lo pintado.
+  · 🎨 **Colores usados**: debajo de Contorno, Sombra y Brillo, los últimos 12 colores de cada uno; clic = usarlo.
+- **09/11 · Miniaturas con más libertad**:
+  · ➕ **Contornos apilados**: debajo de Contorno, «Otro contorno por fuera» (hasta 3 más): el blanco + negro de YouTube,
+    en textos y en imágenes recortadas.
+  · 🎨 **Relleno de las letras**: color, degradado (dos colores y ángulo) o una imagen dentro del texto, con zoom.
+  · 🎚 **Fusión** por capa (Multiplicar, Trama, Superponer, Luz suave…): fuego, humo o luces sobre negro sin tapar.
+  · 🌗 **Bordes suaves** en imágenes: difuminar el borde y fundir desde abajo, arriba o los lados. 🖌 El pincel tiene
+    dureza (borde suave) y opacidad (borrar a medias).
+  · ⭐ **Mis estilos**: guarda el aspecto de un texto, una imagen o una forma y pónselo a otra con un clic.
+  · 🖼 **Plantillas con huecos** y 🔁 **Cambiar la imagen**: la imagen nueva ocupa justo el hueco (o la caja de la
+    anterior), con su sitio, giro y efectos.
+- **11/11 · ⚡ Acomodar por palabras clave**:
+  · 🔑 (arriba de los nombres de las pistas) resalta en la regla cada palabra clave que dices y que tiene carpeta, con
+    🎮 gameplay / 🎬 cinemática / 🖼 imagen / ✕ nada sugerido: mandan las subcarpetas «Gameplay» y «Cinemáticas» (o el
+    nombre del archivo); si no, lo que vio la IA. Lo que dices alrededor («la cinemática del final») también cuenta.
+    Clic en una = cambiarla; clic derecho = más opciones (todas las de esa palabra, la secuencia).
+  · ⚡ acomoda todas de una vez, en la pista de palabras clave y sin sonido: cada mención toma el trozo siguiente de
+    su material (sin repetir), los archivos en su orden (01, 02, 10…) y, si la IA ya analizó esos videos, el
+    momento que más se parece a lo que dices (siempre hacia delante). Duración: la de tu frase. Un Ctrl+Z lo quita.
+- **11/11 · ✓ Revisión guiada** (Ctrl+Shift+Q, o «Revisarlos uno a uno» en la lista de avisos, o la tarjeta ⚕ de la IA):
+  · Junta la antigua «Revisión rápida» y la «Lista de avisos»: te lleva SOLO a lo dudoso, uno a uno y en orden (lo que
+    la limpieza de voz quiere quitar, cortes de audio dudosos, avisos con momento —negro, plano repetido o fijo, tema
+    que no encaja, volumen— y el B-roll que la IA puso solo por parecido, como mucho 20).
+  · Enter = lo que propone la IA (otro clip en ese tramo, rellenar un negro…) · O = está bien así (no vuelve a salir)
+    · Supr = quitar ese clip de encima (nunca la voz, la música ni la pista principal) · → saltar. Mientras la IA
+    pone otro clip, Enter y Supr esperan. Cada decisión, un Ctrl+Z. La lista completa sigue en Ctrl+R.
+- **11/11 · Línea de tiempo**: al arrastrar se ve a qué se pegó el imán (línea amarilla con su nombre). Timeline →
+  «🗣 Imán también a las palabras de la narración» (apagado de entrada) y «🧲 Pista principal magnética» (apagada:
+  en la pista de video de abajo Supr y recortar adelantan lo de detrás en TODAS las pistas; si la narración pasa por
+  debajo del hueco, no junta y avisa). Los chips 🔑 también atraen. Mayús+Z = ver todo (también Ctrl+0).
+- **12/11 · ✂ Eliminar silencio, como DaVinci**: de entrada «🎚 Híbrido» + protección «Como DaVinci»: el umbral manda
+  (antes, en «Voz precisa» o «Media», moverlo casi no cambiaba nada) y solo se protege la voz clara y los finales
+  suaves (≤ 20 ms de voz tocados en las pruebas). En «Voz precisa» el umbral se desactiva (manda la IA). Si no se
+  quita nada, el aviso explica por qué: pausas más cortas que el mínimo, comidas por los márgenes o nada bajo el umbral.
+- **12/11 · ⚡ Exportar más rápido**: las imágenes se leen una sola vez (antes, en cada fotograma: −11 a −14 % de CPU,
+  mismo resultado); el sonido usa el AAC de Windows (antes nunca, por un fallo; 384 kbps → 320) y el volumen final se
+  mide una vez y se aplica (−14,0 LUFS exactos, más fiel que antes y ~5 veces más rápido); con el procesador, x264
+  «faster» (~30 % menos CPU). Arreglado: con más de ~32 tramos de voz bajo una música con ducking, la exportación
+  fallaba con «falló el sonido».

@@ -17,10 +17,14 @@ import hashlib
 import os
 
 from PySide6.QtCore import QFileSystemWatcher, QMimeData, QSettings, QSize, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, QRect
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QListView,
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy,
-                               QVBoxLayout, QWidget)
+                               QApplication, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QToolTip, QVBoxLayout, QWidget)
+
+ROL_LIKE = Qt.UserRole + 1        # en «Dijiste…»: "si" si la palabra ya está en el glosario como palabra clave
+ROL_TERM = Qt.UserRole + 2        # en «Dijiste…»: la palabra de la fila (el 👍/👎 no depende del número de fila)
 
 from ..ai import keyword_glossary as KG
 from ..ai.mentions import find_mentions, verify_online
@@ -171,8 +175,80 @@ class _Lista(QListWidget):
     def mimeData(self, items):
         md = QMimeData()
         md.setUrls([QUrl.fromLocalFile(it.data(Qt.UserRole)) for it in items if it.data(Qt.UserRole)])
+        from .common import NOAUDIO_MIME
+        md.setData(NOAUDIO_MIME, b"1")          # 🔇 lo de Palabras clave entra en la línea de tiempo sin su audio
         return md
 
+
+
+class _FilaLike(QStyledItemDelegate):
+    """«Dijiste…»: cada fila lleva a su derecha 👍 / 👎 (clic = me gusta / no me gusta esa palabra)."""
+    ANCHO = 26
+
+    def __init__(self, al_pulsar, parent=None):
+        super().__init__(parent)
+        self.al_pulsar = al_pulsar        # al_pulsar(palabra, si)
+        self._doble = False               # el soltar que sigue a un doble clic no cuenta otra vez
+
+    def zonas(self, rect: QRect) -> tuple[QRect, QRect]:
+        w = self.ANCHO
+        no = QRect(rect.right() - w + 1, rect.top(), w, rect.height())
+        si = QRect(no.left() - w, rect.top(), w, rect.height())
+        return si, no
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        return QSize(2 * self.ANCHO + 40, max(s.height(), 22))   # ancho del panel: el texto se recorta con «…»
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        estilo = opt.widget.style() if opt.widget is not None else None
+        if estilo is not None:              # fondo (elegida / bajo el ratón) en toda la fila
+            estilo.drawPrimitive(QStyle.PE_PanelItemViewItem, opt, painter, opt.widget)
+        texto = QStyleOptionViewItem(option)
+        texto.rect = option.rect.adjusted(0, 0, -2 * self.ANCHO - 4, 0)   # el texto no pisa los botones
+        super().paint(painter, texto, index)
+        si, no = self.zonas(option.rect)
+        gusta = index.data(ROL_LIKE) == "si"
+        painter.save()
+        for zona, icono, encendido in ((si, "👍", gusta), (no, "👎", False)):
+            painter.setOpacity(1.0 if encendido else 0.55)
+            painter.drawText(zona, Qt.AlignCenter, icono)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick) \
+                and event.button() == Qt.LeftButton:
+            si, no = self.zonas(option.rect)
+            pos = event.position().toPoint()
+            if si.contains(pos) or no.contains(pos):
+                if event.type() == QEvent.MouseButtonDblClick:
+                    self._doble = True
+                return True                  # (el clic en el botón no elige la fila ni salta el cabezal)
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            si, no = self.zonas(option.rect)
+            pos = event.position().toPoint()
+            if si.contains(pos) or no.contains(pos):
+                if self._doble:
+                    self._doble = False      # (doble clic = un solo 👍/👎)
+                    return True
+                term, gusta = index.data(ROL_TERM), si.contains(pos)
+                if term:                     # (después del evento: la lista se rehace al guardar)
+                    QTimer.singleShot(0, lambda: self.al_pulsar(term, gusta))
+                return True
+        return super().editorEvent(event, model, option, index)
+
+    def helpEvent(self, event, view, option, index):
+        if event is not None and index.isValid():
+            si, no = self.zonas(option.rect)
+            if si.contains(event.pos()):
+                QToolTip.showText(event.globalPos(), "👍 Me gusta: es palabra clave (se le crea su carpeta)", view)
+                return True
+            if no.contains(event.pos()):
+                QToolTip.showText(event.globalPos(), "👎 No me gusta: no es palabra clave (deja de proponerse)", view)
+                return True
+        return super().helpEvent(event, view, option, index)
 
 
 class ClipsPanel(InternetMixin, QWidget):
@@ -255,8 +331,20 @@ class ClipsPanel(InternetMixin, QWidget):
         self.btn_glosario.setToolTip("Palabras que sí son palabras clave y palabras que no. Lo que confirmas aquí "
                                      "se respeta en «Dijiste…» y en «✨ Crear de lo que dices».")
         self.btn_glosario.clicked.connect(self._abrir_glosario)
+        self.btn_todo = QPushButton("⚡ Agregar todo")
+        self.btn_todo.setToolTip("Agrega a la línea de tiempo, de una vez, el material de las carpetas (lo descargado "
+                                 "y lo de tu computadora) justo donde dices cada palabra clave, con la duración de tu "
+                                 "frase y sin repetir. Un Ctrl+Z lo quita.")
+        self.btn_todo.clicked.connect(self.agregar_todo)
+        self.btn_amplia = QPushButton("🗂 Carpetas")
+        self.btn_amplia.setToolTip("Muestra la pestaña «🗂 Carpetas» (a la derecha, junto al Inspector): la carpeta de "
+                                   "la palabra elegida, con lo descargado y lo de tu computadora por separado (y para "
+                                   "borrarlo fácil)")
+        self.btn_amplia.clicked.connect(self.abrir_ventana)
         cab.addWidget(titulo)
         cab.addStretch(1)
+        cab.addWidget(self.btn_todo)
+        cab.addWidget(self.btn_amplia)
         cab.addWidget(self.btn_glosario)
         cab.addWidget(self.btn_quitar)
         cab.addWidget(self.btn_recalc)
@@ -266,6 +354,7 @@ class ClipsPanel(InternetMixin, QWidget):
         self.lista_menciones.setMaximumHeight(130)
         self.lista_menciones.setToolTip("Lo que se dice en la narración, con cuántas veces sale. "
                                         "📁 n = tienes carpeta con n archivos · ＋ = aún no tiene carpeta. "
+                                        "👍 / 👎 a la derecha = me gusta / no me gusta esa palabra. "
                                         "Puedes soltar archivos sobre una palabra. "
                                         "Clic derecho = ¿es palabra clave? (se guarda en el glosario).")
         self.lista_menciones.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -273,6 +362,11 @@ class ClipsPanel(InternetMixin, QWidget):
         self.lista_menciones.customContextMenuRequested.connect(
             lambda pos: self._clic_derecho(self.lista_menciones, pos))
         AYUDA.set_help(self.lista_menciones, "clips_dijiste")
+        self.lista_menciones.setMouseTracking(True)
+        self.lista_menciones.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # 👍/👎 siempre a la vista
+        self.lista_menciones.setTextElideMode(Qt.ElideRight)
+        self._ultimo_like = QElapsedTimer()
+        self.lista_menciones.setItemDelegate(_FilaLike(self._like_fila, self.lista_menciones))
         self.lista_menciones.currentRowChanged.connect(lambda fila: self._elegir_mencion(fila, buscar=True))
         self.lista_menciones.soltado.connect(self._soltar_archivos)
         v.addWidget(self.lista_menciones)
@@ -486,10 +580,77 @@ class ClipsPanel(InternetMixin, QWidget):
         self._aviso(f"✓ Carpeta «{term}» creada. Suelta ahí tus videos e imágenes.")
         self.recalcular()
 
-    def _soltar_archivos(self, rutas: list, fila: int = -1):
-        """Archivos o carpetas soltados: van a la carpeta de la palabra (fila de «Dijiste…» o la elegida)."""
-        term = ""
-        if 0 <= fila < len(self.menciones):
+    def abrir_ventana(self):
+        """🗂 Carpetas: la pestaña de la derecha (o, si no la hay, la ventana amplia)."""
+        dock = getattr(self, "carpetas_dock", None)
+        win = self.window()
+        if dock is not None and hasattr(win, "show_panel"):
+            win.show_panel(dock)
+            if not dock.isVisible():
+                dock.refrescar()
+            return dock
+        from .keywords_window import abrir
+        return abrir(self)
+
+    def agregar_todo(self):
+        """⚡ Agregar todo: el material de cada carpeta donde dices su palabra (el «⚡ Acomodar todo» de la fila 🔑)."""
+        tl = self.timeline
+        if tl is None or not hasattr(tl, "kw_arrange_requested"):
+            self._aviso("No encuentro la línea de tiempo.")
+            return
+        if not self.carpetas:
+            self._leer_carpetas()
+        if not self.carpetas:
+            self._aviso("Aún no hay carpetas: pulsa 👍 en una palabra (o 🗂 Carpetas) y añádele material.")
+            return
+        arr = getattr(self.window(), "kw_arranger", None)
+        if arr is not None and getattr(arr, "_arr_job", None) is not None:
+            self._aviso("⚡ Ya se está agregando: espera a que termine.")
+            return
+        self._aviso("⚡ Agregando el material donde dices cada palabra clave… el resultado sale abajo, en la barra "
+                    "de estado (Ctrl+Z lo quita).")
+        QTimer.singleShot(10000, lambda: self.aviso.text().startswith("⚡ Agregando") and self._aviso(""))
+        tl.kw_arrange_requested.emit()
+
+    def _like_fila(self, term: str, si: bool):
+        """👍 / 👎 pulsado en una fila de «Dijiste…» (por la palabra, no por el número de fila)."""
+        if self._ultimo_like.isValid() and self._ultimo_like.elapsed() < QApplication.doubleClickInterval():
+            return                            # (dos clics seguidos: el segundo caería en otra palabra)
+        self._ultimo_like.start()
+        m = next((m for m in self.menciones if m["term"] == term), None)
+        if m is not None:
+            self._like(si, m)
+
+    def _like(self, si: bool, mencion: dict | None = None):
+        """👍 / 👎 de una palabra de «Dijiste…» (la elegida si no se dice cuál; 👍 además le crea su carpeta)."""
+        mencion = mencion or self.mencion
+        if not mencion:
+            self._aviso("Elige antes una palabra de «Dijiste…».")
+            return
+        term = mencion["term"]
+        try:
+            if si:
+                KG.add_yes(term, mencion.get("web") if mencion.get("web") in KG.TIPOS else None)
+                if self._carpeta_de(term) is None:
+                    KF.create_folder(self.raiz, term)
+            else:
+                KG.add_no(term)
+        except OSError as exc:
+            self._aviso(f"No pude guardarlo: {exc}")
+            return
+        self.recalcular()
+        car = None if si else self._carpeta_de(term)
+        extra = (f" Su carpeta sigue ahí ({car['count']} archivo(s)): bórrala en 🗂 Carpetas o deshazlo en el "
+                 "📖 Glosario." if car and car["count"] else "")
+        self._aviso(f"👍 «{term}» es palabra clave y ya tiene su carpeta: añádele material (o 🗂 Carpetas)." if si
+                    else f"👎 «{term}» ya no se propone como palabra clave.{extra}")
+
+    def _soltar_archivos(self, rutas: list, fila: int = -1, term: str | None = None):
+        """Archivos o carpetas soltados: van a la carpeta de la palabra (term, fila de «Dijiste…» o la elegida)."""
+        term = term or ""
+        if term:
+            pass
+        elif 0 <= fila < len(self.menciones):
             term = self.menciones[fila]["term"]
         elif self.mencion:
             term = self.mencion["term"]
@@ -536,16 +697,21 @@ class ClipsPanel(InternetMixin, QWidget):
         return [it.data(Qt.UserRole) for it in its if it.data(Qt.UserRole)]
 
     # ------------------------------------------------------------------ menciones
+    def _a_la_vista(self) -> bool:
+        return self.isVisible() or any(w is not None and w.isVisible()
+                                       for w in (getattr(self, "_ventana_amplia", None),
+                                                 getattr(self, "carpetas_dock", None)))
+
     def _programar(self, *_):
         """Un cambio (proyecto, carpeta vigilada…): con el panel oculto solo queda pendiente; no escanea nada."""
-        if not self.isVisible():
+        if not self._a_la_vista():
             self._temporizador.stop()
             self._pendiente = True
             return
         self._temporizador.start()
 
     def _al_temporizador(self):
-        if self.isVisible():
+        if self._a_la_vista():
             self.recalcular(solo_si_cambio=True)
         else:
             self._pendiente = True
@@ -573,6 +739,7 @@ class ClipsPanel(InternetMixin, QWidget):
         firma = self._firma()
         if solo_si_cambio and firma == self._firma_ultima:
             self._verificar_si_toca()
+            self._avisar_ventana()
             return
         self._firma_ultima = firma
         try:
@@ -581,7 +748,15 @@ class ClipsPanel(InternetMixin, QWidget):
         except Exception as exc:  # noqa: BLE001 - el panel nunca debe romper el programa
             self.menciones = []
             self._aviso(f"No pude leer la narración: {exc}")
+        dichas = bool(self.menciones)
+        self.menciones += self._no_dichas(self.menciones)       # (al final: tus carpetas que no dices)
         self._pintar_menciones(anterior)
+        if not dichas and self.menciones:
+            self._elegir_mencion(self.lista_menciones.currentRow(), buscar=False)
+            self._aviso("No dices ninguna de tus palabras clave en la narración (¿falta transcribirla?). "
+                        "Abajo están tus carpetas.")
+            self._avisar_ventana()
+            return
         if not self.menciones:
             self.mencion = None
             self.lista_momentos.clear()
@@ -589,13 +764,41 @@ class ClipsPanel(InternetMixin, QWidget):
             self._marcas()
             self._pintar_carpeta()
             self._aviso("No encuentro nombres ni palabras de tu vocabulario en la narración.")
+            self._avisar_ventana()
             return
         self._elegir_mencion(self.lista_menciones.currentRow(), buscar=False)
         self._aviso("")
         self._verificar_si_toca()
+        self._avisar_ventana()
+
+    def _avisar_ventana(self):
+        for w in (getattr(self, "_ventana_amplia", None), getattr(self, "carpetas_dock", None)):
+            if w is not None:
+                w.al_dia()
+
+    def _no_dichas(self, dichas: list[dict]) -> list[dict]:
+        """Tus carpetas de palabras que no salen en la narración (sin momentos), para verlas y darles 👍/👎."""
+        usadas = set()
+        for m in dichas:
+            car = self._carpeta_de(m["term"])
+            if car:
+                usadas.add(os.path.normcase(car["path"]))
+        try:
+            g = KG.load()
+        except Exception:  # noqa: BLE001
+            g = {"no": []}
+        out = []
+        for c in self.carpetas:
+            if os.path.normcase(c["path"]) in usadas or KG.is_no(c["label"], g):
+                continue
+            out.append({"term": c["label"], "count": 0, "hits": [], "known": True, "no_dicha": True})
+        return out
 
     def _orden(self, m: dict) -> int:
-        """Las palabras con carpeta, primero; luego las demás; las que internet descarta, al final."""
+        """Las palabras con carpeta, primero; luego las demás; las que internet descarta y las que no dices, al
+        final."""
+        if m.get("no_dicha"):
+            return 3
         if _descartada(m):
             return 2
         return 0 if self._carpeta_de(m["term"]) else 1
@@ -603,20 +806,38 @@ class ClipsPanel(InternetMixin, QWidget):
     def _pintar_menciones(self, anterior: str | None):
         """Pinta «Dijiste…» con self.menciones. Deja elegida la palabra «anterior» si sigue, sin emitir señales."""
         self.menciones.sort(key=self._orden)
+        try:
+            si_glosario = set(KG.load()["si"])
+        except Exception:  # noqa: BLE001
+            si_glosario = set()
         self.lista_menciones.blockSignals(True)
         self.lista_menciones.clear()
         fila_previa = -1
         for i, m in enumerate(self.menciones):
+            car = self._carpeta_de(m["term"])
+            badge = f"📁 {car['count']}" if car else "＋"
+            if m.get("no_dicha"):
+                it = QListWidgetItem(f"{m['term']} · no lo dices    {badge}")
+                it.setData(Qt.UserRole, i)
+                it.setData(ROL_LIKE, "si" if KG.clave(m["term"]) in si_glosario else "")
+                it.setData(ROL_TERM, m["term"])
+                it.setForeground(QColor("#6b6f78"))
+                it.setToolTip(f"Tienes carpeta «{car['label'] if car else m['term']}» pero no lo dices en la "
+                              "narración. Su material se puede poner en el cabezal (🗂 Carpetas).")
+                self.lista_menciones.addItem(it)
+                if anterior and m["term"] == anterior and fila_previa < 0:
+                    fila_previa = i
+                continue
             primero = m["hits"][0]
             tl = _momento(primero)
             cuando = _mmss(tl) if tl is not None else "cortado"
-            car = self._carpeta_de(m["term"])
             veces = f"{m['count']} {'vez' if m['count'] == 1 else 'veces'}"
-            badge = f"📁 {car['count']}" if car else "＋"
             verificada = _verificada(m)
             sufijo = f"  ✓ {m['web']}" if verificada else ""
             it = QListWidgetItem(f"{m['term']} · {veces} · {cuando}    {badge}{sufijo}")
             it.setData(Qt.UserRole, i)
+            it.setData(ROL_LIKE, "si" if KG.clave(m["term"]) in si_glosario else "")
+            it.setData(ROL_TERM, m["term"])
             pistas: list[str] = []
             if verificada:
                 pistas.append(f"✓ Según internet: {m['web']} (Wikidata o Wikipedia). Clic derecho para cambiarlo.")
@@ -678,9 +899,9 @@ class ClipsPanel(InternetMixin, QWidget):
         tipo = m.get("web") if m.get("web") in KG.TIPOS else None
         menu = QMenu(self.lista_menciones)
         if k not in g["si"]:
-            menu.addAction("✓ Es palabra clave (guardar en el glosario)",
+            menu.addAction("👍 Es palabra clave (guardar en el glosario)",
                            lambda: self._glosario_cambia(KG.add_yes, term, tipo))
-        menu.addAction("✕ No es palabra clave", lambda: self._glosario_cambia(KG.add_no, term))
+        menu.addAction("👎 No es palabra clave", lambda: self._glosario_cambia(KG.add_no, term))
         if k in g["si"] or k in g["no"]:
             menu.addAction("↺ Quitar del glosario", lambda: self._glosario_cambia(KG.remove, term))
         AYUDA.add_help_action(menu, AYUDA.help_key_for(self.lista_menciones), self)
@@ -715,6 +936,9 @@ class ClipsPanel(InternetMixin, QWidget):
         self._llenar_momentos(m)
         self._marcas()
         self._pintar_carpeta()
+        dock = getattr(self, "carpetas_dock", None)
+        if dock is not None:
+            dock._seguir(m["term"])                   # 🗂 Carpetas (a la derecha) enseña la de esta palabra
         if not HAY_INTERNET:
             return
         if not buscar:
@@ -809,7 +1033,10 @@ class ClipsPanel(InternetMixin, QWidget):
             self._aviso("Elige uno o más archivos de la carpeta.")
             return False
         if not any(_momento(h) is not None for h in hits):
-            self._aviso("Elige primero una palabra de «Dijiste…» y marca al menos un momento con hora.")
+            if self.mencion and self.mencion.get("no_dicha"):
+                self._aviso(f"«{self.mencion['term']}» no sale en tu narración: usa «⏵ Poner en el cabezal».")
+            else:
+                self._aviso("Elige primero una palabra de «Dijiste…» y marca al menos un momento con hora.")
             return False
         try:
             ids = [i for i in (self.ctrl.import_now(list(rutas)) or []) if i]

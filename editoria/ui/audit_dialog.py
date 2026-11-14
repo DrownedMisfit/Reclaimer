@@ -37,11 +37,17 @@ class AuditDialog(QDialog):
         set_help(self, "revision")
         btn_refresh = QPushButton("↻ Revisar de nuevo")
         btn_refresh.clicked.connect(self.refresh)
+        btn_guiada = QPushButton("✓ Revisarlos uno a uno")
+        btn_guiada.setToolTip("Revisión guiada: te lleva a cada aviso (y a lo demás que la IA no tiene claro) para "
+                              "decidir con teclas: Enter lo que propone la IA, O está bien así, Supr quitar")
+        btn_guiada.clicked.connect(self._guiada)
+        self._before_export = before_export
         close = QPushButton("Exportar igual" if before_export else "Cerrar")
         close.setObjectName("primary")
         close.clicked.connect(self.accept)
         row = QHBoxLayout()
         row.addWidget(btn_refresh)
+        row.addWidget(btn_guiada)
         row.addStretch()
         self.no_mostrar = QCheckBox("No volver a mostrar antes de exportar")
         self.no_mostrar.setToolTip("Antes de exportar ya no saldrá esta revisión. Sigue disponible con Ctrl+R.")
@@ -94,6 +100,13 @@ class AuditDialog(QDialog):
         i = item.data(0, Qt.UserRole)
         if i is not None:
             self._ir(i)
+
+    def _guiada(self):
+        """Cierra la lista (sin exportar) y abre la revisión guiada."""
+        win = self.parent()
+        self.reject() if self._before_export else self.accept()
+        if win is not None and hasattr(win, "open_quick_review"):
+            win.open_quick_review()
 
 
 def revision_previa(win) -> bool:

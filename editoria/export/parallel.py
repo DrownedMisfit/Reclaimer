@@ -179,8 +179,14 @@ class ParallelExport:
         d = os.path.join(self.dir, "audio")
         os.makedirs(d, exist_ok=True)
         out = os.path.join(self.dir, "audio.wav")
-        args, _t = build_command(self.project, replace(self.opts, path=out, audio_only=True, duration=self.total),
+        # 🔊 −14 LUFS: se mide una vez (ebur128, ~0,7 s por 5 min) y se aplica como ganancia + limitador al comprimir. El
+        # loudnorm dinámico tardaba 6–7 s por cada 5 min y quedaba en −14,9 LUFS, aplastando la dinámica (medido)
+        norm = bool(self.project.loudnorm and self.opts.loudnorm)
+        args, _t = build_command(self.project, replace(self.opts, path=out, audio_only=True, duration=self.total,
+                                                       loudnorm=False),
                                  self.ffmpeg, os.path.join(d, "filtro.txt"))
+        if norm:     # (en coma flotante: una mezcla que pasa de 0 dB no se recorta antes de bajarla al volumen final)
+            args = ["pcm_f32le" if a_ == "pcm_s16le" else a_ for a_ in args]
 
         def on_time(s):
             self.audio_f = min(1.0, s / max(1e-3, self.total))
@@ -189,8 +195,14 @@ class ParallelExport:
         o = self.opts
         audio_k = TARGETS[o.target]["audio"] if o.target in TARGETS else o.audio_kbps
         m4a = os.path.join(self.dir, "audio.m4a")
+        af = []
+        if norm and not self.cancel:
+            lufs = measure_lufs(self.ffmpeg, out)
+            from ..core import audio_fx
+            af = ["-af", (f"volume={TARGET_LUFS - lufs:.2f}dB,alimiter=limit={LIMIT:.2f}:level=false:attack=1:release=50"
+                          if lufs is not None else f"{audio_fx.LOUDNORM},aresample=48000")]
         if self._run([self.ffmpeg, "-nostdin", "-y", "-hide_banner", "-nostats", "-progress", "pipe:1", "-i", out]
-                     + aac_args(audio_k) + ["-ar", "48000", "-ac", "2", m4a], lambda s: None, urgent=True) != 0:
+                     + af + aac_args(audio_k) + ["-ar", "48000", "-ac", "2", m4a], lambda s: None, urgent=True) != 0:
             raise RuntimeError("cancelado" if self.cancel else "falló el sonido")
         self.audio_f = 1.0
         return m4a
@@ -230,3 +242,25 @@ class ParallelExport:
                     break
                 except OSError:
                     time.sleep(0.1)
+
+
+TARGET_LUFS = -14.0      # lo que pide YouTube
+LIMIT = 0.79             # techo del limitador: −2 dB de pico de muestra (alimiter no mide picos reales; con margen)
+
+
+def measure_lufs(ffmpeg: str, wav: str) -> float | None:
+    """Sonoridad integrada (LUFS) del sonido ya mezclado. None si no se pudo medir (silencio total, error)."""
+    import re
+    import subprocess
+    try:
+        r = subprocess.run([ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-i", wav, "-af", "ebur128=framelog=quiet",
+                            "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=600,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.findall(r"I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", r.stderr or "")
+    if not found:
+        return None
+    v = float(found[-1])
+    return v if -70.0 < v < 0.0 else None

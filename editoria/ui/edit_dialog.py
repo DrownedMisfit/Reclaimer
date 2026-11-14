@@ -25,8 +25,13 @@ from .jobs import BackgroundJob
 
 
 class EditDialog(QDialog):
-    def __init__(self, ctrl, parent=None):
+    def __init__(self, ctrl, parent=None, embedded: bool = False):
+        """embedded: dentro de la ventana principal, como panel (pestaña «Edits», a pantalla completa): las opciones en
+        un panel y la lista de clips (self.clips_page) en otro, con miniaturas grandes; sin «Cerrar»."""
         super().__init__(parent)
+        self.embedded = embedded
+        if embedded:
+            self.setWindowFlags(Qt.Widget)
         self.ctrl = ctrl
         self.job: BackgroundJob | None = None
         self._runs = 0   # cada «otra versión» elige otros planos
@@ -149,7 +154,7 @@ class EditDialog(QDialog):
         self.clips.viewport().setAcceptDrops(True)
         self.clips.viewport().installEventFilter(self)
         self.clips.itemDoubleClicked.connect(self.pick_ranges)
-        self.clips.setIconSize(QSize(64, 36))
+        self.clips.setIconSize(QSize(160, 90) if embedded else QSize(64, 36))   # (en la pestaña Edits, grandes)
         # (sin altura fija: tan alta como lo que hay, de 2 a 8 filas; los nombres largos se recortan por el medio y
         # no hay barra lateral: antes la lista se desplazaba y se perdían las casillas y el principio del nombre)
         self.clips.setTextElideMode(Qt.ElideMiddle)
@@ -208,9 +213,12 @@ class EditDialog(QDialog):
         # Limpio, como Resolve: secciones una debajo de otra que se abren y cierran con su flecha (▾ / ▸);
         # «Clips» abierta de entrada. Abajo, siempre, cómo va y los botones.
         from .tabs import sections
-        self.sections_area, self.sections = sections([
-            ("Canción y estilo", page_song, True), ("Efectos", box, False), ("Clips", page_clips, True),
-            ("Frases", page_quotes, False)], key="edit_musical")
+        partes = [("Canción y estilo", page_song, True), ("Efectos", box, True if embedded else False)]
+        if not embedded:
+            partes.append(("Clips", page_clips, True))
+        partes.append(("Frases", page_quotes, False))
+        self.clips_page = page_clips if embedded else None      # (en la pestaña Edits, en su propio panel)
+        self.sections_area, self.sections = sections(partes, key="edit_musical_panel" if embedded else "edit_musical")
         self.sections_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         lay.addWidget(self.sections_area, 1)
 
@@ -231,6 +239,11 @@ class EditDialog(QDialog):
         btns.addWidget(self.cancel_btn)
         btns.addWidget(self.go)
         lay.addLayout(btns)
+        if embedded:                                 # (como panel: «Cerrar» no tiene sentido; solo sirve para detener)
+            self.cancel_btn.setText("Detener")
+            self.cancel_btn.setToolTip("Detiene el edit que se está creando")
+            self.cancel_btn.hide()
+            ctrl.media_changed.connect(lambda: self._fill(self.song.currentData()) if self.job is None else None)
         for sec in self.sections.values():         # al abrir o cerrar una sección, el tamaño justo
             sec.head.toggled.connect(lambda _on: QTimer.singleShot(0, self._fit))
         self._fill()
@@ -285,6 +298,8 @@ class EditDialog(QDialog):
 
     def _fit_list(self):
         """La lista de clips, tan alta como sus filas (de 2 a 8; si hay más, se desplaza dentro)."""
+        if self.embedded:                            # (en su panel ocupa todo el alto)
+            return
         n = self.clips.count()
         row = self.clips.sizeHintForRow(0) if n else 0
         row = max(row, self.clips.iconSize().height() + 6, self.fontMetrics().height() + 8)
@@ -297,6 +312,8 @@ class EditDialog(QDialog):
         QTimer.singleShot(0, self._fit)
 
     def _fit(self):
+        if self.embedded:                            # (como panel, el tamaño lo pone la ventana principal)
+            return
         """El tamaño justo: lo que ocupa lo que hay (sin huecos vacíos), nunca más alto que la pantalla y siempre
         dentro de ella. Los botones de abajo siempre se ven; si no cabe todo, las secciones se desplazan."""
         from PySide6.QtGui import QGuiApplication
@@ -534,6 +551,7 @@ class EditDialog(QDialog):
 
     def _start(self):
         p = self.ctrl.project
+        self._proj_start = p                         # (si al acabar el proyecto es otro, no se pone en él)
         song_id = self.song.currentData()
         if not song_id:
             QMessageBox.information(self, "Edit musical", "Elige una canción.")
@@ -594,6 +612,8 @@ class EditDialog(QDialog):
         self.job.done.connect(self._on_done)
         self.job.failed.connect(self._on_failed)
         self.job.start()
+        if self.embedded:
+            self.cancel_btn.show()
 
     def _on_progress(self, frac: float, text: str):
         self.bar.setValue(int(frac * 1000))
@@ -601,6 +621,13 @@ class EditDialog(QDialog):
 
     def _on_done(self, plan: dict):
         self.job = None
+        if self.embedded:
+            self.cancel_btn.hide()
+        if getattr(self, "_proj_start", self.ctrl.project) is not self.ctrl.project:
+            self.bar.hide()
+            self.go.setEnabled(True)
+            self.status.setText("✗ Cambiaste de proyecto mientras se creaba el edit: no se puso. Vuelve a crearlo.")
+            return
         if self.sound.currentData() == "voice" and not plan.get("_dialogue_done"):
             self._separate_then_apply(plan)
             return
@@ -624,7 +651,10 @@ class EditDialog(QDialog):
                             "🔀 Remix lo rehace entero · 🎛 Mix rehace solo lo que selecciones.")
         self.go.setEnabled(True)
         self.go.setText("🎵  Crear otra versión")
-        self.cancel_btn.setText("Cerrar")
+        self.cancel_btn.setText("Detener" if self.embedded else "Cerrar")
+        tl = getattr(self.parent(), "timeline", None) if self.embedded else None
+        if tl is not None:                           # (como panel: que se vea el edit entero en la línea de tiempo)
+            tl.fit()
 
     def _separate_then_apply(self, plan: dict):
         """🗣 Antes de montar: los videos del edit, con solo los diálogos (una vez por archivo; se guarda)."""
@@ -662,16 +692,26 @@ class EditDialog(QDialog):
 
     def _on_failed(self, msg: str):
         self.job = None
+        if self.embedded:
+            self.cancel_btn.hide()
         self.bar.hide()
         self.go.setEnabled(True)
-        self.cancel_btn.setText("Cerrar")
+        self.cancel_btn.setText("Detener" if self.embedded else "Cerrar")
         self.status.setText("✗ " + msg)
+
+    def reject(self):
+        if self.embedded:                            # (como panel: Esc no lo oculta; solo detiene si está creando)
+            if self.job is not None:
+                self.job.cancel()
+            return
+        super().reject()
 
     def _cancel(self):
         if self.job is not None:
             self.job.cancel()
             return
-        self.accept()
+        if not self.embedded:
+            self.accept()
 
     def closeEvent(self, e):
         self._big.hide()

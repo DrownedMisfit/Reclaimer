@@ -129,6 +129,7 @@ def main():
     win.grab().save(os.path.join(out, "ritmo_timeline.png"))
     tl = win.timeline
     tl.set_snap_rhythm(True)
+    tl.pps = 80.0               # (zoom fijo: con «ver todo» depende del ancho de la ventana y 4 px pueden ser medio golpe)
     beat = rt["beats"][len(rt["beats"]) // 2]
     near = beat + 4 / tl.pps                                     # 4 píxeles al lado
     assert abs(tl._snap(near, tl._snap_targets(set())) - beat) < 1e-6, "el imán pega al golpe"

@@ -391,7 +391,8 @@ class AutoDialog(QDialog):
         voice = self.win.voice
         path = p.media[self.mid].path
         opts = voice.options()
-        has_tr = self.mid in p.transcripts
+        prev = p.transcripts.get(self.mid)
+        has_tr = prev is not None and prev.get("hasta") is None        # (📝 a medias: se termina aquí)
         has_sugs = any(s.media_id == self.mid and s.kind in first_version.CLEAN_KINDS for s in p.suggestions)
         if has_tr and has_sugs:
             return self._next("ya estaba")
@@ -407,7 +408,9 @@ class AutoDialog(QDialog):
             tr = None
             w = words
             if not has_tr:
-                tr = transcription.transcribe(samples, model, lang, progress, cancelled)
+                seguir = float(prev["hasta"]) if prev is not None and prev.get("hasta") is not None else 0.0
+                tr = transcription.transcribe(samples, model, lang, progress, cancelled, start_at=seguir,
+                                              prev=prev if seguir else None)
                 tr = voice_cleanup.refine_transcript(samples, SR, tr)
                 w = tr["words"]
             progress(0.95, "Buscando silencios, muletillas y repeticiones…")

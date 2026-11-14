@@ -1,11 +1,10 @@
 """
-Prueba de ⇆ Alt + rueda sobre un clip ELEGIDO en la línea de tiempo:
-- el clip (con su sonido vinculado) se desliza hacia atrás / delante SIN cambiar de tamaño;
-- el movimiento es suave: muchos pasos intermedios por cada paso de la rueda y repintados cortos;
-- se detiene al tocar el clip de al lado (y nunca antes del segundo 0);
-- se pega a una palabra clave (banderita) y al cabezal;
+Prueba de ⇆ Alt + rueda sobre un clip ELEGIDO = «slip» (como en DaVinci Resolve):
+- el clip NO se mueve ni cambia de tamaño: cambia QUÉ parte del video enseña (y su sonido vinculado, igual);
+- suave: muchos pasos intermedios por cada paso de la rueda, al fotograma, y repintados cortos;
+- se detiene donde acaba (o empieza) el material del archivo;
 - el visor enseña el cuadro en vivo y el proyecto no cambia hasta que se aplica (un solo Ctrl+Z);
-- encima de un clip NO elegido, Alt + rueda sigue desplazando las pistas en vertical.
+- una imagen no se desliza (no tiene más material); encima de un clip NO elegido, Alt + rueda desplaza las pistas.
 Usa una carpeta de datos TEMPORAL; deja tus ajustes como estaban. Sin ventanas visibles.
 Ejecutar:  .venv/Scripts/python.exe tests/test_alt_wheel_nudge.py
 """
@@ -118,98 +117,90 @@ def main():
     tl._nudge_anim.timeout.disconnect()
     tl._nudge_anim.timeout.connect(step_medido)
 
-    # ------------------------------------------------ 1) un paso de rueda hacia abajo: 18 px más tarde
+    fps = float(ctrl.project.fps or 30)
+
+    def src(cid):
+        return ctrl.project.clips[cid].source_in
+
+    src0 = {i: src(i) for i in ids_a}
+    # ------------------------------------------------ 1) un paso de rueda hacia abajo: enseña material de más adelante
     pasos0 = ctrl.undo_stack.index()
     x, y = centro(a[0])
     rueda(app, tl, x, y, -120)
     pump(app, 0.15)
-    assert abs(inicio(a[0]) - 2.0) < 1e-9, "el proyecto NO debe cambiar mientras se desliza"
-    assert tl._nudge is not None and tl._nudge["d"]["dt"] > 0, "debería estar deslizándose"
+    assert abs(src(a[0]) - src0[a[0]]) < 1e-9, "el proyecto NO debe cambiar mientras se desliza"
+    assert tl._nudge is not None and tl._nudge["d"]["dt"] > 0, "debería estar deslizando el contenido"
     pump(app, 0.6)                                   # deja de girar: se aplica
-    esperado = 2.0 + 18 / 60.0
+    esperado = round((18 / 60.0) * fps) / fps
     assert tl._nudge is None, "debería haberse aplicado"
     for i in ids_a:
-        assert abs(inicio(i) - esperado) < 1e-6, (i, inicio(i), esperado)
+        assert abs(inicio(i) - 2.0) < 1e-9, "el clip NO se mueve"
         assert abs(ctrl.project.clips[i].duration - dur0[i]) < 1e-9, "no debe cambiar de tamaño"
+        assert abs(src(i) - (src0[i] + esperado)) < 1e-6, (i, src(i), esperado)
     assert ctrl.undo_stack.index() == pasos0 + 1, "un solo paso de Ctrl+Z"
-    intermedias = [d for d in posiciones if 1e-6 < d < 18 / 60.0 - 1e-6]
-    print(f"✓ 1 paso de rueda: +{18 / 60.0:.3f} s (imagen y sonido juntos, mismo tamaño), un solo Ctrl+Z; "
-          f"{len(intermedias)} posiciones intermedias")
+    intermedias = sorted({round(d, 6) for d in posiciones if 1e-6 < d < esperado - 1e-6})
+    print(f"✓ 1 paso de rueda: enseña {esperado:.3f} s más adelante del archivo (imagen y sonido; mismo sitio y "
+          f"tamaño), un solo Ctrl+Z; {len(intermedias)} posiciones intermedias")
     assert len(intermedias) >= 6, f"poco suave: solo {len(intermedias)} posiciones intermedias"
     ctrl.undo_stack.undo()
-    assert abs(inicio(a[0]) - 2.0) < 1e-9
-    print("✓ Ctrl+Z lo devuelve a su sitio")
+    assert abs(src(a[0]) - src0[a[0]]) < 1e-9
+    print("✓ Ctrl+Z lo devuelve a lo de antes")
     tl.set_selection(ids_a)
 
-    # ------------------------------------------------ 2) muchos pasos: se detiene al tocar B (A acaba en 9 s)
+    # ------------------------------------------------ 2) muchos pasos: se para donde acaba el archivo (10 s)
     x, y = centro(a[0])
     pintados.clear()
-    posiciones.clear()
     t0 = time.perf_counter()
-    for _ in range(40):
+    for _ in range(60):
         rueda(app, tl, x, y, -120)
         pump(app, 0.012)
     pump(app, 0.7)
     dur_anim = time.perf_counter() - t0
-    assert abs(inicio(a[0]) - 6.0) < 1e-6, f"debería quedarse pegado a B: {inicio(a[0])}"
-    assert abs(ctrl.project.clips[a[0]].end - inicio(b[0])) < 1e-6
-    print(f"✓ 40 pasos: se detiene justo al tocar el clip de al lado (A acaba en {ctrl.project.clips[a[0]].end:.2f} s,"
-          f" B empieza en {inicio(b[0]):.2f} s)")
+    ca = ctrl.project.clips[a[0]]
+    assert abs(ca.source_in + ca.duration * ca.speed - 10.0) < 1e-6, f"debería llegar al final del archivo: {ca.source_in}"
+    assert abs(inicio(a[0]) - 2.0) < 1e-9
+    print(f"✓ 60 pasos: se para justo donde acaba el archivo (enseña del segundo {ca.source_in:.2f} al 10)")
     if pintados:
         pintados_s = sorted(pintados)
         med = pintados_s[len(pintados_s) // 2]
         p95 = pintados_s[int(len(pintados_s) * 0.95) - 1] if len(pintados_s) > 1 else pintados_s[0]
-        print(f"  · suavidad: {len(pintados)} repintados en {dur_anim:.2f} s, mediana {med:.1f} ms, "
-              f"p95 {p95:.1f} ms, máx {max(pintados):.1f} ms")
+        print(f"  · suavidad: {len(pintados)} repintados en {dur_anim:.2f} s, mediana {med:.1f} ms, p95 {p95:.1f} ms")
         assert p95 < 16, f"repintados demasiado lentos para 60 fps: p95 {p95:.1f} ms"
 
-    # ------------------------------------------------ 3) hacia atrás: nunca antes del segundo 0
+    # ------------------------------------------------ 3) hacia atrás: nunca antes del principio del archivo
     tl.set_selection(ids_a)
     x, y = centro(a[0])
     for _ in range(80):
         rueda(app, tl, x, y, 120)
         pump(app, 0.004)
     pump(app, 0.7)
-    assert abs(inicio(a[0])) < 1e-6, f"debería quedarse en 0: {inicio(a[0])}"
-    print("✓ hacia atrás se detiene en el segundo 0")
+    assert abs(src(a[0])) < 1e-6, f"debería quedarse en el principio del archivo: {src(a[0])}"
+    print("✓ hacia atrás se para en el principio del archivo")
 
-    # ------------------------------------------------ 4) imán: se pega a la palabra clave
-    tl.set_hint_marks([(1.52, "🎬 GTA 6")])
-    tl.set_selection(ids_a)
-    x, y = centro(a[0])
-    for _ in range(5):                               # 0 → 0.3 → … → 1.5: la palabra está en 1.52
-        rueda(app, tl, x, y, -120)
-        pump(app, 0.03)
-    pump(app, 0.7)
-    assert abs(inicio(a[0]) - 1.52) < 1e-6, f"debería pegarse a la palabra clave (1.52): {inicio(a[0])}"
-    print("✓ se pega a la palabra clave (empieza justo en «GTA 6»)")
-
-    # ------------------------------------------------ 5) imán al cabezal + el visor enseña el cuadro en vivo
-    tl.set_hint_marks([])
+    # ------------------------------------------------ 5) el visor enseña el cuadro en vivo
     tl.set_playhead(3.1)
     w.engine.user_seek(3.1)
-    vistos: list[tuple[float, float]] = []           # (tiempo pedido al visor, inicio de A en ese momento)
+    vistos: list[tuple[float, float]] = []           # (tiempo pedido al visor, parte que enseña A en ese momento)
     orig_seek = w.engine.user_seek
 
     def seek_espia(t):
-        vistos.append((t, ctrl.project.clips[a[0]].start))
+        vistos.append((t, ctrl.project.clips[a[0]].source_in))
         orig_seek(t)
     tl.seek_requested.disconnect(w.engine.user_seek)
     tl.seek_requested.connect(seek_espia)
     tl.set_selection(ids_a)
     x, y = centro(a[0])
-    for _ in range(5):                               # 1.52 → … → 3.02: el cabezal (3.1) atrae el principio
+    for _ in range(5):
         rueda(app, tl, x, y, -120)
         pump(app, 0.03)
     pump(app, 0.15)
     assert vistos, "el visor debería recibir el cuadro mientras se desliza"
-    assert all(abs(s - 1.52) > 1e-6 for _t, s in vistos[:-1]) or len(vistos) == 1, \
-        "durante la vista previa el clip debe estar en su sitio nuevo"
-    assert abs(inicio(a[0]) - 1.52) < 1e-9, "fuera de la vista previa el proyecto sigue igual"
+    assert any(s_ > 1e-6 for _t, s_ in vistos), "durante la vista previa el clip enseña su parte nueva"
+    assert all(abs(t_ - 3.1) < 1e-6 for t_, _s in vistos), "con el cabezal dentro del clip, se ve ese instante"
+    assert abs(src(a[0])) < 1e-9, "fuera de la vista previa el proyecto sigue igual"
     pump(app, 0.7)
-    assert abs(inicio(a[0]) - 3.1) < 1e-6, f"debería pegarse al cabezal (3.1): {inicio(a[0])}"
-    assert abs(vistos[-1][0] - 3.1) < 1e-6, "al aplicar, el visor vuelve al cabezal"
-    print(f"✓ se pega al cabezal; el visor recibió {len(vistos)} cuadros en vivo y vuelve al cabezal al terminar")
+    assert src(a[0]) > 0.5 and abs(vistos[-1][0] - 3.1) < 1e-6
+    print(f"✓ el visor recibió {len(vistos)} cuadros en vivo (en el cabezal) y el proyecto solo cambia al aplicar")
     tl.seek_requested.disconnect(seek_espia)
     tl.seek_requested.connect(w.engine.user_seek)
 
@@ -226,6 +217,7 @@ def main():
     # ------------------------------------------------ 7) un clic a mitad aplica lo pendiente
     tl.set_selection(ids_a)
     x, y = centro(a[0])
+    before_click = src(a[0])
     rueda(app, tl, x, y, 120)
     pump(app, 0.2)
     from PySide6.QtCore import QEvent
@@ -237,7 +229,7 @@ def main():
                      Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
     QApplication.sendEvent(tl, ev)
     pump(app, 0.1)
-    assert tl._nudge is None and inicio(a[0]) < 3.1 - 1e-6, "un clic debería aplicar el deslizamiento pendiente"
+    assert tl._nudge is None and src(a[0]) < before_click - 1e-6, "un clic debería aplicar el slip pendiente"
     print("✓ un clic a mitad aplica lo que llevabas deslizado")
 
     ctrl.undo_stack.setClean()

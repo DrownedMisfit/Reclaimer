@@ -149,6 +149,11 @@ def main():
             res = S.silent_ranges_voice(*args, hybrid=True, protect="resolve")
             e_med = eaten_ms(med, clean, fl)
             assert e_med <= 70, (noise_db, name, "media", e_med)
+            dav = S.silent_ranges_voice(*args, hybrid=True, protect="davinci")     # 🎚 «Como DaVinci» (la de entrada)
+            e_dav = eaten_ms(dav, clean, fl)
+            assert e_dav <= 70, (noise_db, name, "davinci", e_dav)
+            worst_dav = max(globals().get("_worst_dav", 0.0), e_dav)
+            globals()["_worst_dav"] = worst_dav
             tot = lambda r: sum(b - a for a, b in r)   # noqa: E731
             assert tot(res) >= tot(med) - 0.05 >= tot(hyb) - 0.3, (noise_db, name, tot(hyb), tot(med), tot(res))
             worst_med = max(worst_med, e_med)
@@ -164,6 +169,15 @@ def main():
                  for t in (-50, -40, -30, -20)]
         assert all(b >= a - 0.05 for a, b in zip(sweep, sweep[1:])) and sweep[-1] > sweep[0] + 2, sweep
         print("  ✓ «Como Resolve»: el umbral manda (-50 → -20 dB: " + " → ".join(f"{x:.1f}" for x in sweep) + " s)")
+        sweep_d = [sum(b - a for a, b in S.silent_ranges_voice(an, 60.0, t, 0, 1, 2, hybrid=True, protect="davinci"))
+                   for t in (-50, -40, -30, -20)]
+        sweep_m = [sum(b - a for a, b in S.silent_ranges_voice(an, 60.0, t, 0, 1, 2, hybrid=True, protect="media"))
+                   for t in (-50, -40, -30, -20)]
+        assert all(b >= a - 0.05 for a, b in zip(sweep_d, sweep_d[1:])), sweep_d
+        assert sweep_d[-1] - sweep_d[0] > max(0.3, sweep_m[-1] - sweep_m[0]), (sweep_d, sweep_m)
+        print("  ✓ «Como DaVinci»: el umbral se nota (-50 → -20 dB: " + " → ".join(f"{x:.1f}" for x in sweep_d)
+              + f" s; con «Media»: {sweep_m[0]:.1f} → {sweep_m[-1]:.1f} s) y como mucho "
+              f"{globals().get('_worst_dav', 0):.0f} ms de voz tocados")
 
     # --- la ventana y el clic derecho
     from PySide6.QtWidgets import QApplication
@@ -182,11 +196,16 @@ def main():
     atr = next(t for t in ctrl.project.tracks if t.kind == TRACK_AUDIO)
     ctrl.add_media([mid], atr.id, 0.0)
     cid = ctrl.project.clips_on(atr.id)[0].id
+    from PySide6.QtCore import QSettings
+    _qs = QSettings("EditorIA", "EditorIA")             # (como un usuario nuevo: sin último ajuste guardado)
+    for _k in ("silencio/ultimo", "silencio/davinci_visto"):
+        _qs.remove(_k)
     dlg = SilenceDialog(win, [cid])
     assert dlg.mode.currentData() == "hibrido", dlg.mode.currentData()
-    assert dlg.protect.isEnabled() and dlg.protect.currentData() == "max", dlg.protect.currentData()
+    assert dlg.protect.isEnabled() and dlg.protect.currentData() == "davinci", dlg.protect.currentData()
     dlg.mode.setCurrentIndex(dlg.mode.findData("voz"))
     assert not dlg.protect.isEnabled()
+    assert "Voz precisa" in dlg.ctl["threshold_db"][1].toolTip(), "en «Voz precisa» el umbral explica lo que hace"
     dlg.mode.setCurrentIndex(dlg.mode.findData("hibrido"))
     dlg.protect.setCurrentIndex(dlg.protect.findData("resolve"))
     assert dlg.settings()["protect"] == "resolve"

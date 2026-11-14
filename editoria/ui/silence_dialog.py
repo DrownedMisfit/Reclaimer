@@ -163,18 +163,17 @@ class SilenceDialog(QDialog):
         prow2 = QHBoxLayout()
         prow2.addWidget(QLabel("🛡 Protección de la voz"))
         self.protect = QComboBox()
+        self.protect.addItem("Como DaVinci (recomendado)", "davinci")
         self.protect.addItem("Máxima", "max")
         self.protect.addItem("Media", "media")
-        self.protect.addItem("Como Resolve", "resolve")
+        self.protect.addItem("Solo el umbral (sin proteger)", "resolve")
         self.protect.setToolTip(
-            "Solo con «🎚 Híbrido». En una grabación con puerta de ruido las pausas ya son silencio total con cualquier "
-            "umbral: lo único que un umbral más alto puede quitar de más es voz (finales y sílabas suaves). Aquí eliges "
-            "cuánto mandas tú:\n"
-            "· Máxima: no se come voz (con micro con puerta, el umbral casi no cambia nada).\n"
-            "· Media: más cortes y el umbral se nota; la voz que la IA reconoce con seguridad no se toca (como mucho, "
-            "algún final muy suave).\n"
-            "· Como Resolve: el umbral decide todo, igual que DaVinci Resolve (puede comerse finales suaves; solo se "
-            "salvan las «s» y «f»).")
+            "Solo con «🎚 Híbrido». Cuánto mandas tú con el umbral:\n"
+            "· Como DaVinci: el umbral decide lo que se quita, igual que en DaVinci Resolve (moverlo se nota), y "
+            "solo se protege la voz clara (donde la IA está segura de que hablas y se te oye bien).\n"
+            "· Máxima: no se come voz nunca; el umbral casi no cambia nada (manda la IA).\n"
+            "· Media: como Máxima, pero quita también microsilencios muy callados entre palabras.\n"
+            "· Solo el umbral: el umbral decide todo, sin proteger la voz (puede comerse finales suaves).")
         self.protect.currentIndexChanged.connect(lambda _i: self._changed())
         prow2.addWidget(self.protect, 1)
         mb.addLayout(prow2)
@@ -424,8 +423,17 @@ class SilenceDialog(QDialog):
         self._sync_protect()
 
     def _sync_protect(self):
-        """La protección de la voz es del modo híbrido."""
+        """La protección de la voz es del modo híbrido; en «Voz precisa» manda la IA y el umbral no se usa."""
         self.protect.setEnabled(self.mode.currentData() == "hibrido")
+        voz = self.mode.currentData() == "voz"
+        sl, spin = self.ctl["threshold_db"]
+        for w in (sl, spin):
+            w.setToolTip("En «🎙 Voz precisa» decide la IA (dónde hablas): el umbral solo hace que lo que suene más fuerte "
+                         "que él se conserve siempre (risas, gritos, golpes). Para que el umbral mande, «🎚 Híbrido» "
+                         "con «Como DaVinci»." if voz else
+                         "Por debajo de este volumen se considera silencio (más bajo = solo lo muy callado), como en "
+                         "DaVinci Resolve. Con «Híbrido», lo que pase de este volumen y destaque del ruido se conserva "
+                         "siempre (risas, gritos, golpes fuertes).")
 
     def _last(self) -> dict:
         qs = QSettings("EditorIA", "EditorIA")
@@ -438,6 +446,13 @@ class SilenceDialog(QDialog):
             qs.setValue("silencio/hibrido_visto", "true")
             if st.get("mode", "voz") == "voz":
                 st = dict(st, mode="hibrido")
+        # 🎚 «Como DaVinci» (el umbral manda): la primera vez se pone, también si venías de «Voz precisa» o «Media»
+        # (ahí el umbral no cambiaba nada); luego se respeta lo que elijas
+        if str(qs.value("silencio/davinci_visto", "false")).lower() != "true":
+            qs.setValue("silencio/davinci_visto", "true")
+            st = dict(st, mode="hibrido" if st.get("mode", "hibrido") in ("voz", "hibrido") else st.get("mode"),
+                      protect="davinci")
+            qs.setValue("silencio/ultimo", json.dumps(st))   # (si cierras sin eliminar, se queda igual)
         return st
 
     def _load_preset(self, i: int):
@@ -481,8 +496,34 @@ class SilenceDialog(QDialog):
             self.info.setText(f"Se quitarán <b>{n} silencio{'s' if n != 1 else ''} · {_dur(total)}</b>"
                               + warn + getattr(self, "_words_note", ""))
         else:
-            self.info.setText("Con estos ajustes no hay silencios que quitar.")
+            self.info.setText("Con estos ajustes no hay silencios que quitar." + self._why_none(p, clips))
         self.b_ok.setEnabled(bool(self.regions))
+
+    def _why_none(self, p, clips) -> str:
+        """Por qué no se quita nada: pausas por debajo del umbral más cortas que el mínimo o que los márgenes."""
+        if self.mode.currentData() == "voz":
+            return ("<br>En «🎙 Voz precisa» manda la IA, no el umbral: cambia a «🎚 Híbrido» con «Como DaVinci» para "
+                    "que el umbral mande.")
+        try:
+            st = self.settings()
+            d = S.short_pauses(p, clips, self.fps, st)
+        except Exception:  # noqa: BLE001 - sin explicación, el aviso de siempre
+            return ""
+        if not d["total"]:
+            return (f"<br>Nada baja de {st['threshold_db']:.1f} dB: sube el umbral (más cerca de 0) para que cuente como "
+                    "silencio lo que es más fuerte.")
+        # ¿bajando el mínimo y los márgenes saldría algo? (se comprueba de verdad: si no, el consejo sería falso)
+        try:
+            prueba = S.plan(p, clips, self.fps, dict(st, min_frames=1, before=0, after=0, learned=None))
+        except Exception:  # noqa: BLE001
+            prueba = []
+        if prueba:
+            return (f"<br>Hay {d['total']} pausas por debajo del umbral, pero son más cortas que «Mínimo a eliminar» "
+                    f"({d['min_frames']} fotogramas) o se las comen los márgenes: bajándolos se quitarían "
+                    f"{len(prueba)} (las de 1–3 fotogramas suelen ser pausas entre palabras: puede sonar cortado).")
+        return (f"<br>Hay {d['total']} pausas por debajo del umbral, pero están dentro de tu voz (sílabas flojas o el "
+                "cierre de una «p», «t» o «k»): quitarlas se comería palabras. "
+                + ("Si aun así quieres, «Solo el umbral» en la protección." if st.get("protect") != "resolve" else ""))
 
     def _apply(self):
         from ..core import silence_learn as SL

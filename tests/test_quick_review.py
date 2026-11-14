@@ -145,7 +145,7 @@ def prueba_revision(app, win, ctrl, mid, A, V1, qr_mod):
     check(all(s.status == SUG_PENDING for s in (s_sil1, s_fil, s_sil2)), "tres propuestas pendientes")
 
     qr = qr_mod(win)
-    qr.start()
+    qr.start("voz")                      # (la parte de la voz, como la antigua revisión rápida)
     kinds = [it.kind for it in qr.queue]
     check(kinds == ["cut", "sug", "sug", "sug"], f"la cola: primero el corte dudoso y luego las propuestas ({kinds})")
     ts = [it.t for it in qr.queue]
@@ -205,7 +205,7 @@ def prueba_revision(app, win, ctrl, mid, A, V1, qr_mod):
     check(len(calls) > n_calls, "P vuelve a escuchar")
 
     # 8) Reabrir: solo queda lo pendiente (el silencio final, otra vez)
-    qr.start()
+    qr.start("voz")                      # (la parte de la voz, como la antigua revisión rápida)
     check(len(qr.queue) == 1 and qr.queue[0].kind == "sug", "al reabrir, solo queda lo pendiente")
 
     # 9) Esc cierra

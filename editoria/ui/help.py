@@ -43,7 +43,7 @@ pone una imagen; <b>[MÚSICA: tensa]</b> y <b>[NOTA: …]</b> solo dejan un marc
 </ul>«✓ Montar» hace todo en UN solo paso: quita las tomas descartadas en todas las pistas. Ctrl+Z lo deshace todo."""),
     "montaje_guiado": ("🧭 Montaje guiado", """
 Los pasos de un montaje en orden: importar, quitar silencios, revisar los cortes dudosos, poner los clips
-de lo que dices, la revisión rápida, la miniatura y la entrega.<br><br>
+de lo que dices, la revisión guiada, la miniatura y la entrega.<br><br>
 Cada paso muestra su estado y tiene su botón. Lo que hagas aquí es el mismo proyecto que en las demás páginas."""),
     "analizar_clips": ("◈ Analizar clips con IA", """
 La IA mira varios fotogramas de cada clip y anota su <b>tipo</b> (Gameplay, Cinemáticas, Menús…) y
@@ -67,9 +67,39 @@ a pantalla completa. <b>Alt + arrastrar / Alt + rueda</b> = mover o acercar la i
     "timeline": ("Timeline", """
 <ul>
 <li><b>Arrastrar</b> un clip = moverlo · <b>arrastrar su borde</b> = recortarlo · <b>S</b> = dividir en el cabezal.</li>
+<li><b>🥁 Ritmo</b> (botón 🥁 en la esquina, junto a 🔑): en la regla, una rayita en cada golpe de la música (más
+larga al empezar cada compás), punto naranja en los golpes fuertes y línea roja <b>💥 drop</b>, con guías finas sobre
+las pistas en cada compás. Al elegir una canción se escucha sola (una vez; luego queda guardado). Al arrastrar o cortar,
+el imán se pega a los golpes y dice a qué se pegó (golpe, compás o drop). <b>Clic derecho en 🥁</b>: marcadores en el
+drop y en cada parte, o en cada compás (numerados); volver a escuchar; imán a los golpes sí/no.</li>
+<li><b>Barra de la línea de tiempo</b>: <b>✨ B-roll</b> (la IA propone clips para lo que dices), <b>🎬 Escenas</b>
+(corta los clips elegidos en cada cambio de escena), <b>📱 Vertical</b> (solo en Shorts y Edits: el recorte sigue la
+acción), <b>🖼 Miniatura</b> y <b>⬆ Exportar</b>. En <b>⋯ Más</b>: ⚡ Ráfaga de cortes al ritmo y 〰 Curvas. Si la
+ventana es estrecha, los botones enseñan solo su icono (el nombre sale al pasar el ratón). Lo de la IA también está en
+el menú <b>IA ✨</b>.</li>
 <li><b>Supr</b> = eliminar · <b>Mayús+Supr</b> = eliminar y cerrar el hueco · <b>Ctrl+L</b> = bloquear el clip.</li>
+<li><b>🔑 Palabras clave</b> (botón 🔑 arriba de los nombres de las pistas): en la regla sale cada vez que dices una
+palabra que tiene carpeta (Medios → 🔑 Palabras clave; también carpetas de tu PC), con lo que va: 🎮 gameplay,
+🎬 cinemática, 🖼 imagen o ✕ nada (sugerido por lo que dices y por las subcarpetas «Gameplay» / «Cinemáticas»).
+<b>Clic</b> en una = cambiarla · <b>clic derecho</b> = elegir, cambiar todas las de esa palabra, la secuencia.
+<b>⚡</b> = acomodar todo de una vez: cada mención toma el trozo siguiente de su material (la historia avanza contigo,
+sin repetir; los archivos en orden 01, 02…; con las huellas de la IA, el momento que más se parece a lo que dices),
+con la duración de tu frase. Un Ctrl+Z lo quita.</li>
+<li><b>Imán</b> (N; pulsando N mientras arrastras, se quita o se pone solo para ese arrastre, como en Resolve; la
+cuchilla también se pega a los bordes de otros clips y al cabezal; sin imán, todo cae justo en un fotograma): al
+arrastrar se ve a qué se pegó (línea amarilla con su nombre: clip, cabezal, palabra clave,
+golpe…). En Timeline: <b>🗣 Imán también a las palabras de la narración</b> (apagado de entrada: cortes justo entre
+palabras) y <b>🧲 Pista principal magnética</b> (apagada de entrada: en la pista de video de abajo no quedan huecos;
+Supr y recortar un borde adelantan lo de detrás en TODAS las pistas, así nada se desincroniza; si tu narración pasa
+por debajo del hueco, no junta y avisa; Mayús+borde recorta sin juntar). <b>Mayús+Z</b> = ver todo el video.</li>
 <li><b>J / K / L</b> = atrás / parar / adelante · <b>I / O</b> = entrada / salida del tramo · <b>R</b> = velocidad · <b>Mayús+R</b> = congelar la imagen.</li>
-<li><b>M</b> = marcador · <b>T</b> = texto en pantalla · <b>Ctrl+rueda</b> = zoom de la timeline · <b>Alt+rueda</b> encima de un clip elegido = deslizarlo hacia atrás / delante (mismo tamaño; se para al tocar otro clip y se pega a las palabras clave y al cabezal); en otro sitio = subir / bajar las pistas.</li>
+<li><b>M</b> = marcador · <b>T</b> = texto en pantalla · <b>Ctrl+rueda</b> = zoom de la timeline · <b>Alt+rueda</b> encima de un clip elegido = <b>deslizar su contenido</b> (slip): el clip se queda en su sitio y con
+su tamaño, pero enseña otra parte de su video (para buscar el trozo justo; su sonido vinculado se desliza con él; se
+para al llegar al principio o al final del archivo); en otro sitio = subir / bajar las pistas.</li>
+<li><b>Ctrl++</b> = juntar: con una pista elegida, cierra sus huecos; si ahí no hay nada que juntar, cierra los
+huequitos y solapes diminutos (hasta 2 fotogramas) de las demás pistas; sin pista elegida (clic en una zona vacía),
+junta toda la línea de tiempo. Las uniones se ven: una línea fina = unión limpia; marca <b>roja</b> = huequito,
+<b>naranja</b> = solape (pasa el ratón para ver cuánto).</li>
 <li><b>✨ Ideas para esto</b> (clic derecho en uno o varios clips): entrada animada, sombra, contorno y dónde
 ponerlo, con un clic. Las capturas de texto se proponen como tarjeta; varios clips, escalonados. Ctrl+Z.</li>
 <li><b>⊞ Composición</b> (botón del visor): elige cuántos huecos (2, 3, 4, 6, 9) y arrastra desde Medios a cada
@@ -105,7 +135,13 @@ Haz clic en una línea para volver a ese punto (como pulsar Ctrl+Z varias veces)
 solos con fondo desenfocado (como en tus Shorts), los subtítulos usan el estilo «Mis Shorts», las etiquetas
 van encima del video, la comparación se pone arriba y abajo, y el B-roll cambia cada 2–3 s.<br>
 <b>Edit musical</b> (9:16): videos sin comentario donde manda la música.
-Para montarlo solo: pestaña IA ✨ → «🎵 Edit musical» (Ctrl+M).<br><br>
+Para montarlo solo: pestaña IA ✨ → «🎵 Edit musical» (Ctrl+M). En la pestaña <b>Edits</b> no es una ventanita: las
+opciones están a la derecha y los clips, con miniaturas grandes, a la izquierda.<br><br>
+<b>Cada pestaña tiene sus paneles</b>: YouTube enseña 🔑 Palabras clave y 🎞 Material del clip (sin Texto ni
+Subtítulos); Edits, el edit musical y 🔑 Palabras clave; Shorts, la voz, el Texto y los Subtítulos. Lo que enciendas o
+apagues tú desde el menú Ventana se recuerda en esa pestaña.<br>
+<b>¿Empezaste en la pestaña equivocada?</b> Menú «🔄 Reinicio» → «↪ Cambiar este proyecto a…»: lo lleva a YouTube,
+Edits o Shorts con su formato y lo quita de la pestaña de origen (que queda vacía). Ctrl+Z devuelve el formato.<br><br>
 Resolución y fotogramas por segundo del video. Para ver y cambiar las propiedades de un clip,
 selecciónalo en la timeline."""),
     "edit_musical": ("Crear edit musical", """
@@ -159,9 +195,19 @@ visor» toma lo que ves en el video), T Texto, ◆ Elementos (formas, flecha, de
 al texto), ▦ Fondo y ☰ Capas (ocultar, bloquear, ordenar).<br>
 <b>Lienzo</b>: clic = elegir; arrastra para mover (se pega al centro y a los tercios); esquinas = tamaño; círculo
 de arriba = girar (Mayús: de 15 en 15). Supr = borrar, Ctrl+D = duplicar, flechas = mover poquito.<br>
+<b>Palabras sueltas</b>: doble clic en una palabra la elige (después, Ctrl + clic añade o quita y Ctrl + arrastrar elige las que
+toques). La barra y el panel cambian solo lo elegido; ↺ la devuelve al estilo del texto y un clic normal deja de
+elegir.<br>
 <b>Derecha</b>: las opciones de lo elegido: texto (fuente, tamaño, grosor, espaciado…), ajustes de imagen
 (exposición, contraste, saturación, temperatura, sombras, luces, nitidez, desenfoque, viñeta), recorte, y
-efectos (contorno, sombra, brillo). Se guarda con el proyecto."""),
+efectos (contorno, sombra, brillo; <b>➕ Otro contorno por fuera</b> apila hasta 3 más). En un texto, <b>Relleno</b> =
+color, degradado o una imagen dentro de las letras. <b>Fusión</b> (Multiplicar, Trama…) = cómo se mezcla con lo de
+debajo. En una imagen, <b>🌗 Bordes suaves</b> (difuminar el borde o fundirla desde un lado) y <b>🔁 Cambiar la imagen</b>
+(otra en su lugar, con su tamaño y efectos). El pincel tiene <b>dureza</b> y <b>opacidad</b>.<br>
+<b>⭐ Mis estilos</b> (arriba a la derecha): «💾 Guardar este estilo» guarda el aspecto de lo elegido; clic en un estilo =
+ponérselo a lo elegido (con palabras elegidas, solo a ellas); clic derecho = renombrar, actualizar o borrar.<br>
+<b>📐 Plantillas → 🖼 Guardar como plantilla con huecos</b>: las imágenes quedan como huecos; suelta una imagen en cada
+uno (o elige el hueco y haz clic en «Material») y ocupa justo su sitio, con sus efectos. Se guarda con el proyecto."""),
     "mapa_ia": ("Qué puede hacer la IA", """
 Cada tarjeta es una herramienta de la IA: <b>qué hace</b> (el nombre), <b>qué encontró o hizo ya</b> (la línea
 gris: «✓ 7 temas», «Reconoce 3 nombres»…) y <b>un clic para usarla</b>. La IA propone; tú decides:
@@ -272,7 +318,10 @@ El ruido y la estabilización se ven al exportar o con <b>«▶ Ver cómo queda�
 Como el «Eliminar silencio» de DaVinci Resolve: quita los tramos callados de los clips seleccionados (o de la
 narración si no hay nada seleccionado), midiendo el sonido (no hace falta transcribir). También con <b>clic derecho
 en un audio → «✂ Eliminar silencios»</b>.<br><br>
-<b>Detección «🎙 Voz precisa»</b> (por defecto): una IA reconoce dónde HABLAS (no la engaña el ruido de fondo: ventilador,
+<b>De entrada: «🎚 Híbrido» con protección «Como DaVinci»</b>: el <b>umbral manda</b>, igual que en Resolve (moverlo cambia
+lo que se quita), y solo se protege tu voz clara y los finales suaves que la IA reconoce como voz. Si no se quita
+nada, el aviso dice por qué (p. ej. «hay 917 pausas bajo el umbral, pero más cortas que el mínimo»: bájalo).<br>
+<b>Detección «🎙 Voz precisa»</b>: manda la IA (el umbral se desactiva): reconoce dónde HABLAS (no la engaña el ruido de fondo: ventilador,
 teclado, el juego) y cada borde se ajusta cada 5 ms hasta que el sonido de verdad se apaga, también las «s» y «f»
 suaves del final y los arranques flojos. Nunca recorta la voz: solo la alarga, y los cortes se redondean hacia el
 silencio. «🔊 Solo volumen» corta exactamente como Resolve (con voz baja o ruido se puede comer palabras).<br>
@@ -388,7 +437,10 @@ parecido</b> (lo mismo con otras palabras; solo se avisa, no se tacha solo).<br>
 <b>Mis muletillas</b>: las que sabes que dices, separadas por comas («¿por qué?, la verdad»). Con «?» solo cuenta si
 es una pregunta suelta. Las coletillas «¿no?», «¿verdad?», «¿me explico?» se buscan siempre.<br><br>
 <b>No corta nada por su cuenta</b>: todo aparece como sugerencia. «Volver a analizar» repite la búsqueda con
-estas opciones sin transcribir de nuevo."""),
+estas opciones sin transcribir de nuevo.<br><br>
+<b>📝 Por bloques</b>: la transcripción va del segundo 0 al final y cada 3 minutos de audio deja lo hecho en el
+proyecto (Texto, subtítulos, palabras clave): puedes ir usándolo sin esperar al final. Si se corta, lo hecho se queda
+y «🎙 Seguir transcribiendo» continúa desde ahí."""),
     "sugerencias": ("Sugerencias de la IA", """
 <ul><li><b>▶ Escuchar</b> (o doble clic): oyes ese momento.</li>
 <li><b>✓ Aplicar</b>: se corta en todas las pistas y se cierra el hueco (voz y video siguen sincronizados).
@@ -512,7 +564,13 @@ Se aplica al tema bajo el cabezal, o a «de 1:20 a 1:40», o «durante 20 segund
 <b>📍 Leer instrucciones de los marcadores</b>: aplica lo que hayas escrito en los marcadores de la timeline."""),
     "revision": ("Revisión del proyecto", """
 Nada se cambia solo: tú decides qué corregir. Doble clic en un aviso = ir a ese momento (y seleccionar el clip).
-⛔ = casi seguro un fallo · ⚠️ = posible problema · ℹ️ = sugerencia."""),
+⛔ = casi seguro un fallo · ⚠️ = posible problema · ℹ️ = sugerencia.<br><br>
+<b>✓ Revisión guiada</b> (botón «Revisarlos uno a uno» o Ctrl+Shift+Q): en vez de ver el video entero, te lleva SOLO a
+lo que la IA no tiene claro, uno a uno y en orden: lo que la limpieza de voz quiere quitar, los cortes de audio
+dudosos, estos avisos y el B-roll que la IA puso solo por parecido. Lo escuchas y decides con teclas:
+<b>Enter</b> = lo que propone la IA (cortar, aplicar la sugerencia, poner otro clip, rellenar un negro) ·
+<b>O</b> = está bien así (no vuelve a salir) · <b>Supr</b> = rechazar o quitar ese clip de encima ·
+<b>→</b> saltar · <b>←</b> anterior · <b>P</b> volver a escuchar · <b>Esc</b> cerrar. Cada decisión, un Ctrl+Z."""),
     "shorts_video": ("✂ Shorts desde este video", """
 Reclaimer busca en tu narración los mejores momentos para Shorts de 45 a 75 segundos (voz con energía, temas y
 nombres que salen, y que empiezan y acaban en pausa).<br>
@@ -557,12 +615,12 @@ La IA (Demucs, en tu tarjeta gráfica) separa las VOCES de la música del juego,
 · En un clip: clic derecho → ✨ IA → «🗣 Separar los diálogos del ruido de fondo» (y «Volver al sonido original»).<br>
 · En el edit musical: «Opción de sonido» → «Solo los diálogos (sin el ruido de fondo)». La canción no se toca.<br>
 Se hace una vez por archivo y se guarda (la siguiente vez es instantáneo)."""),
-    "palabras_clave": ("🔑 Palabras clave", """
+    "buscar_palabras": ("🗣 Buscar lo que se dice", """
 Escribe palabras o frases («Marcus, la traición, explosión») y te dice DÓNDE se dicen, gastando poco:
 solo escucha donde hay voz (se salta la música, el ruido y el silencio), con un modelo pequeño, y deja la tarjeta
 gráfica libre. Tolera acentos y pequeños errores («Marcos» encuentra «Marcus»). Lo escuchado se guarda: buscar
 otra palabra en el mismo archivo es instantáneo (y si ya lo transcribiste en «Limpieza», usa eso).<br>
-<b>Dónde</b>: pestaña IA ✨ → «🔑 Palabras clave», clic derecho en un clip (✨ IA) o en Medios.<br>
+<b>Dónde</b>: pestaña IA ✨ → «🗣 Buscar lo que se dice», clic derecho en un clip (✨ IA) o en Medios.<br>
 <b>Resultados</b>: doble clic = ir ahí · arrastrar a la línea de tiempo · «➕ Poner en el cabezal» ·
 «📍 Marcadores» (si buscaste en la línea de tiempo).<br>
 <b>Añadir en una palabra clave</b> (clic derecho en un clip o en Medios): «Por partes (recomendado)» pone un trozo
@@ -570,9 +628,19 @@ distinto en cada marca; «Entero» pone el video desde su principio hasta la sig
 <b>🔗</b> = archivo enlazado desde una carpeta de tu PC (no se copia; quitarlo no borra nada de tu PC)."""),
     "clips_dijiste": ("🎬 Dijiste…", """
 Lo que dices en la narración que parece un juego, una compañía o una palabra de tu vocabulario. Pulsa una palabra
-para ver sus momentos. <b>Clic derecho</b>: «✓ Es palabra clave» (la guarda en el glosario) o «✕ No es palabra
-clave» (no volverá a salir). Lo que internet confirma como juego lleva ✓; lo que dice que no lo es, va al final y
-atenuado."""),
+para ver sus momentos. A la derecha de cada palabra: <b>👍</b> = es palabra clave (se guarda en el glosario y se le crea su carpeta) ·
+<b>👎</b> = no lo es (no volverá a salir); también con <b>clic derecho</b>.
+<b>⚡ Agregar todo</b> pone de una vez el material de tus carpetas (lo descargado y lo de tu computadora) donde
+dices cada palabra clave, con la duración de tu frase y sin repetir; un Ctrl+Z lo quita.
+Todo lo que pongas desde Palabras clave (botones, doble clic o arrastrando) entra <b>sin su audio</b>: el sonido es
+tu narración. Si tu equipo tiene la búsqueda en internet, al bajar la casilla <b>🔇 Sin audio</b> (marcada de entrada) baja solo la imagen: más
+rápido y ocupa menos.
+<b>🗂 Carpetas</b> es una pestaña a la derecha (junto al Inspector) que enseña siempre la carpeta de la palabra
+elegida en «Dijiste…», en dos partes, «🌐 Descargado de internet» y «💻 De tu computadora», con botones para borrar lo
+elegido, todo lo descargado de esa palabra o «🧹 Borrar todo lo descargado» (a la Papelera; lo enlazado de tu PC
+solo se desvincula, nunca se borra). Lo que bajas de internet va a la carpeta de la palabra elegida, aunque busques
+otra cosa. Al final de «Dijiste…» salen, atenuadas, tus carpetas que no dices en la narración. Lo que internet confirma
+como juego lleva ✓; lo que dice que no lo es, va al final y atenuado."""),
     "glosario": ("📖 Glosario de palabras clave", """
 Dos listas: <b>Sí son palabras clave</b> (se buscan y se ofrecen en «Dijiste…» y en «✨ Crear de lo que dices») y
 <b>No son palabras clave</b> (nunca salen). Añade una palabra o frase con su tipo si quieres (juego, saga, consola…).

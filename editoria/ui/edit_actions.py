@@ -67,6 +67,9 @@ class EditBar(QFrame):
             self.setVisible(bool(self.ctrl.project.edits))
         except RuntimeError:
             pass
+        refit = getattr(self.win, "_tl_refit", None)      # (la barra de la línea de tiempo se vuelve a encajar)
+        if refit is not None:
+            refit()
 
     def _msg(self, text: str, ms: int = 9000):
         self.win.statusBar().showMessage(text, ms)

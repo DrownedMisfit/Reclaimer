@@ -25,7 +25,7 @@ from ..core import keyword_place as KP
 from ..core.model import AUDIO_EXT, IMAGE_EXT, KIND_AUDIO, KIND_IMAGE, VIDEO_EXT
 from ..core.organize import CATEGORY_ORDER, matches_query
 from . import help as help_ui
-from .common import MEDIA_MIME, fmt_time, modo_archivo_suelto
+from .common import MEDIA_MIME, NOAUDIO_MIME, fmt_time, modo_archivo_suelto
 from .help import add_help_action, set_help
 from .jobs import BackgroundJob
 
@@ -220,6 +220,8 @@ class MediaTree(QTreeWidget):
             return
         mime = QMimeData()
         mime.setData(MEDIA_MIME, QByteArray(",".join(ids).encode()))
+        if self.selectedItems() and all(it.data(0, ROLE_KW_KIND) == "file" for it in self.selectedItems()):
+            mime.setData(NOAUDIO_MIME, QByteArray(b"1"))     # 🔇 material de Palabras clave: sin su audio
         drag = QDrag(self)
         drag.setMimeData(mime)
         icon = self.currentItem().icon(0) if self.currentItem() else QIcon()
@@ -515,7 +517,15 @@ class LibraryPanel(QWidget):
             folders = []
         media = self.ctrl.project.media
         by_path = {os.path.normcase(os.path.abspath(m.path)): m for m in media.values()}
+        self._kw_sin_mini: list[str] = []
+        self._kw_items_ruta: dict[str, QTreeWidgetItem] = {}
+        self._kw_construyendo = True              # (los «expandir» de aquí no son clics del usuario)
+        if not hasattr(self, "_kw_iconos"):
+            self._kw_iconos: dict[str, QIcon] = {}          # ruta del archivo → su miniatura (no se relee al repintar)
+            self._kw_mini_fallidas: set[str] = set()         # sin miniatura posible (video roto): no se reintenta
         sec = QTreeWidgetItem([f"🔑 Palabras clave  ({len(folders)})"])
+        sec.setToolTip(0, "Tus carpetas de palabras clave: están en tu disco y valen para todos tus proyectos (por eso "
+                          "no se borran al reiniciar el proyecto). Para borrar lo descargado: pestaña 🗂 Carpetas.")
         sec.setData(0, ROLE_CATEGORY, KW_SECTION)
         sec.setFont(0, bold)
         sec.setFlags(Qt.ItemIsEnabled)
@@ -540,20 +550,118 @@ class LibraryPanel(QWidget):
                 ln.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 node.addChild(ln)
             enlazados = set(f["linked_files"])
+            visible = abierta and term not in self._kw_collapsed
             for path in f["files"]:
-                node.addChild(self._kw_file_item(path, term, path in enlazados, by_path))
+                it = self._kw_file_item(path, term, path in enlazados, by_path, cargar=visible)
+                self._kw_items_ruta[path] = it
+                node.addChild(it)
             node.setExpanded(term not in self._kw_collapsed)
         sec.setExpanded(abierta)
+        self._kw_construyendo = False
+        if self._kw_sin_mini:
+            self._kw_miniaturas(list(self._kw_sin_mini))
 
-    def _kw_file_item(self, path: str, term: str, linked: bool, by_path: dict) -> QTreeWidgetItem:
+    @staticmethod
+    def _kw_clave(path: str) -> str:
+        """La ruta de su miniatura (cambia si el archivo cambia: uno reemplazado no conserva la vieja)."""
+        from .clips_panel import _miniatura_ruta
+        return _miniatura_ruta(path)
+
+    def _kw_icono(self, path: str):
+        png = self._kw_clave(path)
+        ic = self._kw_iconos.get(png)
+        if ic is None:
+            pm = QPixmap(png) if os.path.isfile(png) else QPixmap()
+            if pm.isNull():
+                return None
+            ic = self._kw_iconos[png] = QIcon(pm)
+        return ic
+
+    def _kw_cargar_nodo(self, node: QTreeWidgetItem):
+        """Al abrir una palabra (o la sección) plegada: sus miniaturas."""
+        pend = []
+        hijos = [node.child(i) for i in range(node.childCount())]
+        for ch in list(hijos):
+            hijos += [ch.child(i) for i in range(ch.childCount())]
+        for ch in hijos:
+            if ch.data(0, ROLE_KW_KIND) != "file":
+                continue
+            path = ch.data(0, ROLE_PATH) or ""
+            ic = self._kw_icono(path)
+            if ic is not None:
+                ch.setIcon(0, ic)
+            elif path and self._kw_clave(path) not in self._kw_mini_fallidas:
+                pend.append(path)
+        if pend:
+            self._kw_miniaturas(pend)
+
+    def _kw_miniaturas(self, rutas: list[str]):
+        """Miniaturas de los archivos de palabras clave que aún no la tienen (en segundo plano, una vez)."""
+        from .clips_panel import _hacer_miniatura, _miniatura_ruta
+        from .jobs import BackgroundJob
+        rutas = [r for r in rutas if self._kw_clave(r) not in self._kw_mini_fallidas][:300]
+        viejo = getattr(self, "_kw_mini_job", None)
+        if viejo is not None and getattr(self, "_kw_mini_rutas", None) == rutas:
+            return                         # (ya se están haciendo estas mismas)
+        if viejo is not None:
+            viejo.cancel()
+        if not rutas:
+            return
+        fallidas = self._kw_mini_fallidas
+
+        def trabajo(_p, cancelado, emitir):
+            for r in rutas:
+                if cancelado():
+                    return None
+                salida = _miniatura_ruta(r)
+                if os.path.isfile(salida) or _hacer_miniatura(r, salida):
+                    emitir((r, salida))
+                else:
+                    fallidas.add(salida)
+            return None
+
+        def llego(par):
+            pm = QPixmap(par[1])
+            if pm.isNull():
+                fallidas.add(par[1])
+                return
+            ic = self._kw_iconos[par[1]] = QIcon(pm)
+            it = self._kw_items_ruta.get(par[0])
+            if it is None:
+                return
+            try:
+                it.setIcon(0, ic)
+            except RuntimeError:          # (Medios se repintó mientras tanto)
+                pass
+
+        def fin(*_a):
+            if self._kw_mini_job is job:
+                self._kw_mini_job, self._kw_mini_rutas = None, None
+        job = BackgroundJob(trabajo, self, with_partial=True)
+        job.title = "🖼 Miniaturas de palabras clave"
+        job.partial.connect(llego)
+        job.done.connect(fin)
+        job.failed.connect(fin)
+        self._kw_mini_job, self._kw_mini_rutas = job, rutas
+        job.start()
+
+    def _kw_file_item(self, path: str, term: str, linked: bool, by_path: dict, cargar: bool = True) -> QTreeWidgetItem:
         m = by_path.get(os.path.normcase(os.path.abspath(path)))
         if m is not None:
             it = self._media_item(m)
         else:
-            it = QTreeWidgetItem([os.path.basename(path), "—", "sin añadir a Medios", ""])
-            it.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+            it = QTreeWidgetItem([os.path.basename(path), "—", "en tu carpeta", ""])
+            icono = self._kw_icono(path) if cargar else None
+            if icono is None:                     # (se hace en segundo plano y aparece sola; plegado: al abrirlo)
+                it.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+                if cargar and self._kw_clave(path) not in self._kw_mini_fallidas:
+                    self._kw_sin_mini.append(path)
+            else:
+                it.setIcon(0, icono)
             for col in range(3):
-                it.setToolTip(col, path)
+                it.setToolTip(col, path + "\nArchivo de tu carpeta de palabras clave (en tu disco, para todos tus "
+                                          "proyectos): aún no está en este proyecto. Arrástralo a la línea de tiempo "
+                                          "o haz doble clic.")
         if linked:
             it.setText(0, "🔗 " + it.text(0))
             for col in range(3):
@@ -577,6 +685,8 @@ class LibraryPanel(QWidget):
         self.footer.setText(text)
 
     def _kw_track(self, it: QTreeWidgetItem, plegado: bool):
+        if not plegado and not getattr(self, "_kw_construyendo", False)                 and (it.data(0, ROLE_KW_KIND) == "term" or it.data(0, ROLE_CATEGORY) == KW_SECTION):
+            self._kw_cargar_nodo(it)
         if it.data(0, ROLE_KW_KIND) == "term":
             term = it.data(0, ROLE_KW_TERM)
             (self._kw_collapsed.add if plegado else self._kw_collapsed.discard)(term)
@@ -642,7 +752,11 @@ class LibraryPanel(QWidget):
             self.semantic_search(self.search.text().strip())
 
     def semantic_search(self, query: str):
-        if not query or self._search_job is not None:
+        if not query:
+            self.ctrl.message.emit("Escribe qué buscar, p. ej. «coche rojo de noche».")
+            return
+        if self._search_job is not None:
+            self.ctrl.message.emit("Espera: ya estoy buscando.")
             return
         clips = {mid: v for mid, v in self.ctrl.clip_vecs.items() if mid in self.ctrl.project.media}
         if not clips:
@@ -674,6 +788,8 @@ class LibraryPanel(QWidget):
         if results:
             best = results[0][1]
             results = [r for r in results if r[1] >= best - 0.06][:25]
+        else:
+            self.ctrl.message.emit("◈ No encontré nada parecido: prueba con otras palabras (o analiza más clips con ◈).")
         self._results = results
         self._rebuild()
 
@@ -739,7 +855,7 @@ class LibraryPanel(QWidget):
         snd = [i for i in ids if (m := self.ctrl.project.media.get(i)) is not None and i not in self.ctrl.missing
                and (m.kind == "audio" or (m.kind == "video" and m.has_audio))]
         if snd:
-            menu.addAction("🔑 Buscar palabras clave…", lambda: self.keywords_requested.emit(snd))
+            menu.addAction("🗣 Buscar lo que se dice…", lambda: self.keywords_requested.emit(snd))
         if snd:
             a = menu.addAction("🔖 Leer marcas de OBS", lambda: self.obs_marks_requested.emit(snd))
             a.setToolTip("Lee los capítulos que pusiste con una tecla mientras grababas en OBS y los pone como "
@@ -801,6 +917,8 @@ class LibraryPanel(QWidget):
         m = self.ctrl.project.media.get(mid)
         if m and os.path.exists(m.path):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(m.path)])
+        else:
+            self.ctrl.message.emit("No encuentro el archivo en el disco (¿se movió o se borró?): no se puede mostrar.")
 
     # ------------------------------------------------------------ ⋮ opciones rápidas
     def _on_click(self, item, col):
@@ -1263,6 +1381,15 @@ class LibraryPanel(QWidget):
         self.ctrl.message.emit(aviso or "No pude ponerlo: no hay sitio libre o el archivo aún se está analizando.")
         return bool(puestos)
 
+    def _kw_window(self, term: str = ""):
+        """🗂 La ventana amplia de palabras clave (el sitio principal de las carpetas), con esa palabra elegida."""
+        panel = getattr(self.window(), "clips", None)
+        if panel is None:
+            return
+        w = panel.abrir_ventana()
+        if term:
+            w.elegir_palabra(term)
+
     def _kw_add_file(self, path: str):
         """▶ Añadir a la timeline (en el cabezal): como clip de palabra clave (misma pista, en silencio)."""
         ids = self._kw_ids([path])
@@ -1390,6 +1517,8 @@ class LibraryPanel(QWidget):
         path = item.data(0, ROLE_PATH) or ""
         menu = QMenu(self)
         if kind == "term":
+            menu.addAction("🗂 Abrir en la ventana de carpetas (internet, borrar…)", lambda: self._kw_window(term))
+            menu.addSeparator()
             menu.addAction("📂 Añadir carpeta de mi PC…", lambda: self._kw_link_dialog(term))
             menu.addAction("📁 Abrir carpeta", lambda: self._kw_abrir_propia(term))
             paths = self._kw_pick_paths(term)

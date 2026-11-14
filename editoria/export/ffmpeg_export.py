@@ -106,7 +106,7 @@ PRESETS = {
 TARGETS = {
     "youtube": {"name": "▶ YouTube", "suffix": "YouTube", "codec": "h264", "audio": 384,
                 "br": {1080: 24, 1440: 40, 2160: 80},
-                "info": "H.264 High · {w}×{h} · {fps} FPS · {br} Mbps · audio AAC 384 kbps · color BT.709 — "
+                "info": "H.264 High · {w}×{h} · {fps} FPS · {br} Mbps · audio AAC 320–384 kbps · color BT.709 — "
                         "lo que recomienda YouTube para subir (Shorts incluidos)."},
     "tiktok": {"name": "♪ TikTok", "suffix": "TikTok", "codec": "h264", "audio": 256, "vertical": True,
                "br": {1080: 20, 1440: 20, 2160: 20},
@@ -157,25 +157,44 @@ class ExportOptions:
 
 
 _AAC_MF: bool | None = None
+STILLS_ONCE = True       # (imágenes quietas decodificadas una vez; las pruebas lo apagan para comparar con lo de antes)
 
 
 def aac_args(kbps: int) -> list[str]:
-    """Códec del sonido final (AAC). El de Windows (Media Foundation) si está y basta su máximo (320 kbps): ~14× más
-    rápido que el de FFmpeg con la misma calidad (medido con un Short de 82 s: 0,5 s frente a 7,2 s; fidelidad 42,3 frente
-    a 43,5 dB). Si no (o con 384 kbps), el de FFmpeg en modo rápido (1,5× más rápido y en la medición, más fiel)."""
+    """Códec del sonido final (AAC). El de Windows (Media Foundation) si está: ~7–14× más rápido que el de FFmpeg con la
+    misma calidad (medido: 5 min en 1,4 s frente a 9,9 s; fidelidad 42,3 frente a 43,5 dB). Su máximo es 320 kbps: con
+    384 (YouTube) va a 320 (la plataforma recomprime el sonido de todas formas). Si no está, el de FFmpeg en modo rápido.
+    (La comprobación escribía un MP4 a una tubería, que FFmpeg no permite: fallaba siempre y nunca se usaba.)"""
     global _AAC_MF
     if _AAC_MF is None:
         try:
             from ..core import media as media_tools
             r = media_tools.run_quiet([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
                                        "sine=d=0.2:sample_rate=48000", "-ac", "2", "-c:a", "aac_mf", "-b:a", "192k",
-                                       "-f", "mp4", "-"], timeout=20)
+                                       "-f", "adts", "-"], timeout=20)
             _AAC_MF = r.returncode == 0
         except Exception:  # noqa: BLE001
             _AAC_MF = False
-    if _AAC_MF and kbps <= 320:
-        return ["-c:a", "aac_mf", "-b:a", f"{kbps}k"]
+    if _AAC_MF:
+        return ["-c:a", "aac_mf", "-b:a", f"{min(int(kbps), 320)}k"]
     return ["-c:a", "aac", "-aac_coder", "fast", "-b:a", f"{kbps}k"]
+
+
+def _stills_once(filters: list[str], stills: dict[int, tuple[str, str]]) -> list[str]:
+    """Cada imagen quieta entra como UN fotograma: aquí se repite (loop) a sus fps y se corta a su duración, con la
+    etiqueta [im{k}] en lugar de [{k}:v] (cada entrada se usa una sola vez en el filtro)."""
+    if not stills:
+        return filters
+    out = list(filters)
+    pre = []
+    for k, (fps, dur) in stills.items():
+        src, new = f"[{k}:v]", f"[im{k}]"
+        for i, f in enumerate(out):
+            if src in f:
+                out[i] = f.replace(src, new, 1)
+                pre.append(f"{src}loop=loop=-1:size=1:start=0,setpts=N,trim=duration={dur}{new}")
+                break
+    return pre + out
 
 
 def _num(x: float) -> str:
@@ -639,8 +658,18 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
     n_inputs = 0
     last = "base"
 
+    stills: dict[int, tuple[str, str]] = {}   # imágenes quietas: entrada → (fps, duración)
+
     def add_input(extra: list[str], path: str) -> int:
         nonlocal n_inputs
+        # ⚡ Una imagen quieta se decodifica UNA vez y el fotograma se repite dentro del filtro (_stills_once): con
+        # «-loop 1» se volvía a decodificar en cada fotograma (un PNG 1080p, 24 ms por fotograma; medido: −11 a −14 %
+        # de CPU en una exportación con 8 imágenes, y la imagen sale idéntica). GIF y WEBP (pueden moverse), como antes.
+        if (STILLS_ONCE and len(extra) == 6 and extra[0] == "-loop" and extra[2] == "-framerate" and extra[4] == "-t"
+                and os.path.splitext(path)[1].lower() not in (".gif", ".webp", ".apng")):
+            stills[n_inputs] = (extra[3], extra[5])
+            extra = ["-framerate", extra[3]]   # (la base de tiempo 1/F: sin ella se redondeaba a 1/25 y a 60 FPS la imagen
+            #                                     acababa un fotograma antes, dejando ver la capa de abajo; revisión de Fable)
         args.extend(extra + ["-i", path])
         n_inputs += 1
         return n_inputs - 1
@@ -880,6 +909,7 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
                            f"fontsdir={_filter_path(subtitle_fonts_dir(ass_text))}[subs]")
             last = "subs"
     filters.append(f"[{last}]format=yuv420p[vout]")
+    filters = _stills_once(filters, stills)
 
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(";\n".join(filters))
@@ -893,10 +923,13 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
              "-c:v", encoder, "-b:v", f"{_num(br)}M", "-maxrate", f"{_num(br * 1.5)}M",
              "-bufsize", f"{_num(br * 2)}M", "-pix_fmt", "yuv420p", "-g", str(gop),
              "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
+    # ⚡ Con el procesador: «faster» gasta ~30 % menos que «medium» y a 16–24 Mbps casi no se nota (medido: un trozo
+    # de 12,5 s, 47,6 s de CPU frente a 69,8 s); con «máxima calidad», «medium» como antes
     if encoder == "libx264":
-        args += ["-preset", "medium", "-profile:v", "high", "-bf", "2", "-flags", "+cgop"]
+        args += ["-preset", "medium" if opts.max_quality else "faster", "-profile:v", "high", "-bf", "2",
+                 "-flags", "+cgop"]
     elif encoder == "libx265":
-        args += ["-preset", "medium", "-tag:v", "hvc1"]
+        args += ["-preset", "medium" if opts.max_quality else "fast", "-tag:v", "hvc1"]
     else:                                        # tarjeta gráfica: cada marca con sus ajustes (core/hw.py)
         from ..core import hw
         args += hw.export_args(encoder, opts.max_quality)

@@ -298,6 +298,10 @@ class Project:
     annotations: list[dict] = field(default_factory=list)
     # Cortes de audio que diste por buenos («✓ Está bien así»): claves de core/cut_check.py (van al deshacer también)
     cut_ok: list[str] = field(default_factory=list)
+    # ⚡ Acomodar por palabras clave: lo que elegiste en cada mención {clave: "gameplay"|"cinematic"|"image"|"none"}
+    kw_choices: dict = field(default_factory=dict)
+    # ✓ Revisión guiada: avisos y clips de la IA que diste por buenos («O» = está bien así), por su clave
+    review_ok: list[str] = field(default_factory=list)
 
     def marked_range(self) -> tuple[float, float] | None:
         """(entrada, salida) si hay un tramo marcado válido. Falta una marca = desde el inicio / hasta el final."""
@@ -342,6 +346,8 @@ class Project:
             "compounds": json.loads(json.dumps(self.compounds)),
             "annotations": json.loads(json.dumps(self.annotations)),
             "cut_ok": list(self.cut_ok),
+            "kw_choices": dict(self.kw_choices),
+            "review_ok": list(self.review_ok),
         }
 
     def apply_timeline_state(self, s: dict) -> None:
@@ -361,6 +367,8 @@ class Project:
         self.compounds = json.loads(json.dumps(s.get("compounds") or {}))
         self.annotations = json.loads(json.dumps(s.get("annotations") or []))
         self.cut_ok = [str(k) for k in (s.get("cut_ok") or [])]
+        self.kw_choices = {str(k): str(v) for k, v in (s.get("kw_choices") or {}).items()}
+        self.review_ok = [str(k) for k in (s.get("review_ok") or [])]
 
     # ---- guardar / abrir ----
     def to_dict(self) -> dict:

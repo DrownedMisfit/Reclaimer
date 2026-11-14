@@ -36,8 +36,10 @@ class KeywordsDialog(QDialog):
         super().__init__(win)
         self.win, self.ctrl = win, win.ctrl
         self.media_ids = media_ids
-        self.setWindowTitle("🔑 Buscar palabras clave")
+        self.setWindowTitle("🗣 Buscar lo que se dice")
         self.resize(760, 520)
+        from .help import set_help
+        set_help(self, "buscar_palabras")              # («¿Qué hace esto?» en cualquier parte del diálogo)
         lay = QVBoxLayout(self)
         tip = QLabel("Escribe palabras o frases separadas por comas. Solo se escucha donde hay voz (sin la música "
                      "ni el silencio) y con un modelo pequeño: gasta poco y puedes seguir editando. Lo escuchado "
@@ -58,7 +60,7 @@ class KeywordsDialog(QDialog):
             self.scope.addItem(f"En {len(media_ids)} archivo(s) elegido(s)", "given")
         self.scope.setCurrentIndex(max(0, self.scope.findData("given" if media_ids else scope)))
         row.addWidget(self.scope)
-        self.b_go = QPushButton("🔑 Buscar")
+        self.b_go = QPushButton("🗣 Buscar")
         self.b_go.setObjectName("primary")
         self.b_go.clicked.connect(self.search)
         row.addWidget(self.b_go)
@@ -137,7 +139,7 @@ class KeywordsDialog(QDialog):
         def fail(msg):
             self.b_go.setEnabled(True)
             self.status.setText("✗ " + msg)
-        manager().start("🔑 Buscar palabras clave", work, done, fail)
+        manager().start("🗣 Buscar lo que se dice", work, done, fail)
 
     def _timeline_times(self, h) -> list[float]:
         """Dónde está ese instante del archivo en la línea de tiempo (si está puesto)."""

@@ -10,6 +10,15 @@ import os
 import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# (tus proyectos y ajustes de datos/ no se tocan: datos temporales; los modelos ya descargados, de datos/modelos)
+_RAIZ_AISLADA = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("EDITORIA_MODELOS", os.path.join(_RAIZ_AISLADA, "datos", "modelos"))
+os.makedirs(os.path.join(_RAIZ_AISLADA, "_pruebas_tmp"), exist_ok=True)
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile  # noqa: E401,E402
+_DATOS_AISLADOS = _tempfile.mkdtemp(prefix="reclaimer_datos_", dir=os.path.join(_RAIZ_AISLADA, "_pruebas_tmp"))
+_atexit.register(_shutil.rmtree, _DATOS_AISLADOS, True)
+os.environ["LOCALAPPDATA"] = _DATOS_AISLADOS
+os.environ["EDITORIA_DATOS"] = os.path.join(_DATOS_AISLADOS, "EditorIA")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

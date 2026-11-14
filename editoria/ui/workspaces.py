@@ -147,7 +147,8 @@ class Workspaces(QObject):
     def _busy(self) -> str:
         w = self.win
         for name, job in (("transcribiendo", getattr(getattr(w, "voice", None), "job", None)),
-                          ("analizando con la IA", getattr(getattr(w, "ai_panel", None), "job", None))):
+                          ("analizando con la IA", getattr(getattr(w, "ai_panel", None), "job", None)),
+                          ("creando el edit musical", getattr(getattr(w, "edit_panel", None), "job", None))):
             if job is not None:
                 return name
         return ""

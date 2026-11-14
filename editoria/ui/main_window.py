@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
         self.preview = PreviewPanel()
         self.preview.title_label.renamed.connect(lambda n: self.ctrl.rename_project(n))
         self.workspaces.switched.connect(self.preview.set_guides_space)   # ▦ guías de cada pestaña (Edits/Shorts: 9:16)
+        self.workspaces.switched.connect(lambda tab: self.apply_tab_panels(tab))   # 🗂 los paneles de esa pestaña
         self.engine = PlaybackEngine(self.ctrl, self.preview, self)
         self.inspector = InspectorPanel(self.ctrl, self.engine)
         help_ui.install(QApplication.instance())
@@ -204,7 +205,11 @@ class MainWindow(QMainWindow):
         self._dock("effects", "Efectos", self.effects)
         self._dock("ai", "IA ✨", self.ai_panel)
         self._dock("moments", "🔎 Momentos", self.moments)
-        self._dock("clips", "🎬 Clips", self.clips)
+        self._dock("clips", "🔑 Palabras clave", self.clips)
+        from .keywords_window import KeywordsWindow           # 🗂 la carpeta de la palabra elegida (a la derecha)
+        self.kw_folders = KeywordsWindow(self.clips, acoplado=True)
+        self.clips.carpetas_dock = self.kw_folders
+        self._dock("kw_folders", "🗂 Carpetas", self.kw_folders)
         self._dock("inspector", "Inspector", self.inspector)
         self._dock("voice", "Limpieza", self.voice)
         self._dock("transcript", "Texto", self.transcript)
@@ -222,9 +227,18 @@ class MainWindow(QMainWindow):
         from .guided_panel import GuidedPanel      # 🧭 Montaje guiado: los pasos de un montaje (página propia)
         self.guided = GuidedPanel(self)
         self._dock("guided", "🧭 Montaje guiado", self.guided)
+        from .clip_material_panel import ClipMaterialPanel     # 🎞 lo que se sabe del clip elegido (pestaña YouTube)
+        self.material = ClipMaterialPanel(self)
+        self._dock("material", "🎞 Material del clip", self.material)
+        from .edit_dialog import EditDialog                    # 🎵 el edit musical como parte de la ventana (Edits)
+        self.edit_panel = EditDialog(self.ctrl, self, embedded=True)
+        self._dock("edit_opts", "🎵 Edit musical", self.edit_panel)
+        self._dock("edit_clips", "🎞 Clips del edit", self.edit_panel.clips_page)
         manager().open_panel.connect(self.open_tasks)
         self.docks["guide"].toggleViewAction().toggled.connect(lambda on: on or self.guide.clear())
         self.right_tabs = _PanelSwitcher(self)   # compatibilidad: right_tabs.setCurrentWidget(panel)
+        for _k in self.TAB_MANAGED:               # 🗂 lo que enciendas o apagues tú en una pestaña, se recuerda
+            self.docks[_k].toggleViewAction().triggered.connect(lambda on, k=_k: self._remember_tab_panel(k, on))
         self._default_layout()
         self._default_state = self.saveState(3)
         saved = self.settings.value("ventana/paneles")
@@ -234,6 +248,22 @@ class MainWindow(QMainWindow):
                 self.restoreState(saved, 3)
             except Exception:  # noqa: BLE001 - un estado guardado roto no impide abrir
                 pass
+        if str(self.settings.value("paneles/pestanas_v1", "false")).lower() != "true":
+            # (una vez: 🔑 Palabras clave y 🎞 Material del clip, a la derecha, y el edit musical en su sitio, aunque
+            # tuvieras una distribución guardada de antes)
+            self.settings.setValue("paneles/pestanas_v1", "true")
+            for k in ("clips", "material", "edit_opts"):
+                self.addDockWidget(Qt.RightDockWidgetArea, self.docks[k])
+                self.tabifyDockWidget(self.docks["inspector"], self.docks[k])
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.docks["edit_clips"])
+            self.tabifyDockWidget(self.docks["media"], self.docks["edit_clips"])
+        if str(self.settings.value("paneles/carpetas_v1", "false")).lower() != "true":
+            # (una vez: la pestaña nueva «🗂 Carpetas», junto al Inspector, aunque tuvieras una distribución guardada)
+            self.settings.setValue("paneles/carpetas_v1", "true")
+            self.addDockWidget(Qt.RightDockWidgetArea, self.docks["kw_folders"])
+            self.tabifyDockWidget(self.docks["inspector"], self.docks["kw_folders"])
+            self.docks["kw_folders"].setVisible(True)
+        QTimer.singleShot(0, self.apply_tab_panels)            # 🗂 los paneles de la pestaña con la que se abre
         for key, tb in (("top", self._top_bar()), ("pages", self._page_bar())):
             bar = QToolBar(key)
             bar.setObjectName("bar_" + key)
@@ -283,11 +313,13 @@ class MainWindow(QMainWindow):
         self.voice.media_selected.connect(self.transcript.set_media)
         self.voice.cut_rules_changed.connect(self.transcript.refresh)
         self.voice.suggestion_selected.connect(self.timeline.set_highlight_suggestion)
-        self.voice.quick_review_requested.connect(self.open_quick_review)
+        self.voice.quick_review_requested.connect(lambda: self.open_quick_review("voz"))
         self.transcript.set_media(self.voice.media_id() or "")
         self.library.add_requested.connect(self._add_at_playhead)
         self.library.add_at_times_requested.connect(self._add_at_times)          # 🔑 en las palabras clave
         self.library.keyword_target = lambda: self.timeline.keyword_target(self.engine.time)
+        from .keyword_arrange_ui import KeywordArranger
+        self.kw_arranger = KeywordArranger(self)                                # ⚡ fila de palabras clave
         self.library.add_moment_requested.connect(self._add_moment)
         self.library.example_requested.connect(
             lambda mid, t: (self.show_panel(self.moments), self.moments.example_from_media(mid, t)))
@@ -410,6 +442,7 @@ class MainWindow(QMainWindow):
         bm.addAction("⚡ Al golpe, entre las marcas I – O", lambda: self.burst(0, 1))
         bm.addAction("⚡ Medio golpe, entre las marcas I – O", lambda: self.burst(0, 2))
         self.btn_burst.setMenu(bm)
+        self.btn_burst.setVisible(False)        # (13/11: vive en «⋯ Más»; el botón queda para el código y los atajos)
         lay.addWidget(self.btn_burst)
         btn("Eliminar", "Eliminar seleccionados (Supr)", lambda: self._delete(False))
         btn("🗑 Vaciar", "Vaciar la línea de tiempo: quita todos los clips, textos y marcadores (tus archivos "
@@ -420,6 +453,37 @@ class MainWindow(QMainWindow):
         btn("⚑", "Añadir marcador en el cabezal (M)", self._marker)
         btn("T", "Añadir texto en el cabezal (T)", lambda: self.ctrl.add_text(self.engine.time, 4.0, "Texto"))
         lay.addSpacing(12)
+        # 13/11: lo de uso frecuente, a la vista (antes solo con clic derecho o en un menú)
+        self.btn_broll = btn("✨ B-roll", "Proponer B-roll: la IA elige clips de tu material para lo que dices "
+                             "(panel IA ✨; nada se pone sin que lo aceptes)", self._toolbar_broll)
+        self.btn_scenes = btn("🎬 Escenas", "Cortar los clips elegidos en cada cambio de escena (sin IA: donde la "
+                              "imagen cambia de golpe). Ctrl+Z lo deshace.", self._toolbar_scenes)
+        self.btn_vertical = btn("📱 Vertical", "Encuadre vertical que sigue la acción: los clips horizontales elegidos "
+                                "llenan la pantalla 9:16 y el recorte sigue lo que pasa (Shorts y Edits)",
+                                self._toolbar_vertical)
+        self.ctrl.project_changed.connect(self._sync_vertical_btn)
+        self.ctrl.project_replaced.connect(self._sync_vertical_btn)
+        self._sync_vertical_btn()
+        self.btn_thumb = btn("🖼 Miniatura", "Abrir el editor de la miniatura de este video", lambda: self.open_thumbnail())
+        self.btn_export = btn("⬆ Exportar", "Exportar el video (Ctrl+E)", self.export)
+        self.btn_export.setObjectName("primary")
+        # ⋯ Más: lo de uso ocasional, a un clic y con su nombre (los atajos siguen igual)
+        self.btn_more = _QTB()
+        self.btn_more.setText("⋯ Más")
+        self.btn_more.setFocusPolicy(Qt.NoFocus)
+        self.btn_more.setPopupMode(_QTB.InstantPopup)
+        self.btn_more.setToolTip("Más herramientas: ⚡ Ráfaga de cortes al ritmo y 〰 Curvas de volumen/opacidad")
+        more = _QMenu(self.btn_more)
+        rm = more.addMenu("⚡ Ráfaga de cortes al ritmo")
+        for a_ in bm.actions():
+            rm.addAction(a_)
+        self.act_curves = more.addAction("〰 Curvas de volumen y opacidad (Mayús+C)")
+        self.act_curves.setCheckable(True)
+        self.act_curves.triggered.connect(lambda on: (self.tool_curves.setChecked(on), self.timeline.set_curves(on)))
+        more.aboutToShow.connect(lambda: self.act_curves.setChecked(self.tool_curves.isChecked()))
+        self.btn_more.setMenu(more)
+        lay.addWidget(self.btn_more)
+        self.tool_curves.setVisible(False)       # (13/11: vive en «⋯ Más»; Mayús+C sigue igual)
         from .edit_actions import EditBar
         self.edit_bar = EditBar(self)          # 👍 · 👎 · 🔀 Remix · 🎛 Mix (si hay un edit musical)
         lay.addWidget(self.edit_bar)
@@ -465,13 +529,102 @@ class MainWindow(QMainWindow):
         btn("−", "Alejar (−)", lambda: self.timeline.zoom(1 / 1.5))
         btn("+", "Acercar (+)", lambda: self.timeline.zoom(1.5))
         btn("⤢", "Ver toda la timeline (Ctrl+0)", self.timeline.fit)
+        # 📐 Si no cabe todo, los botones con nombre enseñan solo su icono (el nombre sigue en el tooltip) y la barra
+        # nunca obliga a la ventana a ser más ancha que tu pantalla.
+        from PySide6.QtWidgets import QLayout as _QL
+        lay.setSizeConstraint(_QL.SetNoConstraint)
+        bar.setMinimumWidth(1)                   # (explícito: manda sobre lo que pide su contenido)
+        self.tl_name.setMaximumWidth(220)
+        self._tl_compact = {}
+        for b_ in bar.findChildren(QPushButton) + [self.btn_more]:
+            t_ = b_.text()
+            if " " in t_ and not t_[0].isalnum():               # «✨ B-roll» → «✨»
+                self._tl_compact[b_] = (t_, t_.split(" ", 1)[0])
+        self._tl_bar = bar
+        bar.installEventFilter(self)
+        self.tool_curves.toggled.connect(        # 〰 Curvas activas: «⋯ Más» lo dice (el botón de Curvas no se ve)
+            lambda on: self._tl_set(self.btn_more, "⋯ Más 〰" if on else "⋯ Más", "⋯〰" if on else "⋯"))
         return bar
+
+    def _tl_set(self, b_, full: str, short: str | None = None):
+        """Cambia el texto de un botón de la barra respetando el modo compacto (y la reajusta)."""
+        if not hasattr(self, "_tl_compact"):
+            b_.setText(full)
+            return
+        self._tl_compact[b_] = (full, short or full.split(" ", 1)[0])
+        b_.setText(full)
+        self._tl_refit()
+
+    def _tl_refit(self, *_a):
+        """Lo que enseña la barra cambió (⚠ cortes, 📱, vistas, nombre…): se vuelve a encajar."""
+        if getattr(self, "_tl_bar", None) is not None:
+            QTimer.singleShot(0, self._tl_fit_bar)
+
+    def eventFilter(self, obj, ev):
+        if obj is getattr(self, "_tl_bar", None) and ev.type() == ev.Type.Resize:
+            QTimer.singleShot(0, self._tl_fit_bar)
+        return super().eventFilter(obj, ev)
+
+    def _tl_fit_bar(self):
+        """Modo compacto de la barra de la línea de tiempo según el ancho que tiene."""
+        bar = getattr(self, "_tl_bar", None)
+        if bar is None:
+            return
+        for b_, (full, _short) in self._tl_compact.items():   # medir con los nombres completos
+            b_.setText(full)
+        # de uno en uno, primero lo menos importante (Exportar y B-roll conservan su nombre hasta el final)
+        self.tl_name.setVisible(True)
+        prio = [getattr(self, n, None) for n in ("btn_bars", "btn_thumb", "btn_scenes", "btn_vertical",
+                                                  "btn_more", "btn_broll", "btn_export")]
+        orden = [b_ for b_ in self._tl_compact if b_ not in prio] + [b_ for b_ in prio if b_ in self._tl_compact]
+        for b_ in orden:
+            if bar.layout().sizeHint().width() <= bar.width():
+                break
+            full, short = self._tl_compact[b_]
+            b_.setText(short)
+            if not b_.toolTip().startswith(full):
+                b_.setToolTip(full + " — " + b_.toolTip())
+        if bar.layout().sizeHint().width() > bar.width():      # último escalón: sin el nombre del proyecto
+            self.tl_name.setVisible(False)
+
+    # ------------------------------------------------------------ botones de la barra de la línea de tiempo
+    def _sel_video_clips(self) -> list[str]:
+        p = self.ctrl.project
+        return [i for i in sorted(self.timeline.selected) if i in p.clips and p.clips[i].text is None
+                and (p.media_of(p.clips[i]) is not None and p.media_of(p.clips[i]).kind == "video")]
+
+    def _toolbar_broll(self):
+        self.show_panel(self.ai_panel)
+        self.ai_panel.propose()
+
+    def _toolbar_scenes(self):
+        ids = self._sel_video_clips()
+        if not ids:
+            self.statusBar().showMessage("🎬 Elige antes los clips de video que quieres cortar por escenas.", 6000)
+            return
+        self.cut_scenes(ids)
+
+    def _toolbar_vertical(self):
+        ids = self._sel_video_clips()
+        if not ids:
+            self.statusBar().showMessage("📱 Elige antes los clips horizontales que quieres encuadrar en vertical.", 6000)
+            return
+        self.follow_action(ids)
+
+    def _sync_vertical_btn(self, *_):
+        """📱 Solo tiene sentido en un proyecto vertical (Shorts / Edits)."""
+        p = self.ctrl.project
+        b = getattr(self, "btn_vertical", None)
+        if b is not None:
+            b.setVisible(p.height > p.width)
+            self._tl_refit()
 
     def _sync_cut_badge(self, n: int):
         """⚠ N cortes: el contador y ◀ ▶ solo se ven si hay alguno que revisar."""
         self.cut_badge.setText(f"⚠ {n} corte{'s' if n != 1 else ''}" if n else "")
         for w in (self.cut_badge, self.btn_cut_prev, self.btn_cut_next):
             w.setVisible(n > 0)
+        self._tl_refit()
 
     def _go_cut(self, step: int):
         """◀ ▶ (Alt+← / Alt+→): lleva el cabezal al corte de audio anterior o siguiente y abre su ajuste."""
@@ -540,6 +693,44 @@ class MainWindow(QMainWindow):
         return d
 
     _OCULTOS_AL_INICIO = ("guide", "tasks", "guided")     # se abren cuando se pide (Ventana o su página)
+    # 🗂 Paneles de cada pestaña (lo de entrada; lo que cambies tú desde Ventana se recuerda por pestaña). YouTube: sin
+    # Texto ni Subtítulos (no los usa en las reseñas) y con 🔑 Palabras clave y 🎞 Material del clip; Edits: el edit
+    # musical a pantalla completa (opciones a la derecha, clips a la izquierda), sin lo de la voz; Shorts: subtítulos.
+    TAB_PANELS = {
+        "youtube": {"material": True, "clips": True, "voice": True, "transcript": False, "subtitles": False,
+                    "edit_opts": False, "edit_clips": False},
+        "edit": {"edit_opts": True, "edit_clips": True, "voice": False, "transcript": False, "subtitles": False,
+                 "material": False, "clips": True},
+        "short": {"voice": True, "transcript": True, "subtitles": True, "edit_opts": False, "edit_clips": False,
+                  "material": False, "clips": True},
+    }
+    TAB_MANAGED = ("material", "clips", "voice", "transcript", "subtitles", "edit_opts", "edit_clips")
+
+    def _remember_tab_panel(self, key: str, on: bool):
+        tab = getattr(getattr(self, "workspaces", None), "current", "youtube")
+        self.settings.setValue(f"paneles_pestana/{tab}/{key}", "true" if on else "false")
+
+    def apply_tab_panels(self, tab: str | None = None):
+        """Enseña los paneles de esa pestaña (y sube a la vista los suyos: en Edits, el edit musical)."""
+        tab = tab or getattr(getattr(self, "workspaces", None), "current", "youtube")
+        conf = self.TAB_PANELS.get(tab, {})
+        subir = []
+        for key in self.TAB_MANAGED:
+            if key not in conf:
+                continue
+            mine = self.settings.value(f"paneles_pestana/{tab}/{key}")
+            on = conf[key] if mine is None else str(mine).lower() == "true"
+            d = self.docks.get(key)
+            if d is None:
+                continue
+            if d.toggleViewAction().isChecked() != on:
+                d.setVisible(on)
+            if on and conf[key]:
+                subir.append(d)
+        for d in subir:
+            if tab == "edit" or d is self.docks.get("material"):
+                d.raise_()
+
 
     def _default_layout(self):
         """Distribución inicial (como en Resolve): [Medios] | [Visor] | [Inspector] arriba y la línea de
@@ -555,9 +746,10 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(d["media"], d["effects"])
         self.tabifyDockWidget(d["media"], d["ai"])
         self.tabifyDockWidget(d["media"], d["moments"])
-        self.tabifyDockWidget(d["media"], d["clips"])
+        self.tabifyDockWidget(d["media"], d["edit_clips"])
         self.addDockWidget(Qt.RightDockWidgetArea, d["inspector"])
-        for k in ("voice", "transcript", "subtitles", "history", "scopes"):
+        for k in ("voice", "transcript", "subtitles", "history", "scopes", "clips", "kw_folders", "material",
+                  "edit_opts"):
             self.tabifyDockWidget(d["inspector"], d[k])
         # 🧭 Montaje guiado: debajo del inspector (a la derecha), así se ve a la vez que 🎬 Clips (a la izquierda)
         self.addDockWidget(Qt.RightDockWidgetArea, d["guided"])
@@ -597,6 +789,61 @@ class MainWindow(QMainWindow):
     def open_font_size(self):
         from .font_dialog import FontSizeDialog
         FontSizeDialog(self).exec()
+
+    def example_dir(self) -> str:
+        return os.path.join(os.path.expanduser("~"), "Videos", "Reclaimer", "Proyecto de ejemplo")
+
+    def open_example(self):
+        """🎓 Proyecto de ejemplo: lo crea (descarga los clips de Pexels la primera vez), lo abre y abre su lección."""
+        if getattr(self, "_example_job", None) is not None:
+            self.statusBar().showMessage("🎓 Ya se está preparando el proyecto de ejemplo…", 5000)
+            return
+        from ..core import example_project as EX
+        dest = self.example_dir()
+        ruta = os.path.join(dest, EX.NOMBRE + ".eia")
+        existe = os.path.isfile(ruta)
+        if existe and not EX.missing(dest):
+            self._open_example_file(ruta)
+            return
+
+        def work(progress, cancelled):
+            if existe:                               # (falta algo: se repone sin tocar lo que practicaste)
+                return ruta, EX.repair(dest, progress, cancelled)
+            return EX.build(dest, progress, cancelled)
+
+        def done(res=None):
+            self._example_job = None
+            if isinstance(res, tuple):
+                self._open_example_file(res[0], res[1])
+
+        def failed(msg):
+            self._example_job = None
+            if "ancel" in str(msg):                  # (cancelado desde Tareas: no es un error)
+                self.statusBar().showMessage("🎓 Proyecto de ejemplo cancelado.", 5000)
+                return
+            QMessageBox.warning(self, "Proyecto de ejemplo", f"No pude preparar el proyecto de ejemplo:\n{msg}")
+        job = BackgroundJob(work, self)
+        job.title = "🎓 Preparando el proyecto de ejemplo"
+        job.done.connect(done)
+        job.failed.connect(failed)
+        self._example_job = job
+        self.statusBar().showMessage("🎓 Preparando el proyecto de ejemplo (la primera vez descarga 5 clips de "
+                                     "Pexels, unos 15 MB)…", 10000)
+        job.start()
+
+    def _open_example_file(self, path: str, fallos: list | None = None):
+        if os.path.normcase(self.ctrl.path or "") != os.path.normcase(path):
+            self.open_project(path)
+        if os.path.normcase(self.ctrl.path or "") == os.path.normcase(path):
+            self.timeline.fit() if hasattr(self.timeline, "fit") else None
+            self.open_guide("proyecto_ejemplo")
+            if fallos:
+                self.statusBar().showMessage(f"🎓 Proyecto de ejemplo abierto, pero faltan {len(fallos)} clip(s) de "
+                                             "Pexels (¿sin internet?). Vuelve a pulsar Ayuda → «🎓 Proyecto de "
+                                             "ejemplo» para intentarlo otra vez.", 15000)
+            else:
+                self.statusBar().showMessage("🎓 Proyecto de ejemplo abierto: sigue los pasos de la guía. Los clips son "
+                                             "de Pexels (sus créditos salen solos en la descripción al exportar).", 10000)
 
     def open_guide(self, lesson: str | None = None):
         """📖 Guía paso a paso (F1). La primera vez aparece flotando a la derecha."""
@@ -921,8 +1168,23 @@ class MainWindow(QMainWindow):
         act(m, "Herramienta de recorte avanzado (ripple, roll, slip, slide)", "Shift+T", lambda: self.set_tool("trim"))
         act(m, "〰 Curvas de volumen y opacidad (sí/no)", "Shift+C",
             lambda: (self.tool_curves.toggle(), self.timeline.set_curves(self.tool_curves.isChecked())))
-        act(m, "Imán (encajar) sí/no", "N", lambda: self.tool_snap.toggle() or
-            self.timeline.set_snapping(self.tool_snap.isChecked()))
+        act(m, "Imán (encajar) sí/no", "N", self._toggle_snap)
+        a_w = m.addAction("🗣 Imán también a las palabras de la narración")
+        a_w.setCheckable(True)
+        a_w.setChecked(self.timeline.snap_words)
+        a_w.setToolTip("Con el imán puesto, al mover o recortar se pega a donde empieza y acaba cada palabra de tu "
+                       "narración: cortes justo entre palabras. Desactivado de entrada.")
+        m.setToolTipsVisible(True)
+        a_w.toggled.connect(self.timeline.set_snap_words)
+        self.act_snap_words = a_w
+        a_mg = m.addAction("🧲 Pista principal magnética")
+        a_mg.setCheckable(True)
+        a_mg.setChecked(self.timeline.magnetic_main)
+        a_mg.setToolTip("En la pista de video principal (la de abajo) no quedan huecos: Supr y recortar un borde "
+                        "adelantan lo de detrás en TODAS las pistas (nada se desincroniza). Si algo de otra pista sigue "
+                        "por debajo (tu narración), no junta y avisa. Mayús+borde recorta sin juntar.")
+        a_mg.toggled.connect(self.timeline.set_magnetic_main)
+        self.act_magnetic = a_mg
         a_rh = m.addAction("🥁 Imán también a los golpes de la música")
         a_rh.setCheckable(True)
         a_rh.setChecked(self.timeline.snap_rhythm)
@@ -994,10 +1256,10 @@ class MainWindow(QMainWindow):
         act(m, "◈ Entrenar la IA con mi voz", None, self.train_voice_now)
         act(m, "◈ Olvidar lo que la IA aprendió de mi voz…", None, self.forget_voice)
 
-        # La IA vive en UN solo sitio: la pestaña «IA ✨» (antes también había un menú «IA» arriba, repetido).
-        # Este menú no se enseña: solo guarda las órdenes para que sus atajos sigan funcionando.
-        from PySide6.QtWidgets import QMenu as _QMenu
-        m = _QMenu("&IA", self)
+        # ✨ Menú «IA ✨» a la vista (13/11: él lo pidió; antes estaba escondido y solo guardaba los atajos). Lo de la
+        # voz se queda en «Voz»; lo de la IA (B-roll, temas, edit musical, Shorts, primera versión…) va aquí.
+        # (Los atajos se guardan como «IA/…»: el título se cambia después de crearlos para no perder los tuyos.)
+        m = mb.addMenu("&IA")
         self._ai_hidden_menu = m
         act(m, "◈ Analizar el contenido de los clips", None, self.library._analyze_clicked)
         act(m, "◎ Detectar temas de la narración", None,
@@ -1009,8 +1271,8 @@ class MainWindow(QMainWindow):
         act(m, "🔎 Buscar momentos en mis medios…", "Ctrl+Shift+F", lambda: self.open_moments(""))
         act(m, "⧉ Comparación…", None, self.open_compare)
         act(m, "🎵 Crear edit musical…", "Ctrl+M", self.open_edit_maker)
-        act(m, "⚕ Revisar el proyecto…", "Ctrl+R", self.open_audit)
-        act(m, "⚡ Revisión rápida con teclas…", "Ctrl+Shift+Q", self.open_quick_review)
+        act(m, "⚕ Lista de avisos del proyecto…", "Ctrl+R", self.open_audit)
+        act(m, "✓ Revisión guiada (una a una)…", "Ctrl+Shift+Q", self.open_quick_review)
         act(m, "✂ Shorts desde este video…", None, lambda: __import__(
             "editoria.ui.shorts_dialog", fromlist=["open_shorts_dialog"]).open_shorts_dialog(self))
         m.addSeparator()
@@ -1019,6 +1281,7 @@ class MainWindow(QMainWindow):
             "editoria.ui.script_dialog", fromlist=["open_script_dialog"]).open_script_dialog(self))
         act(m, "Buscar clips por contenido", "Ctrl+F",
             lambda: (self.library.btn_ai_search.setChecked(True), self.library.search.setFocus()))
+        m.setTitle("IA ✨")
 
         m = mb.addMenu("&Timeline")
         act(m, "T Añadir texto en el cabezal", "T", lambda: self.ctrl.add_text(self.engine.time, 4.0, "Texto"))
@@ -1026,7 +1289,9 @@ class MainWindow(QMainWindow):
         act(m, "🎨 Añadir capa de ajuste (color y efectos a todo lo de debajo)", None, self.add_adjustment)
         act(m, "Acercar", "+", lambda: self.timeline.zoom(1.5))
         act(m, "Alejar", "-", lambda: self.timeline.zoom(1 / 1.5))
-        act(m, "Ajustar a la ventana", "Ctrl+0", self.timeline.fit)
+        a_fit = act(m, "Ajustar a la ventana", "Ctrl+0", self.timeline.fit)
+        if a_fit is not None and "Shift+Z" not in [k.toString() for k in a_fit.shortcuts()]:
+            a_fit.setShortcuts(list(a_fit.shortcuts()) + [QKeySequence("Shift+Z")])   # 🔍 Mayús+Z, como en Resolve
         m.addSeparator()
         act(m, "Añadir pista de video", None, lambda: self.ctrl.add_track(TRACK_VIDEO))
         act(m, "Añadir pista de audio", None, lambda: self.ctrl.add_track(TRACK_AUDIO))
@@ -1077,18 +1342,14 @@ class MainWindow(QMainWindow):
         self._sync_vh_menu()
         m.addSeparator()
         gm = m.addMenu("⇤ Eliminar huecos (espacios vacíos entre clips)")
-        act(gm, "🔊 En todas las pistas de audio", None, lambda: self.ctrl.close_gaps_on("audio"))
-        act(gm, "🎞 En todas las pistas de video", None, lambda: self.ctrl.close_gaps_on("video"))
-        act(gm, "En todas las pistas", None, lambda: self.ctrl.close_gaps_on(None))
-        gm.addSeparator()
-        act(gm, "Solo en la pista del clip seleccionado", None, self._close_gaps_selected_track)
+        self._fill_gaps_menu(gm, lambda t, f: act(gm, t, None, f))   # (lo mismo que el botón «⇤ Huecos» del visor)
         m.addSeparator()
         act(m, "🔒 Bloquear toda la timeline", None, lambda: self.ctrl.lock_all_tracks(True))
         act(m, "🔓 Desbloquear toda la timeline", None, lambda: self.ctrl.lock_all_tracks(False))
 
         m = mb.addMenu("&Ventana")
-        for key in ("media", "effects", "ai", "moments", "clips", "inspector", "voice", "transcript", "subtitles", "history",
-                    "scopes", "guided", "guide", "timeline"):
+        for key in ("media", "effects", "ai", "moments", "clips", "kw_folders", "inspector", "voice", "transcript",
+                    "subtitles", "history", "scopes", "guided", "guide", "timeline"):
             m.addAction(self.docks[key].toggleViewAction())
         m.addSeparator()
         act(m, "Restablecer la distribución de paneles", None, self.reset_layout)
@@ -1103,6 +1364,10 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("Ay&uda")
         act(m, "📖 Guía paso a paso", "F1", lambda: self.open_guide())
+        act(m, "🎓 Proyecto de ejemplo", None, self.open_example,
+            "Abre un proyecto genérico de YouTube para aprender sin usar tu material: una narración de prueba, "
+            "música propia y clips libres de Pexels (se descargan la primera vez, con sus créditos). "
+            "La guía te lleva paso a paso.")
         act(m, "Atajos de teclado", "Ctrl+F1", self._show_shortcuts)
         act(m, "⌨ Personalizar atajos…", None, self.open_shortcuts)
         act(m, "✧ Caché y diagnóstico…", None, self.open_diagnostics)
@@ -1128,6 +1393,17 @@ class MainWindow(QMainWindow):
         act(m, "🔄 Reinicio de proyecto (empezar de cero)…", None, self.reset_project,
             "Vacía la línea de tiempo, Medios, subtítulos y marcadores de esta pestaña para empezar de cero. Antes se "
             "guarda una copia de seguridad; tus archivos no se tocan.")
+        m.addSeparator()                           # ↪ ¿lo empezaste en la pestaña equivocada? llévalo a la buena
+        self._tab_move_acts = {}
+        from .workspaces import TABS as _TABS
+        for _k, _t in _TABS:
+            self._tab_move_acts[_k] = act(
+                m, f"↪ Cambiar este proyecto a {_t.replace('  ', ' ')}…", None,
+                lambda _=False, k=_k: self.change_project_tab(k),
+                "Lo lleva a esa pestaña con su formato (YouTube 16:9; Edits y Shorts 9:16) y lo QUITA de esta, que queda "
+                "vacía (así no se carga dos veces). Ctrl+Z devuelve el formato anterior.")
+        m.aboutToShow.connect(lambda: [a.setEnabled(k != self.workspaces.current)
+                                       for k, a in self._tab_move_acts.items()])
 
     # ----------------------------------------------------------- edición
     def _update_meter(self, t: float):
@@ -1149,15 +1425,33 @@ class MainWindow(QMainWindow):
         self._silence_dialog = SilenceDialog(self, ids)
         self._silence_dialog.exec()
 
+    def _fill_gaps_menu(self, m, add=None):
+        """⇤ Las opciones de huecos (las mismas en el botón del visor y en el menú Timeline).
+        add(texto, función): cómo se crean (en el menú Timeline, con act(): atajos personalizables)."""
+        m.clear()
+        add = add or (lambda t, f: m.addAction(t, f))
+        m.addAction("⇤ Juntar (Ctrl++): la pista elegida, o todo si no hay ninguna", self._join_right)
+        m.addSeparator()
+        add("🔊 En todas las pistas de audio", lambda: self.ctrl.close_gaps_on("audio"))
+        add("🎞 En todas las pistas de video", lambda: self.ctrl.close_gaps_on("video"))
+        add("En todas las pistas", lambda: self.ctrl.close_gaps_on(None))
+        m.addSeparator()
+        add("Solo en la pista del clip seleccionado", self._close_gaps_selected_track)
+
     def _gaps_menu(self):
         from PySide6.QtWidgets import QMenu
         m = QMenu(self)
-        m.addAction("🔊 Quitar los huecos de todas las pistas de audio", lambda: self.ctrl.close_gaps_on("audio"))
-        m.addAction("🎞 Quitar los huecos de todas las pistas de video", lambda: self.ctrl.close_gaps_on("video"))
-        m.addAction("Quitar los huecos de todas las pistas", lambda: self.ctrl.close_gaps_on(None))
-        m.addAction("Solo en la pista del clip seleccionado", self._close_gaps_selected_track)
+        self._fill_gaps_menu(m)
         b = self.preview.quick["gaps"]
         m.exec(b.mapToGlobal(b.rect().bottomLeft()))
+
+    def _toggle_snap(self):
+        """N: imán sí/no. A mitad de un arrastre, solo para ese arrastre (como en DaVinci Resolve)."""
+        if self.timeline.dragging():
+            self.timeline.snap_temp_toggle()
+            return
+        self.tool_snap.toggle()
+        self.timeline.set_snapping(self.tool_snap.isChecked())
 
     def _join_right(self):
         """⇤ Ctrl++ (el atajo del usuario en Resolve): todo se pega hacia la IZQUIERDA, sin espacios vacíos, en los
@@ -1165,7 +1459,25 @@ class MainWindow(QMainWindow):
         Lo vinculado de otras pistas (su imagen o su sonido) se mueve igual: nada se desincroniza. Un solo Ctrl+Z."""
         tl, p = self.timeline, self.ctrl.project
         chans = tl.channel_ids()
-        n = self.ctrl.close_gaps_on(None, track_ids=chans or None)
+        micro = False
+        if chans:          # (al hacer clic en un clip se elige su pista: si ahí no hay nada que juntar, se cierran los
+            n = self.ctrl.close_gaps_on(None, track_ids=chans, quiet=True)      # huequitos de las demás; antes «nada»)
+            if not n and not any(p.track(t) is not None and p.track(t).locked for t in chans):
+                fr = 1.0 / max(1.0, float(p.fps or 30))
+                n = self.ctrl.close_gaps_on(None, quiet=True, max_gap=2 * fr + 1e-6)
+                micro = True
+                if not n:
+                    self.statusBar().showMessage(
+                        "⇤ En la pista elegida no hay huecos, ni huequitos en las demás. Para juntar TODA la línea de "
+                        "tiempo: clic en una zona vacía (sin pista elegida) y Ctrl++.", 8000)
+                    return
+        else:
+            n = self.ctrl.close_gaps_on(None)
+        if n and micro:
+            tl.gap = None
+            self.statusBar().showMessage(f"⇤ En la pista elegida no había huecos: cerré {n} huequito(s) o solape(s) "
+                                         "diminutos de las demás pistas · Ctrl+Z lo deshace", 8000)
+            return
         if n:
             tl.gap = None
             where = ("en " + ", ".join(tl.track_badge(p.tracks.index(p.track(t)))[0] for t in chans) if chans
@@ -1199,7 +1511,11 @@ class MainWindow(QMainWindow):
                                      "cabezal · Alt+V pega sus ajustes en otros clips.", 6000)
 
     def _paste(self):
-        created = self.ctrl.paste_clips(self.engine.time)
+        try:
+            created = self.ctrl.paste_clips(self.engine.time)
+        except Exception as exc:  # noqa: BLE001 - EditError (p. ej. no hay nada copiado)
+            self.statusBar().showMessage(str(exc) or "No hay nada copiado: elige clips y pulsa Ctrl+C antes.", 6000)
+            return
         if isinstance(created, list):
             self.timeline.set_selection(created)
 
@@ -1211,7 +1527,11 @@ class MainWindow(QMainWindow):
         return sel
 
     def _paste_insert(self):
-        created = self.ctrl.paste_insert(self.engine.time)
+        try:
+            created = self.ctrl.paste_insert(self.engine.time)
+        except Exception as exc:  # noqa: BLE001 - EditError (p. ej. no hay nada copiado)
+            self.statusBar().showMessage(str(exc) or "No hay nada copiado: elige clips y pulsa Ctrl+C antes.", 6000)
+            return
         if isinstance(created, list):
             self.timeline.set_selection(created)
 
@@ -1507,7 +1827,7 @@ class MainWindow(QMainWindow):
         tl = self.timeline
         has = tl.has_comp()
         n = sum(1 for t in self.ctrl.project.tracks if t.role in tl.COMP_ROLES)
-        self.view_comp.setText(f"⊞ Pistas de composición ({n})" if n else "⊞ Pistas de composición")
+        self._tl_set(self.view_comp, f"⊞ Pistas de composición ({n})" if n else "⊞ Pistas de composición", "⊞")
         for b_ in (self.view_main, self.view_comp):
             b_.setVisible(has)
         mode = tl.view_mode()
@@ -1582,7 +1902,15 @@ class MainWindow(QMainWindow):
         if not self.timeline.selected and self.timeline.delete_gap():   # hueco seleccionado
             return
         if self.timeline.selected:
-            self.ctrl.delete_clips(sorted(self.timeline.selected), ripple=ripple)
+            sel = sorted(self.timeline.selected)
+            main = self.timeline.main_track_id()
+            if not ripple and self.timeline.magnetic_main and any(
+                    c in self.ctrl.project.clips and self.ctrl.project.clips[c].track_id == main for c in sel):
+                self.ctrl.magnetic_delete(sel, main)        # 🧲 junta TODAS las pistas (o deja el hueco y avisa)
+                return
+            self.ctrl.delete_clips(sel, ripple=ripple)
+            return
+        self.statusBar().showMessage("Nada elegido: haz clic en un clip (o en un hueco) y pulsa Supr.", 5000)
 
     def remove_black_bars(self):
         """▭ Quitar las barras negras de los videos (los clips seleccionados o, si no hay, todos los de la línea de
@@ -1670,7 +1998,7 @@ class MainWindow(QMainWindow):
                                      + ". Ctrl+Z lo devuelve.", 8000)
 
     def _toggle_lock(self):
-        ids = sorted(self.timeline.selected)
+        ids = self._sel_or_msg("Elige los clips que quieres bloquear o desbloquear (Ctrl+L).")
         if ids:
             lock = not all(self.ctrl.project.clips[i].locked for i in ids)
             self.ctrl.set_clip_props(ids, "Bloquear clip" if lock else "Desbloquear clip", locked=lock)
@@ -1842,7 +2170,7 @@ class MainWindow(QMainWindow):
         abrir_fallos(self)
 
     def open_keywords(self, media_ids: list | None = None, scope: str = "timeline"):
-        """🔑 Buscar palabras clave en el audio (ligero)."""
+        """🗣 Buscar lo que se dice en el audio (ligero). (No confundir con 🔑 Palabras clave = tus carpetas.)"""
         from .keywords_dialog import KeywordsDialog
         dlg = KeywordsDialog(self, scope, media_ids)
         dlg.show()
@@ -1988,7 +2316,7 @@ class MainWindow(QMainWindow):
         elif key == "edit":
             self.open_edit_maker()
         elif key == "audit":
-            self.open_audit()
+            self.open_quick_review()                 # ✓ la revisión guiada (la lista entera, desde ella o Ctrl+R)
 
     def open_thumbnail(self, fmt: str | None = None):
         """🖼 La página «Miniatura» (como las páginas de Resolve): el taller ocupa toda la ventana, en lugar de los
@@ -2213,6 +2541,13 @@ class MainWindow(QMainWindow):
             self.workspaces.switch("edit")         # 🗂 los edits van en su pestaña (la actual queda guardada)
         if self.ctrl.project.format != "edit" and not self.ctrl.project.clips:
             self.ctrl.set_project_format("edit")   # proyecto vacío: directamente en vertical
+        if self.workspaces.current == "edit":          # 🎵 en la pestaña Edits, a pantalla completa (no una ventanita)
+            for k in ("edit_opts", "edit_clips"):
+                self.docks[k].show()
+                self.docks[k].raise_()
+            self.statusBar().showMessage("🎵 Elige la canción y el estilo a la derecha y los clips a la izquierda; "
+                                         "luego «Crear edit».", 7000)
+            return
         EditDialog(self.ctrl, self).exec()
         self.timeline.fit()
 
@@ -2469,6 +2804,7 @@ class MainWindow(QMainWindow):
             # la pestaña ya dice si es Video, Edit o Short: aquí solo el nombre
             self.project_title.setText("·  " + os.path.splitext(name)[0] + ("  ●" if self.ctrl.dirty else ""))
             self.tl_name.setText(self.ctrl.project.name)
+            self._tl_refit()
 
     def _confirm_discard(self) -> bool:
         """Si hay cambios sin guardar, pregunta. Devuelve False si el usuario cancela."""
@@ -2678,15 +3014,16 @@ class MainWindow(QMainWindow):
         self.engine.pause()
         AuditDialog(self.ctrl, self.engine, self.timeline, self).exec()
 
-    def open_quick_review(self):
-        """⚡ Revisión rápida con teclas (Ctrl+Shift+Q): propuestas de la IA y cortes dudosos, uno a uno. No es modal."""
+    def open_quick_review(self, scope: str = "todo"):
+        """✓ Revisión guiada (Ctrl+Shift+Q): solo lo dudoso, uno a uno (voz, cortes, avisos y B-roll dudoso; «voz»: solo
+        lo de la voz). No es modal."""
         from .quick_review import QuickReview
         if self.voice.job is not None or self.ai_panel.job is not None:
-            QMessageBox.information(self, "Revisión rápida", "Espera a que termine la tarea de IA que está en marcha.")
+            QMessageBox.information(self, "Revisión guiada", "Espera a que termine la tarea de IA que está en marcha.")
             return
         if getattr(self, "quick_review", None) is None:
             self.quick_review = QuickReview(self)
-        self.quick_review.start()
+        self.quick_review.start(scope if isinstance(scope, str) else "todo")
 
     # ------------------------------------------------------- 📋 plantillas de proyecto
     def _fill_templates_menu(self):
@@ -2782,6 +3119,30 @@ class MainWindow(QMainWindow):
                and p.track(c.track_id).kind == TRACK_VIDEO]
         if ids:
             self.cut_scenes(ids)
+
+    def change_project_tab(self, fmt: str, ask: bool = True) -> bool:
+        """↪ (menú 🔄 Reinicio) Lleva el proyecto a otra pestaña y lo quita de esta (que queda vacía)."""
+        ws = self.workspaces
+        if fmt == ws.current:
+            self.statusBar().showMessage(f"Este proyecto ya está en {ws._label(fmt)}.", 5000)
+            return False
+        p = self.ctrl.project
+        if not p.clips and not p.media:
+            self.statusBar().showMessage(f"Esta pestaña está vacía: no hay nada que llevar a {ws._label(fmt)}. "
+                                         "Haz clic arriba en esa pestaña para trabajar allí.", 7000)
+            return False
+        if ask:
+            ratio = "16:9 (horizontal)" if fmt == "youtube" else "9:16 (vertical)"
+            r = QMessageBox.question(
+                self, "↪ Cambiar el proyecto de pestaña",
+                f"¿Llevar «{p.name or 'este proyecto'}» de {ws._label(ws.current)} a {ws._label(fmt)}?\n\n"
+                f"· Pasa a formato {ratio}, con todo lo que tiene.\n"
+                f"· {ws._label(ws.current)} queda VACÍA (no se carga dos veces).\n"
+                "· Ctrl+Z devuelve el formato anterior.",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes)
+            if r != QMessageBox.Yes:
+                return False
+        return ws.move_to(fmt, ask=ask)
 
     def reset_project(self):
         """🔄 Reinicio de proyecto: esta pestaña vuelve a estar vacía (línea de tiempo, Medios, subtítulos, marcadores).

@@ -68,9 +68,16 @@ def _load(name: str):
     return _loaded[name]
 
 
+BLOCK = 180.0           # 📝 cada 3 min de audio transcrito se entrega lo hecho (se puede usar sin esperar al final)
+
+
 def transcribe(samples: np.ndarray, model_key: str = "equilibrado", language: str = "es",
-               progress: ProgressFn = None, cancelled: CancelFn = None, fillers: bool = True) -> dict:
+               progress: ProgressFn = None, cancelled: CancelFn = None, fillers: bool = True,
+               partial=None, block: float = BLOCK, start_at: float = 0.0, prev: dict | None = None) -> dict:
     """
+    📝 Por bloques: Whisper escucha en orden, del segundo 0 al final; cada «block» segundos de audio llama a
+      partial(tr_a_medias) con lo que lleva, marcado con tr["hasta"] = segundo hasta el que está hecho (se puede usar
+      ya: palabras, subtítulos, cortes…). Si se corta, lo entregado se queda; start_at + prev siguen desde ahí.
     samples: audio mono a 16 kHz (float32).
     fillers: True (Limpieza: buscar muletillas, titubeos…) = sin lotes y con el ejemplo FILLER_PROMPT, para que
       Whisper NO borre las muletillas; False (subtítulos) = por lotes (más rápido) y sin ejemplo.
@@ -88,32 +95,44 @@ def transcribe(samples: np.ndarray, model_key: str = "equilibrado", language: st
     model = _load(name)
     check_cancel(cancelled)
     total = max(len(samples) / SAMPLE_RATE, 0.001)
-    report(progress, 0.0, "Transcribiendo…")
+    start_at = min(max(0.0, float(start_at or 0.0)), total)
+    audio = samples[int(start_at * SAMPLE_RATE):] if start_at else samples
+    report(progress, start_at / total, "Transcribiendo…")
     from .word_fix import hotwords
     # hotwords: las palabras que le pediste tener en cuenta (clic derecho en una palabra del panel Texto)
     if fillers:
-        segments, info = model.transcribe(samples, language=language or None, word_timestamps=True, beam_size=5,
+        segments, info = model.transcribe(audio, language=language or None, word_timestamps=True, beam_size=5,
                                           vad_filter=True, initial_prompt=FILLER_PROMPT, hotwords=hotwords())
     else:
         from faster_whisper import BatchedInferencePipeline
         segments, info = BatchedInferencePipeline(model=model).transcribe(
-            samples, language=language or None, word_timestamps=True, beam_size=5, batch_size=8)
+            audio, language=language or None, word_timestamps=True, beam_size=5, batch_size=8)
 
     words: list[list] = []
     segs: list[list] = []
+    if start_at and prev:                     # seguir: lo ya hecho (hasta start_at) se queda tal cual
+        words = [list(w) for w in prev.get("words", []) if float(w[1]) <= start_at + 1e-3]
+        segs = [list(sg) for sg in prev.get("segments", []) if sg[3] <= len(words)]
+    next_emit = (int(start_at // block) + 1) * block if block > 0 else float("inf")
     for seg in segments:
         check_cancel(cancelled)
         first = len(words)
         for w in seg.words or []:
             text = w.word.strip()
             if text and text.strip(".…·- "):          # (fuera las «palabras» que son solo puntos: «...»)
-                words.append([round(float(w.start), 3), round(float(w.end), 3), text,
+                words.append([round(start_at + float(w.start), 3), round(start_at + float(w.end), 3), text,
                               round(float(w.probability), 3)])
         if len(words) > first:
             segs.append([words[first][0], words[-1][1], first, len(words)])
-        m, s = divmod(int(seg.end), 60)
-        report(progress, min(0.95, seg.end / total), f"Transcribiendo… {m:02d}:{s:02d} de "
-                                                     f"{int(total) // 60:02d}:{int(total) % 60:02d}")
+        end = start_at + float(seg.end)
+        m, s = divmod(int(end), 60)
+        report(progress, min(0.95, end / total), f"Transcribiendo… {m:02d}:{s:02d} de "
+                                                 f"{int(total) // 60:02d}:{int(total) % 60:02d}")
+        if partial is not None and end >= next_emit and words and end < total - 1.0:
+            partial({"language": info.language, "model": name, "words": [list(w) for w in words],
+                     "segments": [list(sg) for sg in segs], "hasta": round(end, 3)})
+            while next_emit <= end:
+                next_emit += block
     tr = {"language": info.language, "model": name, "words": words, "segments": segs}
     tr = fill_holes(samples, tr, model, language, cancelled)
     report(progress, 1.0, f"Transcripción lista: {len(tr['words'])} palabras.")

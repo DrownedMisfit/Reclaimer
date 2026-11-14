@@ -1110,6 +1110,7 @@ class MomentsPanel(QWidget):
     def search_text(self):
         q = self.query.text().strip()
         if not q:
+            self.status.setText("Escribe qué buscar, p. ej. «explosión» o un nombre.")
             return
         if self._web():
             return self.search_web(q)
@@ -1268,6 +1269,7 @@ class MomentsPanel(QWidget):
 
     def _run(self, fn, label: str, with_progress: bool = False):
         if self.job is not None:
+            self.status.setText("Espera: ya hay una búsqueda en marcha.")
             return
         self.query_label = label
         self.status.setText(f"🔎 Buscando {label} en tus medios…")

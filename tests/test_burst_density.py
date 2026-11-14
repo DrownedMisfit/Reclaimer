@@ -124,7 +124,9 @@ def main():
     lay = win.btn_burst.parentWidget().layout()
     order = [lay.itemAt(k).widget() for k in range(lay.count()) if lay.itemAt(k).widget() is not None]
     texts = [getattr(w, "text", lambda: "")() for w in order]
-    assert texts.index("Dividir") < texts.index("⚡ Ráfaga") < texts.index("Eliminar"), texts
+    assert texts.index("Dividir") < texts.index("Eliminar"), texts      # (⚡ Ráfaga vive en «⋯ Más» desde el 13/11)
+    mas = [a.text() for a in win.btn_more.menu().actions()]
+    assert "⚡ Ráfaga de cortes al ritmo" in mas, mas
     win.timeline.set_selection([vc])
     win.engine.seek(4.0 * P + 0.02)
     n_before = len(p.clips)

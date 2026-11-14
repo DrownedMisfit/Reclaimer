@@ -255,7 +255,7 @@ def prueba_revision_sugerencia(app, av, words, MainWindow):
     win5.engine.pause = lambda: None
     from editoria.ui.quick_review import QuickReview
     qr = QuickReview(win5)
-    qr.start()
+    qr.start("voz")                      # (la parte de la voz y los cortes)
     check(len(qr.queue) == 1 and qr.queue[0].kind == "cut", "revisión: un corte dudoso en la cola")
     check("Sugerencia" in qr.sugg.text() and "bienvenidos" in qr.sugg.text(),
           f"revisión: muestra la sugerencia del corte ({qr.sugg.text()!r})")
@@ -272,7 +272,7 @@ def prueba_revision_sugerencia(app, av, words, MainWindow):
     check(win5.timeline.refresh_cut_issues() == 1, "Ctrl+Z devuelve el corte")
 
     # O: «Está bien así» sin tocarlo
-    qr.start()
+    qr.start("voz")                      # (la parte de la voz y los cortes)
     d1 = p5.duration()
     press(app, qr, Qt.Key_O)
     check(len(p5.cut_ok) == 1 and win5.timeline.refresh_cut_issues() == 0,

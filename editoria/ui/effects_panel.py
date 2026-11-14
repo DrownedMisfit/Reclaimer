@@ -231,7 +231,8 @@ class EffectsPanel(QWidget):
         self.tree.itemClicked.connect(self._preview)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._sound_menu)
-        self.tree.itemDoubleClicked.connect(lambda it, _c: self.add_at_playhead(it))
+        self.tree.itemDoubleClicked.connect(lambda it, _c: self.add_at_playhead(it) if it is not None and
+                                            it.data(0, Qt.UserRole) else None)
         v1.addWidget(self.tree)
         row = QHBoxLayout()
         b_add = QPushButton("➕ Poner en el cabezal")
@@ -805,9 +806,11 @@ class EffectsPanel(QWidget):
     def add_at_playhead(self, it):
         ref = it.data(0, Qt.UserRole) if it else None
         if not ref:
+            self.ctrl.message.emit("Elige antes un efecto de la lista (doble clic lo pone donde está el cabezal).")
             return
         mid = self.media_for(ref)
         if not mid:
+            self.ctrl.message.emit("No encuentro el archivo de ese efecto en el disco: no se puede poner.")
             return
         p = self.ctrl.project
         if p.media[mid].duration <= 0:   # recién importado: esperar a leer su duración

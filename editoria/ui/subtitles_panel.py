@@ -235,7 +235,9 @@ class SubtitlesPanel(QWidget):
         ctrl.project_changed.connect(self._lazy)
         ctrl.media_changed.connect(self._lazy)
         ctrl.transcript_changed.connect(self._lazy)
-        ctrl.transcript_changed.connect(lambda m: self._finish_quick(m) if m and m == self._pending else None)
+        ctrl.transcript_changed.connect(           # (con la transcripción entera, no con un bloque a medias)
+            lambda m: self._finish_quick(m) if m and m == self._pending
+            and (ctrl.project.transcripts.get(m) or {}).get("hasta") is None else None)
         self.refresh()
 
     # ------------------------------------------------------------ cambios
@@ -268,7 +270,7 @@ class SubtitlesPanel(QWidget):
         if not mid or mid not in p.media:
             self.info.setText("Primero elige o importa tu narración (pestaña «Limpieza»).")
             return
-        if mid in p.transcripts:
+        if mid in p.transcripts and p.transcripts[mid].get("hasta") is None:
             self._finish_quick(mid)
             return
         self._pending = mid

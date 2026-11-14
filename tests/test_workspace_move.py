@@ -160,6 +160,23 @@ def main():
     assert shown and shown[-1] == ["↪ Mover este proyecto a «YouTube»", "↪ Mover este proyecto a «Edits»"], shown
     print("✓ clic derecho en la barra: «↪ Mover este proyecto a» para las otras dos pestañas")
 
+    # ---- 7. menú 🔄 Reinicio → «↪ Cambiar este proyecto a…»: pregunta, lo lleva y deja la de origen vacía
+    rein = [m for m in win.menuBar().findChildren(QMenu) if m.title().replace("&", "") == "🔄 Reinicio"]
+    assert len(rein) == 1
+    rein[0].aboutToShow.emit()
+    cambiar = [a for a in rein[0].actions() if a.text().startswith("↪ Cambiar este proyecto a")]
+    assert len(cambiar) == 3 and [a.isEnabled() for a in cambiar] == [True, True, False],         [(a.text(), a.isEnabled()) for a in cambiar]
+    n = len(ctrl.project.clips)
+    res, asked = with_question(QMessageBox.Cancel, lambda: win.change_project_tab("edit"))
+    assert res is False and asked and "VACÍA" in asked[0] and ws.current == "short", asked
+    res, asked = with_question(QMessageBox.Yes, lambda: win.change_project_tab("edit"))
+    assert res is True and ws.current == "edit" and ctrl.project.format == "edit" and len(ctrl.project.clips) == n
+    ws.switch("short")
+    assert not ctrl.project.clips, "Shorts queda vacía tras llevarlo a Edits"
+    res, asked = with_question(QMessageBox.Cancel, lambda: win.change_project_tab("youtube"))
+    assert res is False and ws.current == "short", (asked, ws.current)       # (Cancelar: no se mueve nada)
+    print("✓ 🔄 Reinicio → «↪ Cambiar este proyecto a…»: pregunta, lo lleva a Edits y Shorts queda vacía")
+
     ctrl.undo_stack.setClean()
     win.close()
     pump(app, 0.2)

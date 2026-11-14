@@ -89,5 +89,10 @@ def ffmpeg_duck_volume(intervals: list[tuple[float, float]], clip_start: float, 
                      f"+between(t,{b0:.3f},{b0 + RELEASE:.3f})*(1-(t-{b0:.3f})/{RELEASE})")
     if not terms:
         return None
-    amount = f"min(1,{'+'.join(terms)})"
+    # FFmpeg no acepta más de ~32 sumandos seguidos en una expresión («Missing ')' or too many args»: el sonido de la
+    # exportación fallaba con una narración de 5 min): se agrupan de 8 en 8 entre paréntesis (misma curva; medido)
+    groups = terms
+    while len(groups) > 8:
+        groups = ["(" + "+".join(groups[i:i + 8]) + ")" for i in range(0, len(groups), 8)]
+    amount = f"min(1,{'+'.join(groups)})"
     return f"volume='1-{1 - g:.4f}*{amount}':eval=frame"

@@ -93,8 +93,9 @@ class GuidedPanel(QWidget):
         self.p4 = _Paso(4, "🎬 Clips para lo que dices",
                         "Lo que dices en la narración y el material que tienes para cada palabra.")
         self.p4.boton("Ver", "Muestra el panel 🎬 Clips.", lambda: win.show_panel(win.clips))
-        self.p5 = _Paso(5, "⚡ Revisión rápida", "Recorre con teclas las propuestas pendientes y los cortes dudosos.")
-        self.p5.boton("Empezar", "Abre la revisión rápida (Ctrl+Shift+Q).", win.open_quick_review)
+        self.p5 = _Paso(5, "✓ Revisión guiada", "Recorre con teclas solo lo dudoso: la voz, los cortes, los avisos y "
+                        "el B-roll que la IA no tiene claro.")
+        self.p5.boton("Empezar", "Abre la revisión guiada (Ctrl+Shift+Q).", lambda: win.open_quick_review())
         self.p6 = _Paso(6, "🖼 Miniatura", "Diseña la miniatura del video.")
         self.p6.boton("Abrir", "Ve a la página Miniatura.", lambda: win.go_page("thumb"))
         self.p7 = _Paso(7, "🚀 Entrega", "Exporta el video terminado.")
@@ -159,7 +160,7 @@ class GuidedPanel(QWidget):
 
         if self.isVisible():                           # el panel Clips puede estar oculto con un recálculo pendiente
             win.clips.ensure_fresh()
-        menciones = getattr(win.clips, "menciones", []) or []
+        menciones = [m for m in (getattr(win.clips, "menciones", []) or []) if not m.get("no_dicha")]
         con_carpeta = sum(1 for m in menciones if win.clips._carpeta_de(m["term"]) is not None)
         n_pal = len(menciones)
         self.p4.poner(f"{n_pal} palabras · {con_carpeta} con carpeta",

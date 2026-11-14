@@ -40,10 +40,13 @@ def cached(path: str) -> dict | None:
         return None
 
 
-def analyze(path: str, cancelled=None) -> dict:
+_VACIO = {"tempo": 0.0, "beats": [], "downbeats": [], "strong": [], "drop": None, "sections": [], "stops": []}
+
+
+def analyze(path: str, cancelled=None, force: bool = False) -> dict:
     """{"tempo", "beats", "downbeats", "strong", "drop", "sections": [{a, b, kind}], "stops", "duration"}
     cancelled: función opcional (como en los trabajos en segundo plano); si devuelve True, se para entre etapas."""
-    hit = cached(path)
+    hit = None if force else cached(path)          # (force: «🔁 Volver a escuchar» no usa lo guardado)
     if hit is not None:
         return hit
     from . import edit_engine, edit_maker
@@ -52,10 +55,13 @@ def analyze(path: str, cancelled=None) -> dict:
     samples = media_tools.decode_mono(path, sr)
     if cancelled is not None and cancelled():
         raise Cancelled()
+    dur = len(samples) / sr
+    if dur < 3.0 or float(np.sqrt(np.mean(np.square(samples, dtype=np.float64)))) < 1e-3:
+        return dict(_VACIO, duration=round(dur, 3))  # (un efecto cortito o silencio: sin ritmo, sin golpes falsos)
     song = edit_maker.analyze_song(path, samples)
     if cancelled is not None and cancelled():
         raise Cancelled()
-    if len(song["beats"]) >= 4:
+    if len(song["beats"]) >= 8:
         edit_engine.enrich(song, samples, sr)
         beats = song["beats"]
         hits = song["hits"]
@@ -65,8 +71,8 @@ def analyze(path: str, cancelled=None) -> dict:
         drop = edit_maker.find_drop(song)
         sections = [{"a": round(s["a"], 3), "b": round(s["b"], 3), "kind": s["kind"]} for s in song["sections"]]
         stops = [list(x) for x in song.get("stops", [])]
-    else:   # sin ritmo claro (voz, ambiente…)
-        beats, downbeats, strong, drop, sections, stops = song["beats"], [], [], None, [], []
+    else:   # sin ritmo claro (voz, ambiente…): sin golpes (antes salían unos pocos, falsos)
+        beats, downbeats, strong, drop, sections, stops = [], [], [], None, [], []
     tempo = float(song.get("tempo", 0.0))
     if len(beats) >= 8:   # el tempo de la rejilla ya corregida (más exacto)
         tempo = 60.0 / float(np.median(np.diff(beats)))

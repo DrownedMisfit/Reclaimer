@@ -26,6 +26,8 @@ ORANGE = QColor(232, 116, 47)
 # (id, título, palabras para el buscador, [(texto, objetivo, acción previa o None)])
 LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
     ("inicio", "👋 Primeros pasos", "empezar importar montar exportar ayuda básico", [
+        ("<b>¿Primera vez?</b> Menú <b>Ayuda → «🎓 Proyecto de ejemplo»</b>: un video genérico ya montado (narración "
+         "de prueba, música y clips libres de Pexels) para practicar sin tocar tu material.", "menu:Ayuda", None),
         ("<b>Importa tu material.</b> Pulsa «＋ Archivos» o «＋ Carpeta» y elige tu narración y tus clips. "
          "También puedes arrastrarlos desde el Explorador de Windows a este panel.", "w:library.btn_files", None),
         ("<b>Monta.</b> Arrastra un clip de Medios a la línea de tiempo, o haz <b>doble clic</b> en él y se "
@@ -36,6 +38,19 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "w:page_buttons.deliver", None),
         ("<b>¿Dudas con un botón?</b> Haz <b>clic derecho</b> sobre cualquier botón o sección → «❓ ¿Qué hace "
          "esto?» y te lo explica.", "w:preview", None),
+    ]),
+    ("proyecto_ejemplo", "🎓 Proyecto de ejemplo", "ejemplo practicar aprender primera vez tutorial demo pexels", [
+        ("Este es un proyecto genérico de YouTube: una <b>narración</b> de prueba (A1), <b>música</b> (A2) y clips "
+         "libres de <b>Pexels</b> (V1). Pulsa <b>Espacio</b> para verlo.", "w:timeline", None),
+        ("<b>1. Transcribe</b> la narración: «🎙 Transcribir y analizar». Así el programa sabe qué dices y cuándo "
+         "(la primera vez descarga el modelo).", "w:voice.btn_transcribe", None),
+        ("<b>2. Quita los silencios</b>: «✂ Eliminar silencio». La narración tiene pausas largas a propósito; se "
+         "marcan en naranja antes de cortarlas.", "w:preview.quick.silence", None),
+        ("<b>3. Pide B-roll</b>: «✨ B-roll» propone clips para cada frase según lo que dices.", "w:btn_broll", None),
+        ("<b>4. La música</b>: haz clic en ella (A2) y espera a que 🥁 termine: verás sus golpes en la regla y el drop "
+         "en rojo (segundo 16). Con el imán (N) los cortes se pegan a esos golpes.", "w:timeline", None),
+        ("<b>5. Exporta</b>: «⬆ Exportar». Los créditos de los clips de Pexels se escriben solos junto al video.",
+         "w:btn_export", None),
     ]),
     ("cortar", "✂ Cortar y recortar clips", "cortar dividir recortar borrar hueco cuchilla imán", [
         ("<b>Dividir:</b> pon el cabezal donde quieras cortar y pulsa <b>S</b>. O usa la cuchilla (<b>B</b>) y "
@@ -274,9 +289,9 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
      ]),
     ("curvas", "〰 Curvas de volumen y opacidad, y modos de fusión", "curvas volumen opacidad fusion pantalla multiplicar keyframes puntos",
      [
-         ("Activa <b>〰 Curvas</b> (Mayús+C). En los clips de audio verás la línea del <b>volumen</b> y en los de video "
-          "la de <b>opacidad</b>: clic en la línea = punto nuevo, arrastrar = moverlo, clic derecho = borrarlo, "
-          "Mayús+arrastrar = subir o bajar toda.", "w:tool_curves", None),
+         ("Activa <b>〰 Curvas</b> (Mayús+C, o «⋯ Más» en la barra de la línea de tiempo). En los clips de audio verás "
+          "la línea del <b>volumen</b> y en los de video la de <b>opacidad</b>: clic en la línea = punto nuevo, "
+          "arrastrar = moverlo, clic derecho = borrarlo, Mayús+arrastrar = subir o bajar toda.", "w:btn_more", None),
          ("Inspector → <b>Video</b>: <b>opacidad</b> y <b>modo de fusión</b> (pantalla para destellos y luces, "
           "multiplicar para sombras y texturas…).", "w:inspector.blend_box", None),
      ]),

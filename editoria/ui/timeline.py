@@ -32,7 +32,7 @@ from ..core.media import PEAK_RATE
 from ..core.model import (KIND_AUDIO, KIND_IMAGE, KIND_VIDEO, ORIGIN_AI, SUG_APPLIED, SUG_PENDING, TRACK_AUDIO,
                           TRACK_TEXT, TRACK_VIDEO)
 from . import help as help_ui
-from .common import COLORS, EFFECT_MIME, MEDIA_MIME, SEGMENT_MIME, SUGGESTION_COLORS, fmt_tc, fmt_time
+from .common import COLORS, EFFECT_MIME, MEDIA_MIME, NOAUDIO_MIME, SEGMENT_MIME, SUGGESTION_COLORS, fmt_tc, fmt_time
 from .help import add_help_action
 
 
@@ -58,6 +58,9 @@ class TimelineWidget(QWidget):
     suggestion_clicked = Signal(str)
     cut_issues_changed = Signal(int)      # cuántos cortes de audio pueden estar mal (líneas rojas)
     cut_issue_clicked = Signal(int)       # clic en una línea roja: índice en cut_issues
+    kw_kind_requested = Signal(list, str)  # ⚡ palabras clave: claves de mención y tipo ("" = volver a lo sugerido)
+    kw_arrange_requested = Signal()       # ⚡ acomodar todas las menciones
+    kw_toggled = Signal(bool)             # 🔑 enseñar / ocultar la fila de palabras clave
 
     NEW_ZONE = 26   # franja de abajo: suelta ahí algo y se crea una pista nueva
     HEADER_W = 170
@@ -67,7 +70,7 @@ class TimelineWidget(QWidget):
     EDGE_PX = 7
     SNAP_PX = 10
     DRAG_START_PX = 4
-    NUDGE_PX = 18          # ⇆ Alt + rueda: píxeles que avanza el clip por cada paso de la rueda (según el zoom)
+    NUDGE_PX = 18          # ⇆ Alt + rueda (slip): cuánto avanza el contenido por paso de la rueda (píxeles, según zoom)
     NUDGE_TAU_MS = 38.0    # suavidad: cuánto tarda en alcanzar el destino (constante de tiempo)
     NUDGE_COMMIT_MS = 450  # sin girar este rato: se aplica el movimiento
 
@@ -111,11 +114,27 @@ class TimelineWidget(QWidget):
         self.effect_current = -1
         self.hint_marks: list[tuple[float, str]] = []           # 🎬 «Dijiste…»: (tiempo, nombre) (no se guarda)
         self.hint_selected = -1                                 # 🔑 banderita elegida con clic (-1 = ninguna)
+        # ⚡ fila de palabras clave: [{key, t, dur, kind, manual, term, avail}] (la calcula keyword_arrange_ui)
+        self.kw_marks: list[dict] = []
+        self.kw_visible = False
         self.snapping = True      # imán
+        # 🗣 imán también a las palabras de la narración (desactivado de entrada: se activa en Timeline › Imán)
+        self.snap_words = str(QSettings("EditorIA", "EditorIA").value("timeline/iman_palabras", "false")).lower() == "true"
+        self._snap_labels: dict[float, str] = {}   # destino del imán → qué es («clip», «palabra clave», «golpe»…)
+        self._snap_hit: tuple[float, str] | None = None   # a qué se pegó ahora mismo (se dibuja una línea con su nombre)
+        self._snap_last: float | None = None               # el último destino al que se pegó _snap / _snap_fast
+        self._snap_temp: bool | None = None                 # N a mitad de un arrastre: cómo estaba el imán antes
+        self._words_memo: list[float] | None = None        # bordes de palabra en la línea de tiempo (hasta un cambio)
+        # 🧲 pista principal magnética: en la pista de video principal no quedan huecos (desactivada de entrada)
+        self.magnetic_main = str(QSettings("EditorIA", "EditorIA").value("timeline/principal_magnetica",
+                                                                         "false")).lower() == "true"
         self._rhythm_pts: dict = {}   # golpes de la música para el imán (se recalculan al cambiar algo)
         # Selección vinculada y forma de onda (se recuerdan entre sesiones)
         st = QSettings("EditorIA", "EditorIA")
         self.snap_rhythm = str(st.value("timeline/iman_ritmo", "true")).lower() == "true"
+        # 🥁 Los golpes de la música en la regla (y guías por compás): botón 🥁 de la esquina
+        self.beats_visible = str(st.value("timeline/ver_ritmo", "true")).lower() == "true"
+        self._beat_memo = None
         self.linked = str(st.value("timeline/vinculado", "true")).lower() == "true"
         self.wave_style = str(st.value("timeline/onda_estilo", "espejo"))      # espejo | rectificada | contorno | no
         self.wave_db = str(st.value("timeline/onda_db", "false")).lower() == "true"
@@ -131,6 +150,7 @@ class TimelineWidget(QWidget):
         ctrl.project_replaced.connect(self._on_replaced)
         ctrl.media_changed.connect(self.update)
         ctrl.rhythm_changed.connect(self._on_rhythm)
+        self.selection_changed.connect(self._beats_for_selection)   # 🥁 elegir una canción = reconocer su ritmo
         # Cortes de audio que pueden estar mal (líneas rojas): se recalculan un poco después de cada cambio
         self.cut_issues: list[dict] = []
         self._cut_timer = QTimer(self)
@@ -146,7 +166,7 @@ class TimelineWidget(QWidget):
         self._rueda_fin.setSingleShot(True)
         self._rueda_fin.setInterval(150)
         self._rueda_fin.timeout.connect(self.update)
-        # ⇆ Alt + rueda sobre un clip elegido: se desliza en la línea de tiempo (mismo tamaño), suave (ver _nudge_*)
+        # ⇆ Alt + rueda sobre un clip elegido: «slip», cambia la parte del video que enseña (ver _nudge_*)
         self._nudge: dict | None = None
         self._nudge_anim = QTimer(self)               # animación: el clip va hacia donde le lleva la rueda
         self._nudge_anim.setTimerType(Qt.PreciseTimer)
@@ -300,6 +320,219 @@ class TimelineWidget(QWidget):
             return None
         w = QFontMetrics(self._f(8)).horizontalAdvance(label) + int(10 * self.ui_k)
         return QRectF(x + 1, self.TOPIC_H + 1, w, int(15 * self.ui_k))
+
+    # ------------------------------------------------------------- ⚡ fila de palabras clave
+    def set_kw_marks(self, marks):
+        self.kw_marks = list(marks or [])
+        self.update()
+
+    def set_kw_visible(self, on: bool):
+        self.kw_visible = bool(on)
+        b = getattr(self, "_kw_btns", None)
+        if b is not None:
+            b[0].blockSignals(True)
+            b[0].setChecked(self.kw_visible)
+            b[0].blockSignals(False)
+            b[1].setEnabled(self.kw_visible)
+        self.update()
+
+    def _kw_rect(self, i: int):
+        """El chip de la mención i en la regla (None si no se ve): «🎮 Halo»; si no cabe antes de la siguiente, solo
+        el icono."""
+        from ..core.keyword_arrange import ICON
+        if not self.kw_visible or not (0 <= i < len(self.kw_marks)):
+            return None, ""
+        m = self.kw_marks[i]
+        x = self.x_for(m["t"])
+        if x < self.HEADER_W - 2 or x > self.width():
+            return None, ""
+        fm = self.fontMetrics()
+        icono = ICON.get(m["kind"], "?")
+        texto = f"{icono} {m['term']}"
+        w = fm.horizontalAdvance(texto) + 10
+        if i + 1 < len(self.kw_marks):
+            nx = self.x_for(self.kw_marks[i + 1]["t"])
+            if x + w > nx - 2:
+                texto = icono
+                w = fm.horizontalAdvance(texto) + 8
+        return QRectF(x + 1, self.TOPIC_H + 1, w, int(15 * self.ui_k)), texto
+
+    def kw_mark_at(self, pos: QPointF) -> int:
+        if not self.kw_visible or not self.kw_marks or not (self.TOPIC_H <= pos.y() <= self.TOPIC_H + 16 * self.ui_k):
+            return -1
+        for i in range(len(self.kw_marks) - 1, -1, -1):
+            r, _t = self._kw_rect(i)
+            if r is not None and r.contains(pos):
+                return i
+        return -1
+
+    def _kw_next(self, i: int) -> str:
+        m = self.kw_marks[i]
+        avail = [k for k in (m.get("avail") or ["gameplay", "cinematic", "none"])]
+        k = avail.index(m["kind"]) if m["kind"] in avail else -1
+        return avail[(k + 1) % len(avail)]
+
+    def _kw_menu(self, i: int, gpos):
+        from ..core.keyword_arrange import ICON, NAME
+        m = self.kw_marks[i]
+        menu = QMenu(self)
+        for k in m.get("avail") or []:
+            a = menu.addAction(f"{ICON[k]} {NAME[k]}", lambda k=k: self.kw_kind_requested.emit([m["key"]], k))
+            a.setCheckable(True)
+            a.setChecked(k == m["kind"])
+        mismas = [x["key"] for x in self.kw_marks if x["term"].casefold() == m["term"].casefold()]
+        if len(mismas) > 1:
+            sub = menu.addMenu(f"Todas las «{m['term']}» ({len(mismas)})")
+            for k in m.get("avail") or []:
+                sub.addAction(f"{ICON[k]} {NAME[k]}", lambda k=k: self.kw_kind_requested.emit(mismas, k))
+            sub.addAction("↺ Lo sugerido", lambda: self.kw_kind_requested.emit(mismas, ""))
+        if m.get("manual"):
+            menu.addAction("↺ Volver a lo sugerido", lambda: self.kw_kind_requested.emit([m["key"]], ""))
+        menu.addSeparator()
+        hook = getattr(self, "kw_menu_hook", None)
+        if hook is not None:
+            hook(menu)
+        menu.addAction("⏵ Ir aquí", lambda: self.seek_requested.emit(max(0.0, m["t"])))
+        menu.addAction("⚡ Acomodar todo", self.kw_arrange_requested.emit)
+        menu.exec(gpos)
+
+    # ---------------------------------------------------------------- 🥁 golpes de la música
+    def beat_marks(self) -> dict:
+        """Golpes, compases, fuertes y drops de la música, en tiempo de la línea de tiempo (memo)."""
+        if self._beat_memo is None:
+            bm = self.ctrl.rhythm_on_timeline() if self.ctrl.rhythm else \
+                {"beats": [], "downbeats": [], "strong": [], "drops": [], "sections": []}
+            bm["down_set"], bm["strong_set"] = set(bm["downbeats"]), set(bm["strong"])
+            bm["gap"] = self._median_gap(bm["beats"], 1.0)        # (mediana: una unión de dos trozos no la rompe)
+            bm["gap_down"] = self._median_gap(bm["downbeats"], 10.0)
+            self._beat_memo = bm
+        return self._beat_memo
+
+    @staticmethod
+    def _median_gap(ts, default: float) -> float:
+        d = sorted(b - a for a, b in zip(ts, ts[1:]) if b - a > 1e-3)
+        return d[len(d) // 2] if d else default
+
+    def _songs_to_listen(self, ids) -> set:
+        """Canciones de esos clips (o de toda la línea de tiempo) cuyo ritmo aún no se conoce: archivos de audio o
+        clips de música (no tu narración ni el sonido de un gameplay largo)."""
+        p = self.ctrl.project
+        out = set()
+        for c in (p.clips[i] for i in ids if i in p.clips):
+            m = p.media_of(c)
+            tr = p.track(c.track_id)
+            if m is None or tr is None or tr.kind != TRACK_AUDIO or c.text is not None or m.id in p.transcripts:
+                continue
+            if not (self.ctrl.is_music_clip(c) or (m.kind == "audio" and 20 <= (m.duration or 0) <= 15 * 60)):
+                continue                       # (un efecto o un audio corto no es una canción)
+            if m.id not in self.ctrl.rhythm and m.id not in self.ctrl.rhythm_failed:
+                out.add(m.id)
+        return out
+
+    def _beats_for_selection(self, ids):
+        """🥁 Al elegir una canción, se reconoce su ritmo (en segundo plano, una vez; luego queda guardado)."""
+        if self.beats_visible:
+            mids = self._songs_to_listen(ids or [])
+            if mids:
+                self.ctrl.analyze_rhythm(mids)
+                self._sync_beats_btn()
+
+    def set_beats_visible(self, on: bool):
+        self.beats_visible = bool(on)
+        QSettings("EditorIA", "EditorIA").setValue("timeline/ver_ritmo", "true" if on else "false")
+        if on:
+            sel = sorted(self.selected) or list(self.ctrl.project.clips)
+            mids = self._songs_to_listen(sel)
+            if mids:
+                n = self.ctrl.analyze_rhythm(mids)
+                if n:
+                    self.ctrl.message.emit(f"🥁 Escuchando el ritmo de {n} canción(es)… las marcas salen solas.")
+            elif not self.ctrl.rhythm:
+                self.ctrl.message.emit("🥁 Pon una canción en la línea de tiempo (o elígela): su ritmo sale en la "
+                                       "regla.")
+        self._sync_beats_btn()
+        self.update()
+
+    def _sync_beats_btn(self):
+        b = getattr(self, "_beats_btn", None)
+        if b is None:
+            return
+        b.blockSignals(True)
+        b.setChecked(self.beats_visible)
+        b.blockSignals(False)
+        busy = bool(self.ctrl.rhythm_busy)
+        b.setText("⏳" if busy and self.beats_visible else "🥁")
+
+    def _beats_button(self):
+        """🥁 en la franja de la esquina (junto a 🔑): enseña los golpes de la música en la regla."""
+        if getattr(self, "_beats_btn", None) is not None:
+            return self._beats_btn
+        from PySide6.QtWidgets import QToolButton
+        b = QToolButton(self)
+        b.setText("🥁")
+        b.setCheckable(True)
+        b.setChecked(self.beats_visible)
+        b.setAutoRaise(True)
+        b.setStyleSheet("QToolButton { color: #c9ccd3; padding: 0px 2px; }")
+        b.setToolTip("Ritmo de la música: en la regla, una rayita en cada golpe (más larga al empezar cada compás), "
+                     "punto naranja en los golpes fuertes y línea roja en el drop, con guías finas sobre las pistas. "
+                     "Al elegir una canción se escucha sola. Los cortes y los clips se pegan a los golpes (imán). "
+                     "Clic derecho = marcadores y más")
+        b.toggled.connect(self.set_beats_visible)
+        b.setContextMenuPolicy(Qt.CustomContextMenu)
+        b.customContextMenuRequested.connect(lambda pos: self._beats_menu(b.mapToGlobal(pos)))
+        self._beats_btn = b
+        return b
+
+    def _beats_menu(self, gpos):
+        menu = QMenu(self)
+        p = self.ctrl.project
+        sel = sorted(self.selected)
+        musica = [c.id for c in p.clips.values() if c.media_id in self.ctrl.rhythm]
+        elegidas = [i for i in sel if i in musica] or musica
+        mids = self._songs_to_listen(sel or list(p.clips))
+        a = menu.addAction("🥁 Escuchar el ritmo de la música", lambda: self.ctrl.analyze_rhythm(mids))
+        a.setEnabled(bool(mids))
+        a = menu.addAction("📍 Marcadores en el drop y en cada parte",
+                           lambda: self.ctrl.add_rhythm_markers(elegidas))
+        a.setEnabled(bool(elegidas))
+        a = menu.addAction("📍 Marcadores en cada compás", lambda: self.ctrl.add_rhythm_markers(elegidas, bars=True))
+        a.setEnabled(bool(elegidas))
+        a = menu.addAction("🔁 Volver a escuchar el ritmo",
+                           lambda: self.ctrl.analyze_rhythm({p.clips[i].media_id for i in elegidas}, force=True))
+        a.setEnabled(bool(elegidas))
+        menu.addSeparator()
+        im = menu.addAction("∩ Imán a los golpes")
+        im.setCheckable(True)
+        im.setChecked(self.snap_rhythm)
+        im.toggled.connect(self.set_snap_rhythm)
+        menu.exec(gpos)
+        self._sync_beats_btn()
+
+    def _kw_buttons(self):
+        """🔑 (enseñar la fila de palabras clave) y ⚡ (acomodarlas todas), en la franja de «Temas» de la esquina."""
+        if getattr(self, "_kw_btns", None) is not None:
+            return self._kw_btns
+        from PySide6.QtWidgets import QToolButton
+        ver = QToolButton(self)
+        ver.setText("🔑")
+        ver.setCheckable(True)
+        ver.setChecked(self.kw_visible)
+        ver.setToolTip("Palabras clave: resalta en la regla cada vez que dices una palabra que tiene carpeta "
+                       "(🔑 Clips por palabra), con 🎮 gameplay o 🎬 cinemática sugerido. Clic en una = cambiarla; "
+                       "clic derecho = más opciones")
+        ver.toggled.connect(lambda on: (self.set_kw_visible(on), self.kw_toggled.emit(on)))
+        ac = QToolButton(self)
+        ac.setText("⚡")
+        ac.setEnabled(self.kw_visible)
+        ac.setToolTip("Acomodar todo: pone en cada palabra clave un trozo de su carpeta, en orden (la historia avanza "
+                      "contigo, sin repetir), con la duración de tu frase. Un Ctrl+Z lo quita")
+        ac.clicked.connect(self.kw_arrange_requested.emit)
+        for b in (ver, ac):
+            b.setAutoRaise(True)
+            b.setStyleSheet("QToolButton { color: #c9ccd3; padding: 0px 2px; }")
+        self._kw_btns = (ver, ac)
+        return self._kw_btns
 
     def hint_mark_at(self, pos: QPointF) -> int:
         if not self.hint_marks or not (self.TOPIC_H <= pos.y() <= self.TOPIC_H + 16 * self.ui_k):
@@ -563,6 +796,9 @@ class TimelineWidget(QWidget):
     # ------------------------------------------------------------ estado
     def _on_replaced(self):
         self._shown_cache = None
+        self._beat_memo = None                       # (otro proyecto: otra música)
+        self._rhythm_pts.clear()
+        self._sync_beats_btn()
         self.selected.clear()
         self.selection_changed.emit([])
         self.scroll = 0.0
@@ -570,9 +806,13 @@ class TimelineWidget(QWidget):
 
     def _on_project_changed(self):
         self._shown_cache = None
+        self._joins_memo = None
+        self._words_memo = None
         if getattr(self, "_nudge", None) is not None:   # otro cambio a mitad del ⇆ Alt + rueda: se descarta
             self._nudge_cancel()
         self._rhythm_pts.clear()
+        self._beat_memo = None
+        self._sync_beats_btn()
         if self.sel_trans is not None:   # la transición seleccionada ya no existe
             from ..core import transitions as _TR
             c = self.ctrl.project.clips.get(self.sel_trans)
@@ -704,6 +944,8 @@ class TimelineWidget(QWidget):
 
     def _on_rhythm(self):
         self._rhythm_pts.clear()
+        self._beat_memo = None
+        self._sync_beats_btn()
         self.update()
 
     def set_snap_rhythm(self, on: bool):
@@ -714,6 +956,73 @@ class TimelineWidget(QWidget):
 
     def set_snapping(self, on: bool):
         self.snapping = bool(on)
+
+    def dragging(self) -> bool:
+        """¿Se está arrastrando un clip o un borde ahora mismo?"""
+        d = self._drag
+        return bool(d and d.get("active") and d.get("type") in ("move", "trim", "ripple", "roll", "slide", "slip",
+                                                                "topic_edge"))
+
+    def snap_temp_toggle(self):
+        """N a mitad de un arrastre: el imán se enciende o se apaga SOLO hasta soltar (como en DaVinci Resolve)."""
+        if self._snap_temp is None:
+            self._snap_temp = self.snapping
+        self.snapping = not self.snapping
+        if not self.snapping:
+            self._hit(None)
+        d = self._drag
+        if d is not None:
+            d.pop("_snap", None)                   # (los destinos se rehacen con el imán nuevo)
+        self.ctrl.message.emit("∩ Imán " + ("encendido" if self.snapping else "apagado") + " solo en este arrastre")
+
+    def _frame(self, t: float) -> float:
+        """Al fotograma del proyecto (sin imán, lo que mueves o recortas cae justo en un fotograma, como en Resolve)."""
+        fps = max(1.0, float(self.ctrl.project.fps or 30))
+        return round(t * fps) / fps
+
+    def set_snap_words(self, on: bool):
+        """🗣 El imán también pega a donde empieza y acaba cada palabra de la narración (cortes justo entre palabras)."""
+        self.snap_words = bool(on)
+        QSettings("EditorIA", "EditorIA").setValue("timeline/iman_palabras", "true" if on else "false")
+
+    def set_magnetic_main(self, on: bool):
+        """🧲 En la pista de video principal no quedan huecos: borrar o recortar junta lo de detrás."""
+        self.magnetic_main = bool(on)
+        QSettings("EditorIA", "EditorIA").setValue("timeline/principal_magnetica", "true" if on else "false")
+
+    def main_track_id(self) -> str:
+        vt = [t for t in self.ctrl.project.tracks if t.kind == TRACK_VIDEO]
+        return vt[-1].id if vt else ""
+
+    def _word_points(self) -> list[float]:
+        """Dónde empieza y acaba cada palabra de lo transcrito que está en la línea de tiempo (solo lo que se ve de
+        cada clip, con su velocidad). ⚡ Bordes de palabra por archivo en un array ordenado y búsqueda binaria por clip;
+        se guarda hasta el siguiente cambio del proyecto (narraciones de 20 000 palabras en cientos de trozos)."""
+        if self._words_memo is not None:
+            return self._words_memo
+        p = self.ctrl.project
+        bordes: dict[str, np.ndarray] = {}
+        out: list[np.ndarray] = []
+        vistos: set[tuple] = set()
+        for c in p.clips.values():
+            words = (p.transcripts.get(c.media_id) or {}).get("words") or []
+            sp = float(c.speed or 0.0)
+            if not words or sp <= 0:                 # (un fotograma congelado no tiene palabras)
+                continue
+            clave = (c.media_id, round(c.start, 4), round(c.source_in, 4), round(c.duration, 4))
+            if clave in vistos:                      # (su imagen y su sonido vinculados: una vez)
+                continue
+            vistos.add(clave)
+            arr = bordes.get(c.media_id)
+            if arr is None:
+                arr = bordes[c.media_id] = np.sort(np.asarray([float(x) for w in words for x in (w[0], w[1])]))
+            a, b = float(c.source_in), float(c.source_in) + float(c.duration) * sp
+            tr = arr[np.searchsorted(arr, a, "left"):np.searchsorted(arr, b, "right")]
+            if len(tr):
+                rel = (b - tr) if getattr(c, "reverse", False) else (tr - a)
+                out.append(float(c.start) + rel / sp)
+        self._words_memo = [float(x) for x in np.concatenate(out)] if out else []
+        return self._words_memo
 
     def set_linked(self, on: bool):
         self.linked = on
@@ -950,10 +1259,11 @@ class TimelineWidget(QWidget):
 
     # ------------------------------------------------------------- ⇆ Alt + rueda: deslizar el clip elegido
     def _nudge_wheel(self, e, dy: float) -> bool:
-        """⇆ Alt + rueda encima de un clip elegido: los clips elegidos (con su sonido vinculado) se deslizan hacia
-        atrás o hacia delante sin cambiar de tamaño. Suave (se anima hacia el destino), se detiene al tocar otro clip,
-        se pega un instante a las palabras clave y al cabezal, y el visor enseña el cuadro en vivo. Al dejar de girar
-        (o al soltar Alt) se aplica en un solo paso de Ctrl+Z. False = no es el caso (la rueda hace lo de siempre)."""
+        """⇆ Alt + rueda encima de un clip elegido = «slip» (como en DaVinci Resolve): el clip NO se mueve ni cambia de
+        tamaño; lo que cambia es QUÉ parte del video enseña, hacia delante o hacia atrás, para buscar el trozo exacto
+        sin cortar ni alargar. Suave (se anima), se para donde acaba el material del archivo, la tira y la onda del clip
+        y el visor enseñan el contenido en vivo, y al dejar de girar (o al soltar Alt) se aplica en un solo Ctrl+Z.
+        Su sonido vinculado (si empieza y acaba con él) se desliza igual. False = no es el caso."""
         if not dy:
             return False
         if self._nudge is None:
@@ -966,8 +1276,9 @@ class TimelineWidget(QWidget):
             if c is None or c.id not in self.selected or not self._nudge_begin(c):
                 return False
         n = self._nudge
-        paso = -float(dy) / 120.0 * self.NUDGE_PX / max(self.pps, 1e-6)   # rueda arriba = antes (como el scroll)
-        n["target"] = min(max(n["target"] + paso, n["lo"]), n["hi"])
+        fr = 1.0 / max(1.0, float(self.ctrl.project.fps or 30))
+        paso = max(fr, self.NUDGE_PX / max(self.pps, 1e-6))          # (al menos un fotograma por paso)
+        n["target"] = min(max(n["target"] + (-float(dy) / 120.0) * paso, n["lo"]), n["hi"])   # rueda arriba = antes
         self._nudge_fin.start()
         if not self._nudge_anim.isActive():
             n["clock"].restart()
@@ -976,58 +1287,43 @@ class TimelineWidget(QWidget):
 
     def _nudge_begin(self, anchor) -> bool:
         proj = self.ctrl.project
-        ids = [i for i in sorted(self.selected) if i in proj.clips]
-        clips = [proj.clips[i] for i in ids]
-        if not clips:
+        tr = proj.track(anchor.track_id)
+        if anchor.locked or (tr is not None and tr.locked):
+            self.ctrl.message.emit("🔒 Ese clip (o su pista) está bloqueado.")
             return False
-        for c in clips:
-            tr = proj.track(c.track_id)
-            if c.locked or (tr is not None and tr.locked):
-                self.ctrl.message.emit("🔒 Ese clip (o su pista) está bloqueado: no se puede mover.")
+        m = proj.media_of(anchor)
+        if m is None or m.kind == KIND_IMAGE or anchor.text is not None or anchor.speed <= 0 or not m.duration:
+            self.ctrl.message.emit("⇆ Una imagen, un texto o un fotograma congelado no tienen más material que enseñar.")
+            return False
+        # su imagen y su sonido (del mismo archivo) se deslizan juntos aunque no empiecen o acaben a la vez (J/L)
+        group = [anchor] + [o for o in self.ctrl.partners(proj, anchor) if o.media_id == anchor.media_id]
+        for x in group:
+            tx = proj.track(x.track_id)
+            if x.locked or (tx is not None and tx.locked):
+                self.ctrl.message.emit("🔒 Su imagen o su sonido vinculado (o su pista) está bloqueado.")
                 return False
-        sel = set(ids)
-        lo, hi = -min(c.start for c in clips), math.inf      # nunca antes del segundo 0
-        for c in clips:                                      # ni encima de otro clip: se detiene al tocarlo
-            for o in proj.clips_on(c.track_id):
-                if o.id in sel:
-                    continue
-                if o.end <= c.start + 1e-6:
-                    lo = max(lo, o.end - c.start)
-                elif o.start >= c.end - 1e-6:
-                    hi = min(hi, o.start - c.end)
-        lo, hi = min(lo, 0.0), max(hi, 0.0)
-        p0 = float(self.playhead)
-        mags = sorted({float(t) for t, _l in self.hint_marks} | {p0})    # 🔑 palabras clave y el cabezal
-        d = {"type": "move", "active": True, "nudge": True, "ids": ids, "anchor": anchor.id,
-             "dt": 0.0, "dtrack": 0, "kind0": None}
+        hb = min(self.ctrl._handles(proj, x)[0] for x in group)      # material libre antes y después (en la línea)
+        ha = min(self.ctrl._handles(proj, x)[1] for x in group)
+        if hb + ha < 1e-3:
+            self.ctrl.message.emit("⇆ Ese clip ya enseña todo su archivo: no hay más material que deslizar.")
+            return False
+        ids = [x.id for x in group]
+        d = {"type": "slip", "active": True, "nudge": True, "clip": anchor.id, "ids": ids, "dt": 0.0}
         clock = QElapsedTimer()
         clock.start()
-        self._nudge = {"d": d, "ids": ids, "a0": anchor.start, "a1": anchor.end, "lo": lo, "hi": hi,
-                       "target": 0.0, "cur": 0.0, "mags": np.asarray(mags, dtype=float), "p0": p0,
+        self._nudge = {"d": d, "ids": ids, "lo": -hb, "hi": ha, "target": 0.0, "cur": 0.0,
+                       "src0": {x.id: x.source_in for x in group}, "src": {}, "p0": float(self.playhead),
                        "clock": clock, "previewed": False}
         return True
 
-    def _nudge_snap(self, x: float) -> float:
-        """Imán suave: si el principio o el final del clip pasa cerca (SNAP_PX) de una palabra clave o del cabezal,
-        se queda ahí hasta que la rueda lo saca."""
-        n = self._nudge
-        arr = n["mags"]
-        if not self.snapping or not len(arr):
-            return x
-        best = None
-        for edge in (n["a0"], n["a1"]):
-            t = edge + x
-            i = int(np.searchsorted(arr, t))
-            for j in (i - 1, i):
-                if 0 <= j < len(arr):
-                    dpx = abs(float(arr[j]) - t) * self.pps
-                    if dpx <= self.SNAP_PX and (best is None or dpx < best[0]):
-                        best = (dpx, float(arr[j]) - edge)
-        return best[1] if best else x
+    def _nudge_src(self, x_id: str, dt: float) -> float:
+        """El segundo del archivo donde empezaría ese clip con el slip dt (hacia atrás si va al revés)."""
+        c = self.ctrl.project.clips.get(x_id)
+        s0 = self._nudge["src0"][x_id]
+        return max(0.0, s0 + (-dt if c is not None and c.reverse else dt) * (c.speed if c is not None else 1.0))
 
     def _nudge_step(self):
-        """Un fotograma de la animación (cada ~8 ms): se acerca al destino con suavizado exponencial, que no depende
-        de lo que tarde cada paso. Solo se repinta lo que cambia (ver _update_drag)."""
+        """Un paso de la animación (cada ~8 ms): se acerca al destino con suavizado exponencial, al fotograma."""
         n = self._nudge
         if n is None:
             self._nudge_anim.stop()
@@ -1037,11 +1333,16 @@ class TimelineWidget(QWidget):
         n["cur"] += (n["target"] - n["cur"]) * k
         if abs(n["target"] - n["cur"]) * self.pps < 0.3:
             n["cur"] = n["target"]
-        dt = min(max(self._nudge_snap(n["cur"]), n["lo"]), n["hi"])
+        fr = 1.0 / max(1.0, float(self.ctrl.project.fps or 30))
+        dt = min(max(round(n["cur"] / fr) * fr, n["lo"]), n["hi"])   # al fotograma (como Resolve)
         d = n["d"]
-        if abs(dt - d["dt"]) * self.pps >= 0.05:
+        if abs(dt - d["dt"]) > 1e-9:
             d["dt"] = dt
-            self._update_drag(d)
+            n["src"] = {x: self._nudge_src(x, dt) for x in n["ids"]}
+            for x in n["ids"]:                     # la tira y la onda del clip enseñan el contenido nuevo
+                c = self.ctrl.project.clips.get(x)
+                if c is not None:
+                    self.update(self.clip_rect(c).adjusted(-4, -4, 4, 4).toAlignedRect())
             self._nudge_preview()
         if n["cur"] == n["target"]:
             self._nudge_anim.stop()
@@ -1052,19 +1353,16 @@ class TimelineWidget(QWidget):
             QTimer.singleShot(24, self._nudge_flush_preview)
 
     def _nudge_time(self) -> float:
-        """Qué instante enseña el visor: el cabezal si el clip (ya deslizado) pasa por él; si no, su borde más
-        cercano al cabezal (su primer cuadro si queda a la derecha, el último si queda a la izquierda)."""
+        """Qué instante enseña el visor: el cabezal si está dentro del clip; si no, el primer cuadro del clip."""
         n = self._nudge
-        a, b = n["a0"] + n["d"]["dt"], n["a1"] + n["d"]["dt"]
-        p0 = n["p0"]
-        if a <= p0 < b:
-            return p0
-        fr = 1.0 / max(1.0, float(self.ctrl.project.fps or 30))
-        return a if p0 < a else max(a, b - fr)
+        c = self.ctrl.project.clips.get(n["d"]["clip"])
+        if c is None:
+            return n["p0"]
+        return n["p0"] if c.start <= n["p0"] < c.end else c.start
 
     def _nudge_flush_preview(self):
-        """El visor enseña el cuadro en vivo: los clips se ponen en su sitio nuevo SOLO durante la llamada al visor
-        (síncrona, en este mismo hilo) y vuelven enseguida; nada más ve el cambio hasta que se aplica."""
+        """El visor enseña el cuadro en vivo: el clip enseña su parte nueva SOLO durante la llamada al visor (síncrona,
+        en este mismo hilo) y vuelve enseguida; nada más ve el cambio hasta que se aplica."""
         self._nudge_prev_armed = False
         n = self._nudge
         if n is None:
@@ -1073,21 +1371,20 @@ class TimelineWidget(QWidget):
         if eng is not None and getattr(eng, "playing", False):
             return                                   # reproduciendo: no se salta el cabezal
         proj = self.ctrl.project
-        dt = n["d"]["dt"]
         orig: dict[str, float] = {}
         try:
-            for cid in n["ids"]:
+            for cid, src in n["src"].items():
                 c = proj.clips.get(cid)
                 if c is not None:
-                    orig[cid] = c.start
-                    c.start = c.start + dt
+                    orig[cid] = c.source_in
+                    c.source_in = src
             n["previewed"] = True
             self.seek_requested.emit(self._nudge_time())
         finally:
             for cid, s0 in orig.items():
                 c = proj.clips.get(cid)
                 if c is not None:
-                    c.start = s0
+                    c.source_in = s0
 
     def _nudge_stop(self) -> dict | None:
         n, self._nudge = self._nudge, None
@@ -1101,20 +1398,59 @@ class TimelineWidget(QWidget):
             self.update()
 
     def _nudge_commit(self):
-        """Aplica el deslizamiento (un solo Ctrl+Z) y el visor vuelve al cabezal de antes."""
+        """Aplica el slip (un solo Ctrl+Z) y el visor vuelve al cabezal de antes."""
         n = self._nudge_stop()
         if n is None:
             return
-        proj = self.ctrl.project
-        dt = n["d"]["dt"]
-        if abs(dt) > 1e-6:
-            moves = {cid: (proj.clips[cid].start + dt, proj.clips[cid].track_id)
-                     for cid in n["ids"] if cid in proj.clips}
-            if moves:
-                self.ctrl.move_clips(moves)
+        fr = 1.0 / max(1.0, float(self.ctrl.project.fps or 30))
+        dt = min(max(round(n["target"] / fr) * fr, n["lo"]), n["hi"])   # (adonde ibas, aunque la animación no llegara)
+        if abs(dt) > 1e-6 and n["d"]["clip"] in self.ctrl.project.clips:
+            self.ctrl.slip_clip(n["d"]["clip"], dt)
         self.update()
         if n.get("previewed"):
             self.seek_requested.emit(n["p0"])
+
+    # ------------------------------------------------------------- uniones entre trozos
+    JOIN_MAX_FR = 2.0      # un hueco o solape de hasta 2 fotogramas entre dos trozos es una «unión» (rojo / naranja)
+
+    def _joins(self) -> dict:
+        """Uniones de cada pista: {"lados": {clip: (pegado_izq, pegado_der)}, "marcas": [(pista, t, tipo, cuánto)]}.
+        tipo «ok» (pegados), «hueco» (separados menos de 2 fotogramas: casi no se ve y suena a corte) o «solape» (se
+        montan un pelín). Se recalcula solo al cambiar el proyecto."""
+        memo = getattr(self, "_joins_memo", None)
+        if memo is not None:
+            return memo
+        proj = self.ctrl.project
+        fr = 1.0 / max(1.0, float(proj.fps or 30))
+        lim = self.JOIN_MAX_FR * fr
+        lados: dict[str, list[bool]] = {}
+        marcas: list[tuple[str, float, str, float]] = []
+        for tr in proj.tracks:
+            if tr.kind not in (TRACK_AUDIO, TRACK_VIDEO):
+                continue
+            T = proj.clips_on(tr.id)
+            for a, b in zip(T, T[1:]):
+                d = b.start - a.end
+                if abs(d) > lim:
+                    continue
+                tipo = "ok" if abs(d) <= 1e-3 else ("hueco" if d > 0 else "solape")
+                marcas.append((tr.id, (a.end + b.start) / 2, tipo, abs(d)))
+                if tipo == "ok":
+                    lados.setdefault(a.id, [False, False])[1] = True
+                    lados.setdefault(b.id, [False, False])[0] = True
+        self._joins_memo = {"lados": lados, "marcas": marcas}
+        return self._joins_memo
+
+    def join_at(self, pos: QPointF) -> tuple[str, float] | None:
+        """La unión con hueco o solape diminuto bajo el ratón: (tipo, segundos) o None."""
+        ti = self.track_index_at(pos.y())
+        if ti is None:
+            return None
+        tid = self.ctrl.project.tracks[ti].id
+        for t_id, t, tipo, cuanto in self._joins()["marcas"]:
+            if t_id == tid and tipo != "ok" and abs(self.x_for(t) - pos.x()) <= 5:
+                return tipo, cuanto
+        return None
 
     # ------------------------------------------------------------- dibujo
     def paintEvent(self, _e):
@@ -1230,6 +1566,29 @@ class TimelineWidget(QWidget):
                     r = self.clip_rect(c)
                     p.setPen(QColor("#ffd166"))
                     p.drawText(r.adjusted(4, 16, 0, 0), Qt.AlignLeft | Qt.AlignTop, f"slip {d['dt']:+.2f} s")
+        # 🔗 Uniones: una línea fina donde se pegan dos trozos; en rojo un huequito y en naranja un solape diminutos
+        # (casi no se ven y hacen que un corte bien hecho parezca mal editado: Ctrl++ los arregla)
+        if self.pps >= 4:
+            jn = self._joins()
+            for t_id, t, tipo, cuanto in jn["marcas"]:
+                x = self.x_for(t)
+                if x < self.HEADER_W or x > W:
+                    continue
+                k_t = self._tindex.get(t_id)
+                if k_t is None or self.track_h(k_t[0]) <= 0:
+                    continue
+                y0 = self.track_y(k_t[0]) + 2
+                y1 = y0 + self.track_h(k_t[0]) - 4
+                if tipo == "ok":
+                    p.setPen(QPen(QColor(235, 238, 245, 150), 1))
+                    p.drawLine(QLineF(x, y0 + 16 * self.ui_k, x, y1))
+                else:
+                    col = QColor("#ff4d4d") if tipo == "hueco" else QColor("#ff9f1c")
+                    p.setPen(QPen(col, 2))
+                    p.drawLine(QLineF(x, y0, x, y1))
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(col)
+                    p.drawPolygon(QPolygonF([QPointF(x - 5, y0), QPointF(x + 5, y0), QPointF(x, y0 + 7)]))
         # Transiciones: una pajarita sobre el corte (ancho = su duración)
         from ..core import transitions as TR
         for i, tr in enumerate(proj.tracks):
@@ -1332,6 +1691,22 @@ class TimelineWidget(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 170), 1, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
             p.drawRect(r)
+        # 🥁 Guías finas en cada compás y en el drop (para cortar el video al ritmo)
+        if self.beats_visible and self.ctrl.rhythm:
+            bm = self.beat_marks()
+            downs, gap = bm["downbeats"], bm["gap_down"]
+            if gap * self.pps >= 14:
+                p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+                ta, tb = self.t_for(self.HEADER_W), self.t_for(W)
+                for b in downs:
+                    if ta <= b <= tb:
+                        x = self.x_for(b)
+                        p.drawLine(QLineF(x, self.RULER_H, x, H))
+            p.setPen(QPen(QColor(229, 65, 60, 120), 1.5))
+            for d in bm["drops"]:
+                x = self.x_for(d)
+                if self.HEADER_W <= x <= W:
+                    p.drawLine(QLineF(x, self.RULER_H, x, H))
         # Líneas de marcadores
         for m in proj.markers:
             x = self.x_for(m.time)
@@ -1352,6 +1727,37 @@ class TimelineWidget(QWidget):
             p.setPen(QPen(QColor("#1b1b1b"), 1))
             p.setBrush(QColor("#ffd166") if cur else QColor("#f2b33d"))
             p.drawPolygon(QPolygonF([QPointF(x, y - s), QPointF(x + s, y), QPointF(x, y + s), QPointF(x - s, y)]))
+        # ⚡ Palabras clave: el tramo que ocuparía cada una (franja de color arriba) y su línea
+        if self.kw_visible and self.kw_marks:
+            from ..core.keyword_arrange import COLOR as _KWC
+            for m in self.kw_marks:
+                x = self.x_for(m["t"])
+                x2 = self.x_for(m["t"] + max(0.0, float(m.get("dur") or 0)))
+                if x2 < self.HEADER_W or x > W:
+                    continue
+                c = QColor(_KWC.get(m["kind"], "#6b6f78"))
+                if m["kind"] != "none":
+                    c.setAlpha(150)
+                    p.fillRect(QRectF(max(x, float(self.HEADER_W)), self.RULER_H, max(1.0, x2 - max(x, float(self.HEADER_W))),
+                                      4 * self.ui_k), c)
+                c.setAlpha(120)
+                p.setPen(QPen(c, 1, Qt.DashLine))
+                p.drawLine(QLineF(x, self.RULER_H, x, H))
+        # ∩ El imán: a qué se pegó lo que arrastras (línea amarilla con su nombre)
+        if self._snap_hit is not None and self._drag is not None and self._drag.get("active"):
+            st, sl = self._snap_hit
+            xs = self.x_for(st)
+            if self.HEADER_W <= xs <= W:
+                p.setPen(QPen(QColor(255, 214, 10, 230), 1.5))
+                p.drawLine(QLineF(xs, self.RULER_H, xs, H))
+                if sl:
+                    fm = self.fontMetrics()
+                    r = QRectF(xs + 3, vtop + self.RULER_H + 2, fm.horizontalAdvance(sl) + 10, fm.height() + 2)
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(255, 214, 10, 235))
+                    p.drawRoundedRect(r, 3, 3)
+                    p.setPen(QColor("#1b1600"))
+                    p.drawText(r, Qt.AlignCenter, sl)
         # 🎬 Marcas de «Dijiste…»: línea fina discontinua cian (solo las que se ven)
         for t, _label in self.hint_marks:
             x = self.x_for(t)
@@ -1550,6 +1956,33 @@ class TimelineWidget(QWidget):
             if m.label:
                 p.setPen(color)
                 p.drawText(QPointF(x + 8, self.RULER_H - 4), m.label)
+        # 🥁 Golpes de la música: rayita por golpe (más larga en cada compás), punto naranja en los fuertes, 💥 drop
+        if self.beats_visible and self.ctrl.rhythm:
+            bm = self.beat_marks()
+            vis_a, vis_b = self.t_for(max(lo, float(self.HEADER_W)) - 2), self.t_for(min(hi, float(W)) + 2)
+            down, strong, gap = bm["down_set"], bm["strong_set"], bm["gap"]
+            ver_todos = gap * self.pps >= 5
+            yb = self.RULER_H - 1
+            for b in bm["beats"]:
+                if b < vis_a or b > vis_b:
+                    continue
+                x = self.x_for(b)
+                if b in down:
+                    p.setPen(QPen(QColor(255, 255, 255, 200), 1.4))
+                    p.drawLine(QLineF(x, yb - 9 * self.ui_k, x, yb))
+                elif ver_todos:
+                    p.setPen(QPen(QColor(255, 255, 255, 95), 1))
+                    p.drawLine(QLineF(x, yb - 4 * self.ui_k, x, yb))
+                if b in strong and gap * self.pps >= 4:
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor("#f2a03d"))
+                    p.drawEllipse(QPointF(x, yb - 11 * self.ui_k), 2.0, 2.0)
+            for d in bm["drops"]:
+                x = self.x_for(d)
+                if self.HEADER_W <= x <= W:
+                    p.setPen(QPen(QColor("#e5413c"), 2))
+                    p.drawLine(QLineF(x, T, x, self.RULER_H))
+                    p.drawText(QPointF(x + 3, T + 12), "💥 drop")
         # Entrada y salida (I / O): banda en la regla con corchetes
         proj = self.ctrl.project
         rng = proj.marked_range()
@@ -1563,6 +1996,20 @@ class TimelineWidget(QWidget):
                     if t is not None and self.HEADER_W <= xm <= W:
                         p.drawLine(QLineF(xm, y0 - 3, xm, self.RULER_H))
                         p.drawLine(QLineF(xm, y0 - 3, xm + 5 * sgn, y0 - 3))
+        # ⚡ Fila de palabras clave: un chip por mención (color = tipo; borde blanco = elegido a mano)
+        from ..core.keyword_arrange import COLOR as _KWC
+        for i in range(len(self.kw_marks) if self.kw_visible else 0):
+            r, texto = self._kw_rect(i)
+            if r is None:
+                continue
+            m = self.kw_marks[i]
+            c = QColor(_KWC.get(m["kind"], "#6b6f78"))
+            c.setAlpha(245 if m.get("manual") else 200)
+            p.setPen(QPen(QColor("#ffffff"), 1.5) if m.get("manual") else Qt.NoPen)
+            p.setBrush(c)
+            p.drawRoundedRect(r, 3, 3)
+            p.setPen(QColor("#101114"))
+            p.drawText(r, Qt.AlignCenter, texto)
         # 🎬 Banderitas de «Dijiste…» (clic = ir ahí)
         for i in range(len(self.hint_marks)):
             r = self._hint_rect(i)
@@ -1629,6 +2076,15 @@ class TimelineWidget(QWidget):
         bv.setGeometry(6 + wa, y, ws, h)
         ba.setGeometry(8 + wa + ws, y, ws, h)
         for b in (add, bv, ba):
+            if not b.isVisible():
+                b.show()
+        ver, ac = self._kw_buttons()
+        hb = max(14, T - 2)
+        ac.setGeometry(self.HEADER_W - 4 - hb - 4, self._vt() + 1, hb + 4, hb)
+        ver.setGeometry(self.HEADER_W - 4 - 2 * (hb + 4) - 2, self._vt() + 1, hb + 4, hb)
+        bt = self._beats_button()
+        bt.setGeometry(self.HEADER_W - 4 - 3 * (hb + 4) - 4, self._vt() + 1, hb + 4, hb)
+        for b in (ver, ac, bt):
             if not b.isVisible():
                 b.show()
 
@@ -1864,6 +2320,9 @@ class TimelineWidget(QWidget):
     def _paint_clip(self, p: QPainter, c, r: QRectF, dim=False, ghost=False):
         if r.right() < self.HEADER_W or r.left() > self.width():
             return
+        nz = self._nudge
+        if nz is not None and c.id in nz.get("src", {}):      # ⇆ slip con Alt + rueda: su contenido nuevo, en vivo
+            c = replace(c, source_in=nz["src"][c.id])
         proj = self.ctrl.project
         m = proj.media_of(c)
         kind = m.kind if m else ("text" if c.text else "video")
@@ -1914,7 +2373,12 @@ class TimelineWidget(QWidget):
             p.restore()
             return
         p.drawRoundedRect(r, 4, 4)
-        p.setClipRect(r.adjusted(1, 1, -1, -1), Qt.IntersectClip)
+        izq, der = self._joins()["lados"].get(c.id, (False, False)) if not (dim or ghost) else (False, False)
+        if izq:            # 🔗 pegado al de antes: esquinas rectas (si no, entre dos trozos se veía un corte)
+            p.drawRect(QRectF(r.left(), r.top(), min(6.0, r.width() / 2), r.height()))
+        if der:
+            p.drawRect(QRectF(r.right() - min(6.0, r.width() / 2), r.top(), min(6.0, r.width() / 2), r.height()))
+        p.setClipRect(r.adjusted(0 if izq else 1, 1, 0 if der else -1, -1), Qt.IntersectClip)
 
         # Contenido: forma de onda o miniatura
         if kind == KIND_AUDIO:
@@ -2326,19 +2790,59 @@ class TimelineWidget(QWidget):
                 return m, "body"
         return None, None
 
-    def _snap_targets(self, exclude: set[str]) -> list[float]:
-        pts = [0.0, self.playhead]
+    def _snap_points(self, exclude: set[str], keep_rhythm: bool = False) -> list[tuple[float, str]]:
+        """Los destinos del imán con lo que es cada uno (para enseñar a qué se pegó)."""
+        pts: list[tuple[float, str]] = [(0.0, "inicio"), (self.playhead, "cabezal")]
         for c in self.ctrl.project.clips.values():
             if c.id not in exclude:
-                pts += [c.start, c.end]
-        pts += [m.time for m in self.ctrl.project.markers]
+                pts += [(c.start, "clip"), (c.end, "clip")]
+        pts += [(m.time, "marcador") for m in self.ctrl.project.markers]
+        if self.kw_visible:
+            pts += [(float(m["t"]), "palabra clave") for m in self.kw_marks]
+        pts += [(float(t), "marca") for t, _l in self.hint_marks]
         if self.snap_rhythm and self.ctrl.rhythm:
-            key = frozenset(exclude)
+            rex = set() if keep_rhythm else set(exclude)
+            key = frozenset(rex)
             if key not in self._rhythm_pts:
-                rt = self.ctrl.rhythm_on_timeline(exclude=set(exclude))
-                self._rhythm_pts = {key: rt["beats"] + rt["drops"]}   # solo el último (cambia al arrastrar otro)
-            pts += self._rhythm_pts[key]
+                rt = self.ctrl.rhythm_on_timeline(exclude=rex)
+                down = set(rt["downbeats"])
+                drops = rt["drops"]
+                lejos = lambda t: not any(abs(t - d) < 1e-3 for d in drops)        # noqa: E731  (el drop manda)
+                self._rhythm_pts = {key: ([(t, "💥 drop") for t in drops],
+                                          [(t, "compás") for t in rt["downbeats"] if lejos(t)],
+                                          [(t, "golpe") for t in rt["beats"] if t not in down and lejos(t)],
+                                          self._median_gap(rt["beats"], 1.0), self._median_gap(rt["downbeats"], 10.0))}
+            drops_p, downs_p, beats_p, g_b, g_d = self._rhythm_pts[key]   # (solo el último: cambia al arrastrar)
+            pts += drops_p
+            if g_d * self.pps >= 2 * self.SNAP_PX:          # muy alejado: solo los drops (si no, todo se pegaría)
+                pts += downs_p
+                if g_b * self.pps >= 2 * self.SNAP_PX:
+                    pts += beats_p
+        if self.snap_words:
+            pts += [(t, "palabra") for t in self._word_points()]
         return pts
+
+    def _snap_targets(self, exclude: set[str], keep_rhythm: bool = False) -> list[float]:
+        pts = self._snap_points(exclude, keep_rhythm)
+        lab = {}
+        for t, n in reversed(pts):                 # (si coinciden, manda el primero: clip antes que palabra)
+            lab[round(float(t), 4)] = n
+        self._snap_labels = lab
+        return [t for t, _n in pts]
+
+    def _hit(self, s: float | None, ph: float | None = None):
+        """Apunta a qué se pegó el imán (None = a nada); si cambió, repinta solo la franja de la línea vieja y la nueva."""
+        ph = self.playhead if ph is None else ph
+        new = None if s is None else (float(s), "cabezal" if abs(s - ph) < 1e-9 else
+                                      self._snap_labels.get(round(float(s), 4), ""))
+        if new == self._snap_hit:
+            return
+        old, self._snap_hit = self._snap_hit, new
+        ancho = self.fontMetrics().horizontalAdvance("palabra clave") + 30
+        for h in (old, new):
+            if h is not None:
+                x = int(self.x_for(h[0]))
+                self.update(QRect(x - 3, 0, ancho, self.height()))
 
     def _paint_rhythm(self, p: QPainter, c, r: QRectF, rh: dict):
         """El ritmo sobre la canción: rayita en cada golpe, más larga al empezar cada compás, punto naranja
@@ -2393,16 +2897,19 @@ class TimelineWidget(QWidget):
 
     def _snap(self, t: float, targets: list[float]) -> float:
         if not self.snapping:
+            self._snap_last = None
             return t
         best = None
         for s in targets:
             dpx = abs(s - t) * self.pps
             if dpx <= self.SNAP_PX and (best is None or dpx < best[0]):
                 best = (dpx, s)
+        self._snap_last = best[1] if best else None
         return best[1] if best else t
 
     # ------------------------------------------------------------- ratón
     def mousePressEvent(self, e):
+        self._snap_hit = None            # (ninguna línea del imán de antes)
         if self._nudge is not None:      # ⇆ un clic aplica el deslizamiento pendiente
             self._nudge_commit()
         apos = e.position()             # (real: los rombos de efectos van bajo la regla fija)
@@ -2426,8 +2933,15 @@ class TimelineWidget(QWidget):
             return
         h = self.hint_mark_at(pos) if e.button() == Qt.LeftButton else -1
         if h >= 0:                  # 🎬 banderita de «Dijiste…»: el cabezal va ahí (y queda elegida 🔑)
-            self.select_hint(h)
+            self.select_hint(h)     # (va encima de los chips ⚡: se pinta encima y se pulsa antes)
             self.seek_requested.emit(max(0.0, self.hint_marks[h][0]))
+            return
+        kwi = self.kw_mark_at(pos) if e.button() in (Qt.LeftButton, Qt.RightButton) else -1
+        if kwi >= 0:                # ⚡ chip de palabra clave: clic (sin arrastrar) = el tipo siguiente; derecho = menú
+            if e.button() == Qt.RightButton:
+                self._kw_menu(kwi, e.globalPosition().toPoint())
+            else:
+                self._drag = {"type": "kw_click", "i": kwi, "x0": pos.x()}
             return
         if pos.y() < self.RULER_H:
             topic, tzone = self.topic_at(pos)
@@ -2484,7 +2998,12 @@ class TimelineWidget(QWidget):
             return
         alt = bool(e.modifiers() & Qt.AltModifier)
         if self.tool == "blade" and clip is not None:
-            t = self._snap(self.t_for(pos.x()), [self.playhead])
+            t0 = self.t_for(pos.x())
+            propios = set(self._with_links([clip.id], False))
+            t = self._snap(t0, self._snap_targets(propios, keep_rhythm=True))   # bordes de otros clips, cabezal,
+                                                                                   # marcadores y los golpes de su canción
+            if self._snap_last is None or not (clip.start + 1e-6 < t < clip.end - 1e-6):
+                t = self._frame(t0)                                   # sin imán (o fuera del clip): en un fotograma
             self.ctrl.split(t, self._with_links([clip.id], alt))
             return
         if clip is None:
@@ -2542,7 +3061,8 @@ class TimelineWidget(QWidget):
         centro = slip, Mayús+centro = slide. Con la herramienta normal: Ctrl+borde = ripple,
         Ctrl+Mayús+borde = roll."""
         trim_tool = self.tool == "trim"
-        if zone in ("left", "right") and (trim_tool or ctrl_m):
+        iman = self.magnetic_main and clip.track_id == self.main_track_id() and not shift_m
+        if zone in ("left", "right") and (trim_tool or ctrl_m or iman):
             nb = self._neighbor(clip, zone)
             if shift_m and nb is not None:
                 right = clip if zone == "left" else nb
@@ -2550,7 +3070,8 @@ class TimelineWidget(QWidget):
                         "limits": self.ctrl.roll_limits(right.id)}
             return {"type": "ripple", "clip": clip.id, "edge": zone, "x0": pos.x(),
                     "t": clip.start if zone == "left" else clip.end,
-                    "limits": self.ctrl.ripple_limits(clip.id, zone), "linked": self.linked}
+                    "limits": self.ctrl.ripple_limits(clip.id, zone), "linked": self.linked,
+                    "magnet": iman and not (trim_tool or ctrl_m)}
         if zone == "body" and trim_tool:
             if shift_m:
                 return {"type": "slide", "clip": clip.id, "x0": pos.x(), "dt": 0.0,
@@ -2579,6 +3100,10 @@ class TimelineWidget(QWidget):
             c = proj.clips.get(d["clip"])
             if c is not None:
                 out += [self.clip_rect(c, c.start + d["dt"]), self.clip_rect(c)]
+        elif d["type"] == "slip":
+            c = proj.clips.get(d["clip"])
+            if c is not None:
+                out.append(self.clip_rect(c))
         elif d["type"] == "ripple":
             c = proj.clips.get(d["clip"])
             if c is not None:
@@ -2614,11 +3139,13 @@ class TimelineWidget(QWidget):
             pass
         return np.sort(np.asarray(tg, dtype=float))
 
-    def _snap_fast(self, t: float, arr: np.ndarray) -> float:
-        """Igual que _snap, pero con búsqueda binaria en el array de _snap_arr (el más cercano está junto a t)."""
+    def _snap_fast(self, t: float, arr: np.ndarray, ph: float | None = None) -> float:
+        """Igual que _snap, pero con búsqueda binaria en el array de _snap_arr (el más cercano está junto a t).
+        ph: el cabezal a tener en cuenta (al recortar, el del principio: el cabezal sigue al borde que arrastras)."""
         if not self.snapping:
+            self._snap_last = None
             return t
-        cand = [self.playhead]
+        cand = [self.playhead if ph is None else ph]
         n = len(arr)
         if n:
             i = int(np.searchsorted(arr, t))
@@ -2628,6 +3155,7 @@ class TimelineWidget(QWidget):
             dpx = abs(s - t) * self.pps
             if dpx <= self.SNAP_PX and (best is None or dpx < best[0]):
                 best = (dpx, s)
+        self._snap_last = best[1] if best else None
         return best[1] if best else t
 
     def _seek_soon(self, t: float):
@@ -2752,6 +3280,11 @@ class TimelineWidget(QWidget):
                        "Doble clic: renombrar · Clic derecho: más opciones · Arrastra el borde para ajustarlo")
             else:
                 tip = m.label if m else (sug[1] if sug else "")
+                jn = self.join_at(pos) if not tip and pos.x() > self.HEADER_W else None
+                if jn is not None:
+                    tip = (f"🔗 Hueco de {jn[1] * 1000:.0f} ms entre dos trozos (casi no se ve, pero suena a corte) · "
+                           "Ctrl++ lo junta" if jn[0] == "hueco" else
+                           f"🔗 Estos dos trozos se montan {jn[1] * 1000:.0f} ms · Ctrl++ lo arregla")
                 if not tip and clip is None and pos.x() > self.HEADER_W:
                     gi = self.track_index_at(pos.y())
                     if gi is not None:
@@ -2761,6 +3294,10 @@ class TimelineWidget(QWidget):
                                    "Clic derecho = eliminar todos los huecos de la pista")
             self.setToolTip(tip)
             return
+        if d["type"] == "kw_click":         # arrastrar desde un chip = mover el cabezal (como en el resto de la regla)
+            if abs(pos.x() - d["x0"]) < self.DRAG_START_PX:
+                return
+            self._drag = d = {"type": "scrub"}
         if d["type"] == "scrub":
             self._seek_soon(max(0.0, self.t_for(pos.x())))
             return
@@ -2789,6 +3326,7 @@ class TimelineWidget(QWidget):
             if "_snap" not in d:
                 d["_snap"] = self._snap_arr(set())
             d["new_t"] = max(0.0, self._snap_fast(self.t_for(pos.x()), d["_snap"]))
+            self._hit(self._snap_last)
             self.setCursor(Qt.SizeHorCursor)
         elif d["type"] == "move":
             anchor = proj.clips[d["anchor"]]
@@ -2796,11 +3334,18 @@ class TimelineWidget(QWidget):
             if "_snap" not in d:
                 d["_snap"] = self._snap_arr(set(d["ids"]))
             snapped_start = self._snap_fast(anchor.start + dt, d["_snap"])
+            hit_start = self._snap_last
             snapped_end = self._snap_fast(anchor.end + dt, d["_snap"])
+            hit_end = self._snap_last
+            pegado = None
             if snapped_start != anchor.start + dt:
                 dt = snapped_start - anchor.start
+                pegado = (hit_start, dt)
             elif snapped_end != anchor.end + dt:
                 dt = snapped_end - anchor.end
+                pegado = (hit_end, dt)
+            if pegado is None:                      # sin imán: el clip empieza justo en un fotograma (salvo si casi
+                dt = 0.0 if abs(dt) * self.pps < 1.0 else self._frame(anchor.start + dt) - anchor.start   # no se movió)
             # No permitir que ningún clip quede antes del segundo 0
             dt = max(dt, -min(proj.clips[i].start for i in d["ids"]))
             dtrack = 0
@@ -2817,13 +3362,18 @@ class TimelineWidget(QWidget):
                         dtrack = 0
                         break
             d["dt"], d["dtrack"] = self._safe_dt(d, dt, dtrack), dtrack
+            self._hit(pegado[0] if pegado and abs(d["dt"] - pegado[1]) < 1e-9 else None)   # (si no llegó, sin línea)
             self.setCursor(Qt.ClosedHandCursor)
         elif d["type"] in ("ripple", "roll"):
             lo, hi = d["limits"]
             if "_snap" not in d:
                 d["_snap"] = self._snap_arr({d.get("clip"), d.get("right")})
-            t = self._snap_fast(self.t_for(pos.x()), d["_snap"])
+            ph0 = d.setdefault("_ph", self.playhead)
+            t = self._snap_fast(self.t_for(pos.x()), d["_snap"], ph0)
+            if self._snap_last is None:
+                t = self._frame(t)
             d["t"] = min(max(t, lo), hi)
+            self._hit(self._snap_last if self._snap_last is not None and abs(d["t"] - t) < 1e-9 else None, ph0)
             self._seek_soon(d["t"])
         elif d["type"] == "slip":
             d["dt"] = (pos.x() - d["x0"]) / self.pps
@@ -2839,12 +3389,20 @@ class TimelineWidget(QWidget):
             if "_snap" not in d:
                 d["_edges"] = self._track_edges(c)
                 d["_snap"] = self._snap_arr({c.id})
+            ph0 = d.setdefault("_ph", self.playhead)
             sticky = self._sticky_edge(c, t, d["_edges"]) if self.snapping else None
-            t = sticky if sticky is not None else self._snap_fast(t, d["_snap"])
+            t = sticky if sticky is not None else self._snap_fast(t, d["_snap"], ph0)
+            pegado = sticky if sticky is not None else self._snap_last
+            if pegado is None:
+                t = self._frame(t)
             if d["edge"] == "left":
                 d["new_start"], d["new_end"] = min(max(t, lmin), lmax), c.end
             else:
                 d["new_start"], d["new_end"] = c.start, min(max(t, rmin), rmax)
+            final = d["new_start"] if d["edge"] == "left" else d["new_end"]
+            if sticky is not None:
+                self._snap_labels.setdefault(round(float(sticky), 4), "clip")
+            self._hit(pegado if pegado is not None and abs(final - t) < 1e-9 else None, ph0)
             self._seek_soon(d["new_start"] if d["edge"] == "left" else d["new_end"])
         if d["type"] in ("move", "trim", "slide", "ripple"):
             self._update_drag(d)
@@ -2855,6 +3413,18 @@ class TimelineWidget(QWidget):
         self._flush_seek()                  # el último seek pendiente del arrastre, al momento
         d, self._drag = self._drag, None
         self.setCursor(Qt.ArrowCursor)
+        if self._snap_hit is not None:                       # (la línea del imán, fuera al soltar)
+            self._snap_hit = None
+            self.update()
+        if self._snap_temp is not None:                      # (N solo valía para ese arrastre)
+            self.snapping, self._snap_temp = self._snap_temp, None
+        if d and d["type"] == "kw_click":                    # ⚡ clic en un chip: el tipo siguiente
+            i = d["i"]
+            if 0 <= i < len(self.kw_marks):
+                nxt = self._kw_next(i)
+                if nxt != self.kw_marks[i]["kind"]:
+                    self.kw_kind_requested.emit([self.kw_marks[i]["key"]], nxt)
+            return
         if d and d["type"] == "track_zoom":                  # se recuerda (igual que con 🎞↕ / 🔊↕)
             self.set_wave(video_h=self.video_h, audio_h=self.audio_h)
             return
@@ -2909,6 +3479,8 @@ class TimelineWidget(QWidget):
             self.ctrl.trim_clip(d["clip"], d["edge"], t, linked=d.get("linked", True), overwrite=True)
         elif d["type"] == "topic_edge":
             self.ctrl.move_topic_start(d["marker"], d["new_t"])
+        elif d["type"] == "ripple" and d.get("magnet"):       # 🧲 todas las pistas a la vez (o ninguna)
+            self.ctrl.magnetic_trim(d["clip"], d["edge"], d["t"], linked=d.get("linked", True))
         elif d["type"] == "ripple":
             self.ctrl.ripple_trim(d["clip"], d["edge"], d["t"], linked=d.get("linked", True))
         elif d["type"] == "roll":
@@ -2938,6 +3510,8 @@ class TimelineWidget(QWidget):
     def focusOutEvent(self, e):
         if self._nudge is not None:
             self._nudge_commit()
+        if self._snap_temp is not None:                     # (N solo valía para ese arrastre)
+            self.snapping, self._snap_temp = self._snap_temp, None
         super().focusOutEvent(e)
 
     def leaveEvent(self, _e):
@@ -3133,7 +3707,7 @@ class TimelineWidget(QWidget):
             mids_kw = list(dict.fromkeys(proj.clips[i].media_id for i in self.ctrl.linked_ids(ids)
                                          if i in proj.clips and proj.clips[i].text is None))
             if mids_kw:
-                ai.addAction("🔑 Buscar palabras clave…", lambda: self.keywords_requested.emit(mids_kw))
+                ai.addAction("🗣 Buscar lo que se dice…", lambda: self.keywords_requested.emit(mids_kw))
             if snd:
                 if any((proj.clips[i].fx or {}).get("orig_media") for i in snd):
                     ai.addAction("🗣 Volver al sonido original (con el fondo)", lambda: self.ctrl.restore_dialogue(snd))
@@ -3624,7 +4198,10 @@ class TimelineWidget(QWidget):
             self.update()
             e.acceptProposedAction()
             return
-        t = max(0.0, self._snap(self.t_for(pos.x()), self._snap_targets(set())))
+        if getattr(self, "_drop_snap", None) is None:          # ⚡ los destinos, una vez por arrastre (no en cada evento)
+            self._drop_snap = self._snap_arr(set())
+        t = max(0.0, self._snap_fast(self.t_for(pos.x()), self._drop_snap))
+        self._hit(self._snap_last)
         i = self.track_index_at(pos.y())
         if i is None and pos.y() >= self.track_y(len(self.ctrl.project.tracks)) and \
                 not e.mimeData().hasFormat(SEGMENT_MIME):
@@ -3634,11 +4211,15 @@ class TimelineWidget(QWidget):
         e.acceptProposedAction()
 
     def dragLeaveEvent(self, _e):
+        self._drop_snap = None
         self._drop = None
         self._fx_drop = None
+        self._snap_hit = None
         self.update()
 
     def dropEvent(self, e):
+        self._drop_snap = None
+        self._snap_hit = None
         md = e.mimeData()
         if md.hasFormat(EFFECT_MIME):
             ids = self._fx_targets(self._rmap(e.position()))
@@ -3664,10 +4245,11 @@ class TimelineWidget(QWidget):
             ids = [i for i in md.data(MEDIA_MIME).data().decode().split(",") if i]
         else:   # desde el Explorador de Windows: se importan al momento y se colocan
             ids = self.ctrl.import_now(self._file_paths(md))
+        audio = not md.hasFormat(NOAUDIO_MIME)     # 🔇 lo arrastrado desde Palabras clave entra sin su audio
         i, t = self._drop or (None, 0.0)
         self._drop = None
         if i == "new":
-            created = self.ctrl.add_media(ids, None, t, new_track=True)
+            created = self.ctrl.add_media(ids, None, t, new_track=True, audio=audio)
             win = self.window()
             if hasattr(win, "_ensure_timeline_size"):
                 win._ensure_timeline_size()
@@ -3679,7 +4261,7 @@ class TimelineWidget(QWidget):
                 # 🖼 imagen sobre un video: dura lo que dura la frase, con su estilo (core/overlay.py)
                 created = self.ctrl.add_image_overlay(imgs, track_id, t)
             else:
-                created = self.ctrl.add_media(ids, track_id, t)
+                created = self.ctrl.add_media(ids, track_id, t, audio=audio)
         if isinstance(created, list):
             self.set_selection(created)
         e.acceptProposedAction()

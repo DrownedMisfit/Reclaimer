@@ -35,6 +35,7 @@ motor_ia/miopen/
 *.mp3
 *.m4a
 !tests/assets/**
+!editoria/assets/ejemplo/narracion.m4a
 datos/sesion_abierta.lock
 
 # Lo que crea el programa y no se publica

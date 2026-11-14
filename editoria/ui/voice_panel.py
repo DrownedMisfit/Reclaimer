@@ -297,9 +297,9 @@ class VoicePanel(QWidget):
         self.btn_apply_all = QPushButton("Aplicar todas las de la lista")
         self.btn_apply_all.clicked.connect(self.apply_all_visible)
         v3.addWidget(self.btn_apply_all)
-        self.btn_quick = QPushButton("⚡ Revisión rápida con teclas…")
+        self.btn_quick = QPushButton("✓ Revisión guiada de la voz…")
         self.btn_quick.setToolTip("Recorre una a una las propuestas pendientes y los cortes dudosos, con teclas: "
-                                  "Enter aceptar, Supr rechazar, → saltar (Ctrl+Shift+Q)")
+                                  "Enter aceptar, Supr rechazar, → saltar (Ctrl+Shift+Q = todo el video)")
         self.btn_quick.clicked.connect(lambda: self.quick_review_requested.emit())
         v3.addWidget(self.btn_quick)
         # Limpio, como Resolve: arriba la narración y cómo va; lo demás, en pestañas
@@ -410,7 +410,9 @@ class VoicePanel(QWidget):
         has = bool(mid)
         tr = p.transcripts.get(mid) if mid else None
         self.btn_transcribe.setEnabled(has and not busy)
-        self.btn_transcribe.setText("🎙 Transcribir de nuevo" if tr else "🎙 Transcribir y analizar")
+        a_medias = bool(tr) and tr.get("hasta") is not None
+        self.btn_transcribe.setText("🎙 Seguir transcribiendo" if a_medias else
+                                    "🎙 Transcribir de nuevo" if tr else "🎙 Transcribir y analizar")
         self.btn_analyze.setEnabled(has and not busy)
         on_timeline = bool(mid and mapping.clips_of_media(p, mid))
         if not has:
@@ -421,7 +423,11 @@ class VoicePanel(QWidget):
         self.banner.setVisible(not has or not on_timeline)
         self.banner_btn.setVisible(has and not on_timeline)
         if not busy:
-            if tr:
+            if a_medias:
+                self.status.setText(f"⏸ Transcrita hasta {fmt_time(float(tr['hasta']))} (se cortó). Pulsa «🎙 Seguir "
+                                    "transcribiendo» para el resto." + (f"\n{self._result_msg}" if self._result_msg
+                                                                         else ""))
+            elif tr:
                 n = len(tr.get("words", []))
                 self.status.setText(f"✓ Transcrita: {n} palabras (texto en la pestaña «Texto»)."
                                     + (f"\n{self._result_msg}" if self._result_msg else ""))
@@ -444,10 +450,17 @@ class VoicePanel(QWidget):
             m = self.ctrl.project.media[mid]
             self.ctrl.add_media([mid], tracks[0].id if m.kind == KIND_AUDIO else None, 0.0)
             self._update_state()
+        elif not mid:
+            self.ctrl.message.emit("Elige antes tu narración (el archivo de tu voz) arriba, en este panel.")
+        else:
+            self.ctrl.message.emit("No hay ninguna pista de audio: añade una (clic derecho en la línea de tiempo → "
+                                   "Añadir pista de audio).")
 
     # ------------------------------------------------------------- tareas
-    def _start_job(self, fn, on_done, label):
-        self.job = BackgroundJob(fn, self)
+    def _start_job(self, fn, on_done, label, on_partial=None):
+        self.job = BackgroundJob(fn, self, with_partial=on_partial is not None)
+        if on_partial is not None:
+            self.job.partial.connect(on_partial)
         self.job.progress.connect(self._on_progress)
         self.job.done.connect(on_done)
         self.job.failed.connect(self._on_failed)
@@ -465,7 +478,8 @@ class VoicePanel(QWidget):
         else:
             self.progress.setRange(0, 1000)
             self.progress.setValue(int(frac * 1000))
-        self.status.setText(text)
+        hasta = getattr(self, "_hasta", None)
+        self.status.setText(text + (f"\n📝 Texto listo hasta {fmt_time(hasta)}: ya puedes usarlo." if hasta else ""))
 
     def _on_failed(self, msg):
         self._result_msg = f"✗ {msg}" if msg != "Cancelado." else "Cancelado."
@@ -473,6 +487,7 @@ class VoicePanel(QWidget):
             QMessageBox.warning(self, "No se pudo completar", msg)
 
     def _on_job_finished(self):
+        self._hasta = None
         job, self.job = self.job, None
         if job:
             job.deleteLater()
@@ -505,7 +520,18 @@ class VoicePanel(QWidget):
         if not ok:
             QMessageBox.warning(self, "Transcripción", why)
             return
-        if mid in self.ctrl.project.transcripts:
+        prev = self.ctrl.project.transcripts.get(mid)
+        start_at = 0.0
+        if prev and prev.get("hasta") is not None:            # 📝 se cortó a medias: seguir desde ahí
+            hasta = float(prev["hasta"])
+            r = QMessageBox.question(self, "Transcripción a medias",
+                                     f"Esta narración está transcrita hasta {fmt_time(hasta)}.\n\n"
+                                     "Sí = seguir desde ahí (lo hecho se queda) · No = empezar de cero",
+                                     QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
+            if r == QMessageBox.Cancel:
+                return
+            start_at = hasta if r == QMessageBox.Yes else 0.0
+        elif prev:
             r = QMessageBox.question(self, "Transcribir de nuevo",
                                      "Esta narración ya está transcrita. Si la transcribes de nuevo "
                                      "se perderán las correcciones que hiciste en el texto.\n\n¿Continuar?")
@@ -514,14 +540,23 @@ class VoicePanel(QWidget):
         path = self.ctrl.project.media[mid].path
         model, lang, opts = self.model_combo.currentData(), self.lang_combo.currentData(), self.options()
         literal = analyze and self.chk_literal.isEnabled() and self.chk_literal.isChecked()
+        import copy
+        prev = copy.deepcopy(prev) if prev else prev        # (el hilo no lee lo que el usuario esté cambiando)
+        # al empezar de cero con una transcripción anterior: los bloques solo cuando pasen de lo que ya había (si
+        # se cancela, lo anterior sigue ahí)
+        tope = float("inf") if (prev and start_at == 0 and prev.get("hasta") is None) else \
+            (float(prev["hasta"]) if prev and start_at == 0 else 0.0)
 
-        def work(progress, cancelled):
+        def work(progress, cancelled, emit):
             progress(0.0, "Leyendo el audio…")
             samples = self.audio.get(path)
             def part(lo, hi):        # con la escucha literal, cada paso es media barra
                 return lambda f, t: progress(lo + (hi - lo) * f, t)
+            # 📝 por bloques: cada 3 min de audio, lo hecho llega a la línea de tiempo (del segundo 0 al final)
             tr = transcription.transcribe(samples, model, lang, part(0.0, 0.5) if literal else progress, cancelled,
-                                          fillers=analyze)
+                                          fillers=analyze, start_at=start_at,
+                                          partial=lambda t: emit((mid, t)) if t["hasta"] > tope else None,
+                                          prev=prev if start_at else None)
             if literal:
                 from ..ai import align, verbatim
                 try:
@@ -535,7 +570,17 @@ class VoicePanel(QWidget):
             items = voice_cleanup.analyze(samples, SR, tr["words"], opts, None, cancelled)
             return mid, tr, items, opts
 
-        self._start_job(work, self._on_transcribed, "Preparando…")
+        self._start_job(work, self._on_transcribed, "Preparando…", on_partial=self._on_partial)
+
+    def _on_partial(self, res):
+        """📝 Un bloque más: las palabras hasta ahí ya se pueden usar (Texto, subtítulos, palabras clave, cortes…)."""
+        mid, tr = res
+        if mid not in self.ctrl.project.media:
+            return
+        self._hasta = float(tr.get("hasta") or 0.0)
+        self.ctrl.set_transcript(mid, tr)
+        self.ctrl.message.emit(f"📝 Texto listo hasta {fmt_time(self._hasta)}: ya puedes usarlo mientras se "
+                               "transcribe el resto.")
 
     def _on_transcribed(self, result):
         mid, tr, items, opts = result

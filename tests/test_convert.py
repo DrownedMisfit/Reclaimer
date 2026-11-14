@@ -100,8 +100,8 @@ def main():
         assert all(dlg.list.item(i).text().startswith("✓") for i in range(dlg.list.count()))
         print("✓ ventana Convertir: arrastrar, elegir carpeta y convertir en segundo plano")
         assert "&Convertir" in [a_.text() for a_ in win.menuBar().actions()]
-        assert "&IA" not in [a_.text() for a_ in win.menuBar().actions()], "la IA vive solo en su pestaña"
-        print("✓ menú «Convertir» junto a Ayuda (y ya no hay un menú IA repetido)")
+        assert "IA ✨" in [a_.text() for a_ in win.menuBar().actions()], "13/11: menú «IA ✨» a la vista"
+        print("✓ menú «Convertir» junto a Ayuda (y el menú «IA ✨» a la vista)")
         ed = EditDialog(win.ctrl, win)
         ed.use_song_file(mkv)
         t0 = time.time()

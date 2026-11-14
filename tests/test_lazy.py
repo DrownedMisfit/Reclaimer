@@ -87,6 +87,7 @@ def main():
     clips_mod.find_mentions = contador(clips_mod.find_mentions, cuenta, "fm")
     KF.list_folders = contador(KF.list_folders, cuenta, "lf")
     ocultar("clips")
+    ocultar("kw_folders")          # (🗂 Carpetas a la vista también pide estar al día: se oculta para esta prueba)
     assert not clips.isVisible()
     for _ in range(3):
         ctrl.project_changed.emit()
@@ -98,7 +99,7 @@ def main():
     mostrar(clips)
     pump(app, 1.6)
     assert clips.isVisible()
-    assert cuenta["fm"] == 1 and cuenta["lf"] == 1, cuenta
+    assert cuenta["fm"] <= 1 and cuenta["lf"] == 1, cuenta   # (fm 0: ya estaba al día y nada cambió de verdad)
     print("✓ Clips al mostrarse se pone al día una sola vez (1 búsqueda de menciones, 1 lectura de carpetas)")
 
     # ---------------------------------------------------------------- Texto (transcripción)

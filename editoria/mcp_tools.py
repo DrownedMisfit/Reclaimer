@@ -50,11 +50,12 @@ TOOLS: list[dict] = [
      "description": "Quita los silencios del audio y junta lo de detrás (ripple, en todas las pistas: no se "
                     "desincroniza nada). Detección híbrida (volumen + IA) que no se come palabras. Ajustes: «shorts» "
                     "(pausas cortas), «equilibrado», «natural» (con aire) o «rapido». «proteccion»: «max» (por "
-                    "defecto: nunca corta voz), «media» o «resolve» (el umbral manda, como DaVinci Resolve: puede "
-                    "comerse finales suaves; solo si el usuario lo pide). Sin media_id: la narración / los clips de "
+                    "defecto: nunca corta voz), «davinci» (el umbral manda como en DaVinci Resolve y solo se protege "
+                    "la voz clara: lo que usa el usuario en la ventana), «media» o «resolve» (el umbral decide todo: "
+                    "puede comerse finales suaves; solo si el usuario lo pide). Sin media_id: la narración / los clips de "
                     "audio de la línea de tiempo.",
      "inputSchema": _obj({"ajuste": {"type": "string", "enum": ["shorts", "equilibrado", "natural", "rapido"]},
-                          "proteccion": {"type": "string", "enum": ["max", "media", "resolve"]},
+                          "proteccion": {"type": "string", "enum": ["max", "davinci", "media", "resolve"]},
                           "media_id": {**S, "description": "solo los clips de este archivo (opcional)"},
                           "solo_mirar": {**B, "description": "true = solo decir cuánto quitaría, sin cortar"},
                          "fundido": {**B, "description": "true = fundido cruzado de audio en cada corte. SOLO si el usuario lo pide: por defecto no se pone ninguno"}})},

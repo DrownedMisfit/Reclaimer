@@ -123,6 +123,8 @@ class TextBar(QFrame):
         self.btn_mi_estilo = self._boton("🔥 Mi estilo", "Aplica el estilo «Impact» (Anton, rojo, borde y resplandor) "
                                          "al texto elegido; conserva lo escrito y su sitio", self.apply_impact)
         row.addWidget(self.btn_mi_estilo)
+        self.btn_quitar = self._boton("↺", "Lo elegido vuelve al estilo del resto del texto", self.clear_words)
+        row.addWidget(self.btn_quitar)
         self.hide()
 
     # ------------------------------------------------------------ piezas
@@ -173,7 +175,7 @@ class TextBar(QFrame):
         lay = self._target()
         if lay is None:
             return
-        actual = lay
+        actual = self._vista(lay)
         for parte in campo.split("."):
             actual = actual.get(parte, {}) if isinstance(actual, dict) else {}
         c = _color_dialogo(actual if isinstance(actual, str) and actual else "#FFFFFF", self.canvas.window())
@@ -184,7 +186,7 @@ class TextBar(QFrame):
         lay = self._target()
         if lay is None:
             return
-        fam = _fuente_dialogo(lay["font"], self.canvas.window())
+        fam = _fuente_dialogo(self._vista(lay)["font"], self.canvas.window())
         if fam:
             self.set_font(fam)
 
@@ -194,6 +196,21 @@ class TextBar(QFrame):
         if lay is None or lay.get("kind") != "text":
             return None
         return lay
+
+    def _vista(self, lay: dict) -> dict:
+        """Lo que hay que enseñar y modificar: el texto o, con palabras elegidas, la primera de ellas."""
+        elegidas = self.canvas.active_words(lay)
+        return T.word_view(lay, min(elegidas)) if elegidas else lay
+
+    def clear_words(self):
+        lay = self._target()
+        elegidas = self.canvas.active_words(lay) if lay is not None else set()
+        if elegidas:
+            T.clear_word_style(lay, elegidas)
+            self.editor.commit("Quitar estilo de la palabra")
+            self.editor.on_live_change()
+            self.editor._fill_props()
+            self.canvas.viewport().update()
 
     def _apply(self, label: str, **kv):
         """Un cambio = un paso de deshacer con su nombre; repinta el lienzo y refresca el panel de propiedades."""
@@ -214,7 +231,7 @@ class TextBar(QFrame):
         lay = self._target()
         if lay is None:
             return
-        s = float(lay["size"])
+        s = float(self._vista(lay)["size"])
         n = round(s * 1.1) if sentido > 0 else round(s / 1.1)
         if n == s:                                  # (tamaños muy pequeños: que cambie al menos 1)
             n = int(s) + sentido
@@ -238,37 +255,37 @@ class TextBar(QFrame):
     def set_outline_on(self, on: bool):
         lay = self._target()
         if lay is not None:
-            self._apply("Contorno", outline={**lay["outline"], "on": bool(on)})
+            self._apply("Contorno", outline={**self._vista(lay)["outline"], "on": bool(on)})
 
     def set_outline_color(self, c: str):
         lay = self._target()
         if lay is not None:
-            self._apply("Color del contorno", outline={**lay["outline"], "color": c, "on": True})
+            self._apply("Color del contorno", outline={**self._vista(lay)["outline"], "color": c, "on": True})
 
     def set_outline_width(self, w: int):
         lay = self._target()
         if lay is not None:
-            self._apply("Grosor del contorno", outline={**lay["outline"], "width": int(w), "on": True})
+            self._apply("Grosor del contorno", outline={**self._vista(lay)["outline"], "width": int(w), "on": True})
 
     def set_shadow_on(self, on: bool):
         lay = self._target()
         if lay is not None:
-            self._apply("Sombra", shadow={**lay["shadow"], "on": bool(on)})
+            self._apply("Sombra", shadow={**self._vista(lay)["shadow"], "on": bool(on)})
 
     def set_shadow_preset(self, nombre: str):
         lay = self._target()
         if lay is not None:
-            self._apply(f"Sombra ({nombre.lower()})", shadow={**lay["shadow"], **SOMBRAS[nombre], "on": True})
+            self._apply(f"Sombra ({nombre.lower()})", shadow={**self._vista(lay)["shadow"], **SOMBRAS[nombre], "on": True})
 
     def set_glow_on(self, on: bool):
         lay = self._target()
         if lay is not None:
-            self._apply("Brillo", glow={**lay["glow"], "on": bool(on)})
+            self._apply("Brillo", glow={**self._vista(lay)["glow"], "on": bool(on)})
 
     def set_glow_color(self, c: str):
         lay = self._target()
         if lay is not None:
-            self._apply("Color del brillo", glow={**lay["glow"], "color": c, "on": True})
+            self._apply("Color del brillo", glow={**self._vista(lay)["glow"], "color": c, "on": True})
 
     def apply_impact(self):
         """🔥 Mi estilo: el preset «impact» de la casa, conservando el texto y su sitio (x, y)."""
@@ -279,22 +296,28 @@ class TextBar(QFrame):
         kv = {k: copy.deepcopy(ref[k]) for k in _CLAVES_IMPACT if k in ref}
         for k in ("outline", "glow", "shadow"):
             kv[k] = copy.deepcopy(ref[k])
+        if self.canvas.active_words(lay):                 # a unas palabras: solo lo que una palabra puede tener
+            kv = {k: v for k, v in kv.items() if k in T.WORD_KEYS}
         self._apply("Mi estilo", **kv)
 
     def _firma(self, lay: dict) -> tuple:
-        return (lay["id"], lay.get("color"), lay.get("font"), lay.get("size"), lay.get("weight"),
-                lay.get("italic"), lay.get("align"), repr(lay.get("outline")), repr(lay.get("shadow")),
-                repr(lay.get("glow")))
+        v = self._vista(lay)
+        return (lay["id"], v.get("color"), v.get("font"), v.get("size"), v.get("weight"),
+                v.get("italic"), lay.get("align"), repr(v.get("outline")), repr(v.get("shadow")),
+                repr(v.get("glow")), tuple(sorted(self.canvas.active_words(lay))))
 
     def _sincronizar(self, lay: dict):
         """Pone la barra como está el texto elegido (botones marcados, colores, fuente)."""
+        al = lay.get("align", "center")
+        self.btn_quitar.setVisible(bool(self.canvas.active_words(lay)))
+        lay = self._vista(lay)
         self._pinta(self.btn_color, lay.get("color", "#FFFFFF"))
         self.btn_fuente.setText(f"{lay['font']} ▾")
         self._rehacer_menu_fuentes(lay["font"])
         self.btn_b.setChecked(int(lay.get("weight", 400)) >= 600)
         self.btn_i.setChecked(bool(lay.get("italic")))
         for h, b in self.btn_align.items():
-            b.setChecked(h == lay.get("align", "center"))
+            b.setChecked(h == al)
         o, s, g = lay["outline"], lay["shadow"], lay["glow"]
         self.btn_cont.setChecked(bool(o.get("on")))
         self._pinta(self.btn_cont_color, o.get("color", "#000000"))

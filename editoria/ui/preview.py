@@ -2635,6 +2635,8 @@ class PlaybackEngine(QObject):
         rng = self.ctrl.project.marked_range()
         if rng:
             self.play_ranges([rng])
+        else:
+            self.ctrl.message.emit("Marca antes la entrada (I) y la salida (O) del tramo que quieres ver.")
 
     def play(self, rate: float = 1.0):
         if self.playing:

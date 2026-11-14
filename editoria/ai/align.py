@@ -55,7 +55,8 @@ def unload() -> None:
 
 def needs(transcript: dict | None) -> bool:
     """¿Esta transcripción tiene palabras sin afinar todavía?"""
-    return bool(transcript and transcript.get("words") and not transcript.get("aligned"))
+    return bool(transcript and transcript.get("words") and not transcript.get("aligned")
+                and transcript.get("hasta") is None)          # (a medias: se afina cuando esté entera)
 
 
 def refined(transcript: dict, new_words: list) -> dict:

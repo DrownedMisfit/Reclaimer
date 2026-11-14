@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor
 
 SEGMENT_MIME = "application/x-reclaimer-segment"   # un trozo: id|desde|hasta
 MEDIA_MIME = "application/x-editoria-media"
+NOAUDIO_MIME = "application/x-reclaimer-sin-audio"   # 🔇 marca: lo arrastrado (de Palabras clave) entra sin su audio
 EFFECT_MIME = "application/x-reclaimer-effect"     # un efecto (look:… · trans:… · sfx:… · file:…) para soltar en un clip
 
 COLORS = {

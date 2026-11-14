@@ -109,6 +109,8 @@ def main():
     for i in range(1, 6):
         QTest.mouseMove(cv.viewport(), p0 + (p1 - p0) * (i / 5))
     QTest.mouseRelease(cv.viewport(), Qt.LeftButton, Qt.NoModifier, p1)
+    while ed.brush_busy():                       # (los trazos se aplican en segundo plano)
+        app.processEvents()
     erased = lay["mask"]
     assert erased != before and mask_mean(erased, (0.47, 0.32, 0.53, 0.37)) < 0.2, \
         mask_mean(erased, (0.47, 0.32, 0.53, 0.37))
@@ -116,6 +118,8 @@ def main():
     QTest.mousePress(cv.viewport(), Qt.LeftButton, Qt.NoModifier, p0)
     QTest.mouseMove(cv.viewport(), p1)
     QTest.mouseRelease(cv.viewport(), Qt.LeftButton, Qt.NoModifier, p1)
+    while ed.brush_busy():
+        app.processEvents()
     assert mask_mean(ed.cur()["mask"], (0.47, 0.32, 0.53, 0.37)) > 0.8
     ed.set_brush(None)
     print("✓ pincel: borrar y recuperar (en los píxeles correctos de la imagen)")

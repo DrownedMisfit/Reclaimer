@@ -68,7 +68,7 @@ AI_CARDS = [
     ("audit", "⚕ Revisión", "Busca errores antes de exportar: negro, audio, repetidos…"),
     ("cutout", "✂ Recortar sujeto", "Separa un personaje, roca o vehículo del fondo en todo el clip."),
     ("compare", "⧉ Comparación", "Pon dos clips lado a lado (antes / después, versiones)."),
-    ("keywords", "🔑 Palabras clave", "Dónde se dice algo en tus videos y audios, gastando poco."),
+    ("keywords", "🗣 Buscar lo que se dice", "Dónde se dice algo en tus videos y audios, gastando poco."),
 ]
 
 
@@ -382,6 +382,16 @@ class AIPanel(QWidget):
                                              continuous=self.continuous.isChecked())
 
     # ------------------------------------------------------------ refresco
+    def _cant(self, need_narration: bool = True) -> bool:
+        """True (y avisa de por qué) si ahora no se puede: hay una tarea en marcha o falta transcribir la voz."""
+        if self.job:
+            self.status.setText("Espera: la IA aún está con otra tarea (mira la barra de abajo).")
+            return True
+        if need_narration and not self.narration():
+            self.status.setText("Antes transcribe tu narración: panel 🎙 Voz → «Transcribir».")
+            return True
+        return False
+
     def narration(self) -> str | None:
         p = self.ctrl.project
         mid = self._preferred_media()
@@ -524,7 +534,7 @@ class AIPanel(QWidget):
     # -------------------------------------------------------------- temas
     def detect_topics(self):
         mid = self.narration()
-        if not mid or self.job:
+        if self._cant():
             return
         if any(m.kind == "topic" and m.origin != ORIGIN_AI for m in self.ctrl.project.markers):
             if QMessageBox.question(self, "Detectar temas",
@@ -575,6 +585,7 @@ class AIPanel(QWidget):
         from ..ai.director import parse
         text = self.director_text.toPlainText().strip()
         if not text:
+            self.status.setText("Escribe antes qué quieres, p. ej. «usa cinemáticas en el combate».")
             return
         plan = parse(text, self.engine.time, self._topic_under_playhead(), self.ctrl.project.duration())
         self.plans = [plan]
@@ -796,7 +807,10 @@ class AIPanel(QWidget):
         p = self.ctrl.project
         mtid = self.music_track.currentData()
         vtid = self.track.currentData()
-        if not mtid or not vtid or self.job:
+        if self._cant(False):
+            return
+        if not mtid or not vtid:
+            self.status.setText("Elige arriba la pista de la música y la del video.")
             return
         music = {c.media_id: p.media[c.media_id].path for c in p.clips_on(mtid) if c.media_id in p.media}
         if not music:
@@ -839,7 +853,7 @@ class AIPanel(QWidget):
         from ..core import media as media_tools
         from ..core.project_tools import slice_project
         from ..export.ffmpeg_export import ExportOptions, build_command
-        if self.job:
+        if self._cant(False):
             return
         self.engine.pause()
         t0 = self.engine.time
@@ -947,9 +961,12 @@ class AIPanel(QWidget):
         from ..ai import tracking
         from ..ai.transform_helpers import punch_keyframes
         mid = self.narration()
-        if not mid or self.job:
+        if self._cant():
             return
         ids = {it.data(0, Qt.UserRole) for it in self.zoom_list.selectedItems()} if selected_only else None
+        if selected_only and not ids:
+            self.status.setText("Elige antes en la lista los zooms que quieres aplicar (o «Aplicar todos»).")
+            return
         sugs = [x for x in self._zoom_suggestions() if x.status == "pending" and (ids is None or x.id in ids)]
         compares = [x for x in sugs if x.kind == "compare"]
         sugs = [x for x in sugs if x.kind == "zoom"]
@@ -1062,6 +1079,7 @@ class AIPanel(QWidget):
         tid = self.track.currentData()
         p = self.ctrl.project
         if not tid:
+            self.status.setText("Elige arriba la pista de video donde va el B-roll.")
             return
         a, b = rng
         old = [c.id for c in p.clips_on(tid)
@@ -1167,6 +1185,7 @@ class AIPanel(QWidget):
     def insert_selected(self):
         it = self.slot_tree.currentItem()
         if not it:
+            self.status.setText("Elige antes un momento o un clip de la propuesta (o «⚡ Rellenar huecos con lo mejor»).")
             return
         kind, i, k = it.data(0, Qt.UserRole)
         self._insert(i, max(0, k))
@@ -1174,6 +1193,7 @@ class AIPanel(QWidget):
     def _insert(self, i: int, k: int):
         s = self.slots[i]
         if not s.get("candidates"):
+            self.status.setText("Este momento no tiene clips que encajen: elige otro (o analiza más clips con ◈).")
             return
         c = s["candidates"][k]
         item = {"media_id": c["media_id"], "start": s["start"], "duration": s["end"] - s["start"],
