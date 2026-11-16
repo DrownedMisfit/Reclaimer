@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
             self.tabifyDockWidget(self.docks["inspector"], self.docks["kw_folders"])
             self.docks["kw_folders"].setVisible(True)
         QTimer.singleShot(0, self.apply_tab_panels)            # 🗂 los paneles de la pestaña con la que se abre
+        QTimer.singleShot(0, self._ajustar_paneles)            # ↔ nada cortado por la derecha en ningún panel
         for key, tb in (("top", self._top_bar()), ("pages", self._page_bar())):
             bar = QToolBar(key)
             bar.setObjectName("bar_" + key)
@@ -355,6 +356,8 @@ class MainWindow(QMainWindow):
         self._motor_warning.connect(lambda t: self.statusBar().showMessage(t, 20000))
         QTimer.singleShot(20000, self._check_motor_soon)     # sin prisa, cuando ya estás editando
         QTimer.singleShot(900, self._bienvenida_si_toca)     # 👋 la primera vez: qué viene y qué es opcional
+        from . import export_runner                          # 🧹 imágenes de subtítulos de exportaciones interrumpidas
+        QTimer.singleShot(5000, export_runner.sweep_orphans)
         movidos = os.environ.get("RECLAIMER_DATOS_MOVIDOS")
         if movidos:                                           # (paths.app_data_dir: no se podía escribir junto al programa)
             QTimer.singleShot(2500, lambda: self.statusBar().showMessage(
@@ -935,6 +938,42 @@ class MainWindow(QMainWindow):
             self.apply_tab_panels()              # (los paneles que tocan en esta pestaña, no todos)
         except Exception:  # noqa: BLE001
             pass
+
+    PANEL_MIN, PANEL_MAX_MIN = 240, 400        # (ancho mínimo de un panel: lo que pide su contenido, entre estos)
+
+    def _ajustar_paneles(self):
+        """↔ Ningún panel corta su contenido por la derecha, por mucho que agrandes el visor: las etiquetas largas pasan
+        a varias líneas, los botones y casillas muy largos se quedan con lo esencial (lo demás, en su tooltip), los
+        desplegables pueden estrecharse, y cada panel no se deja estrechar más de lo que su contenido necesita."""
+        from PySide6.QtWidgets import QAbstractButton, QComboBox, QLabel
+        for key, d in self.docks.items():
+            if key in ("timeline", "guide"):
+                continue
+            panel = getattr(d, "panel", None)
+            if panel is None:
+                continue
+            ancho = 0
+            for w in panel.findChildren(QWidget):
+                try:
+                    if isinstance(w, QLabel) and not w.wordWrap() and w.text() and \
+                            w.minimumSizeHint().width() > self.PANEL_MIN:
+                        w.setWordWrap(True)
+                    elif isinstance(w, QAbstractButton) and w.minimumSizeHint().width() > 280 and " (" in w.text():
+                        completo = w.text()
+                        w.setText(completo.split(" (", 1)[0])
+                        tip = w.toolTip()
+                        w.setToolTip(completo + ("\n" + tip if tip and tip != completo else ""))
+                    elif isinstance(w, QComboBox):          # (se puede estrechar; con sitio, se ve entero)
+                        if w.minimumSizeHint().width() > 200:
+                            w.setMinimumWidth(90)
+                            if not w.toolTip():
+                                w.setToolTip(w.currentText())
+                    if isinstance(w, (QAbstractButton, QComboBox)) or (isinstance(w, QLabel) and not w.wordWrap()):
+                        ancho = max(ancho, w.minimumSizeHint().width())
+                except RuntimeError:
+                    pass
+            ancho = max(ancho + 40, panel.minimumSizeHint().width() + 20)
+            d.setMinimumWidth(int(min(self.PANEL_MAX_MIN, max(self.PANEL_MIN, ancho))))
 
     def salir_de_paginas(self) -> bool:
         """Antes de cambiar de pestaña o de proyecto, o de cerrar: se sale de 🎬 Escenas (pregunta si hay cambios sin
@@ -4129,6 +4168,17 @@ class MainWindow(QMainWindow):
                 dlg_x.proc.waitForFinished(3000)
             except (AttributeError, RuntimeError):
                 pass
+        from . import export_runner      # 🧹 las imágenes de subtítulos de una exportación a medias, fuera
+        cola = getattr(self, "_render_queue", None)
+        if cola is not None and cola.proc is not None:
+            try:
+                cola.stop()
+                cola.proc.waitForFinished(3000)
+            except (AttributeError, RuntimeError):
+                pass
+        for obj in (dlg_x, cola):
+            if obj is not None:
+                export_runner.cleanup(getattr(obj, "_script", ""))
         self.saving.stop()               # el guardado en vivo se para antes de cerrar
         self.learner.on_close()          # último resumen; después no queda nada funcionando
         from .task_window import stop_all

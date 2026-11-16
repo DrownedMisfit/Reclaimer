@@ -110,7 +110,7 @@ class UnderstandDialog(QDialog):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.addWidget(QLabel("Nombres y apodos (uno por línea):\n«Jefe Maestro = Master Chief, John-117»"))
+        rl.addWidget(QLabel("Nombres y apodos (uno por línea):\n«El protagonista = Juan, Juanito»"))
         self.gloss = QPlainTextEdit(glossary_text())
         rl.addWidget(self.gloss, 1)
         split.addWidget(right)

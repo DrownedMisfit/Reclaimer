@@ -28,19 +28,23 @@ Efectos de edits musicales (los que más se usan en velocity / phonk / AMV, octu
   flicker    parpadeo de luz (0–1, todo el clip)
   roll       giro de cámara al entrar: segundos (se va apagando)
   lightleak  destello de luz cálida que cruza la imagen (0–1)
+  lines      ⚡ destello de líneas: segundos (≈4 fotogramas) de un haz de líneas verticales blancas al empezar
+  focus_in   🔍 entrar enfocando: segundos que tarda en enfocarse (empieza muy desenfocado)
 
 El visor y la exportación usan las mismas fórmulas, para que se vea igual.
 """
 from __future__ import annotations
 
 import math
+import os
 
 SHAKE_AMP = 0.025
 SHAKE_FX, SHAKE_FY = 53.0, 41.0   # frecuencias (rad/s) del temblor horizontal y vertical
 
 
 LOOKS = ("bw", "vignette", "grain", "blur", "glitch", "oldfilm", "warm", "cold", "invert", "letterbox",
-         "rgbsplit", "glow", "motionblur", "punchy", "vhs", "flicker", "roll", "lightleak", "duotone")
+         "rgbsplit", "glow", "motionblur", "punchy", "vhs", "flicker", "roll", "lightleak", "duotone",
+         "lines", "focus_in")
 # ✦ Los efectos de imagen que se marcan en la línea de tiempo con la pastilla «fx» (y se quitan de un golpe). Los
 # fundidos y la transición no cuentan: tienen su propia marca. PARAMS: lo que va con un efecto y se quita con él.
 VISIBLE = set(LOOKS) | {"flash", "shake"}
@@ -199,6 +203,174 @@ def glow_graph(fx: dict | None, k: int) -> str:
             f"[go{k}]")
 
 
+# ------------------------------------------------------------- ⚡ destello de líneas y 🔍 entrar enfocando (16/11)
+# Los dos cambian con el tiempo y FFmpeg no tiene un desenfoque ni unas cajas «animables»: el tiempo se reparte en
+# pasos fijos (FOCUS_Q / LINES_Q) y en cada paso va un filtro con su valor y «enable» solo en ese paso. El visor
+# usa el valor del MISMO paso, así en cada fotograma se ve igual que al exportar.
+FOCUS_Q = 1 / 60
+LINES_Q = 1 / 30
+FOCUS_SIGMA = 0.035     # desenfoque inicial (sigma): fracción del lado corto de la imagen del clip
+LINES_MAX, FOCUS_MAX = 0.5, 1.5     # duraciones máximas (s) de los dos efectos
+# (desplazamiento desde el centro, medio ancho, brillo), en fracciones del ancho
+LINE_BARS = ((-0.30, 0.0025, 0.45), (-0.215, 0.006, 0.6), (-0.14, 0.0035, 0.75), (-0.085, 0.011, 0.85),
+             (-0.04, 0.004, 1.0), (-0.012, 0.016, 1.0), (0.022, 0.003, 0.95), (0.055, 0.009, 0.9),
+             (0.10, 0.0045, 0.8), (0.16, 0.007, 0.65), (0.235, 0.003, 0.5), (0.31, 0.005, 0.4))
+
+
+def _step(t: float, q: float) -> int:
+    return int(math.floor(t / q + 0.5 + 1e-9))
+
+
+def focus_sigma(fx: dict | None, t: float, short: float) -> float:
+    """Sigma (píxeles) del desenfoque de «entrar enfocando» en t (desde el inicio del clip); 0 = nítido."""
+    d = min(FOCUS_MAX, float((fx or {}).get("focus_in", 0) or 0))
+    if d <= 0 or t < -FOCUS_Q / 2:
+        return 0.0
+    tq = max(0, _step(t, FOCUS_Q)) * FOCUS_Q
+    if tq >= d:
+        return 0.0
+    s = FOCUS_SIGMA * short * (1 - tq / d) ** 2
+    return s if s >= 0.3 else 0.0
+
+
+def lines_px(fx: dict | None, t: float, w: int) -> list[tuple[int, int, float]]:
+    """Las franjas del destello de líneas en t: [(x, ancho, opacidad)] en píxeles de un clip de ancho w, en el orden
+    en que se pintan (blanco encima de la imagen)."""
+    d = min(LINES_MAX, float((fx or {}).get("lines", 0) or 0))
+    if d <= 0 or t < -LINES_Q / 2:
+        return []
+    tq = max(0, _step(t, LINES_Q)) * LINES_Q
+    if tq >= d:
+        return []
+    u = tq / d
+    env = (1 - u) ** 0.5
+    spread, cx = 0.45 + 0.8 * u, 0.47 + 0.06 * u
+    out = []
+
+    def bar(c: float, half: float, a: float):
+        x0 = int(round((c - half) * w))
+        x1 = int(round((c + half) * w))
+        x0, x1 = max(0, x0), min(w, max(x1, x0 + 1))
+        if x1 > x0 and a >= 0.01:
+            out.append((x0, x1 - x0, round(min(1.0, a), 3)))
+    bar(cx, 0.22, 0.18 * env)                       # un velo suave en el centro
+    for off, half, b in LINE_BARS:
+        bar(cx + off * spread, half * 3.5, 0.4 * b * env)     # halo de cada línea
+        bar(cx + off * spread, half, b * env)                 # la línea
+    return out
+
+
+def blur_bgra(img, sigma: float):
+    """Desenfoque gaussiano de una imagen (numpy) con ese sigma en píxeles: el del visor para «entrar enfocando»."""
+    import cv2
+    if sigma < 0.3:
+        return img.copy()
+    return cv2.GaussianBlur(img, (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
+
+
+_NAMES = __import__("itertools").count(1)     # nombres únicos de filtros (gblur@…) dentro de un mismo grafo
+
+
+def _bounds(q: float, d: float, fps: float, t0: float) -> tuple[list[tuple[int, float]], float]:
+    """Pasos de tiempo de un efecto que dura d s (paso q), llevados a la rejilla de fotogramas de la exportación:
+    [(k, desde)] y hasta cuándo se ve, en el tiempo del trozo (un trozo empieza en t0 del clip). Cada paso empieza
+    medio fotograma antes del PRIMER fotograma en el que el visor ya enseña ese paso (_step), así ningún redondeo
+    lo cambia de fotograma (a 24, 25, 30, 60 o 120 fps)."""
+    fps = float(fps) or 30.0
+    out = []
+    k_end = 0
+    while k_end * q < d - 1e-9:
+        k_end += 1
+
+    def at(k: int) -> float:
+        n = math.ceil((k - 0.5) * q * fps - 1e-6)       # primer fotograma con _step(t) >= k
+        return (n - 0.5) / fps - t0
+    for k in range(k_end):
+        out.append((k, at(k)))
+    return out, at(k_end)
+
+
+def lines_row(bars: list, w: int):
+    """⚡ Una fila (w × 1, blanca con transparencia) del destello de líneas como imagen de Pillow, pintada con Qt
+    igual que en el visor (preview.paint_lines: franjas blancas una encima de otra)."""
+    from PIL import Image
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QColor, QImage, QPainter
+    img = QImage(w, 1, QImage.Format_RGBA8888)
+    img.fill(0)
+    p = QPainter(img)
+    for x, bw, a in bars:
+        p.fillRect(QRectF(x, 0, bw, 1), QColor(255, 255, 255, int(round(255 * a))))
+    p.end()
+    return Image.frombytes("RGBA", (w, 1), bytes(img.constBits())[:w * 4])
+
+
+def _focus_filters(fx: dict, w: int, h: int, fps: float = 30.0) -> list[str]:
+    """🔍 Entrar enfocando: UN desenfoque para el brillo y otro para el color (en 4:2:0 el color va a media resolución:
+    la mitad de sigma), activos solo mientras dura; «sendcmd» les cambia el sigma en cada paso de tiempo (antes era
+    un filtro por paso y gastaba muchísima memoria)."""
+    d = min(FOCUS_MAX, float(fx.get("focus_in", 0) or 0))
+    if d <= 0:
+        return []
+    tt = _tt(fx)
+    t0 = float(fx.get("_t0", 0) or 0)
+    steps, end = _bounds(FOCUS_Q, d, fps, t0)
+    if end <= 0:
+        return []
+    n = next(_NAMES)
+    ny, nc = f"gblur@fy{n}", f"gblur@fc{n}"
+    s0 = focus_sigma(fx, t0, min(w, h))          # (un trozo que empieza a mitad del clip: el sigma de ese momento)
+    cmds = []
+    for k, at in steps[1:]:
+        if at <= 0:                                # (sendcmd no admite tiempos negativos: ya va en s0)
+            continue
+        s = focus_sigma(fx, k * FOCUS_Q, min(w, h))
+        for name, v in ((ny, s), (nc, s / 2)):     # (también «sigmaV»: si no, el vertical se queda con el primero)
+            cmds += [f"{at:.6f} {name} sigma {v:.3f}", f"{at:.6f} {name} sigmaV {v:.3f}"]
+    en = f"enable='lt({tt},{end + t0:.6f})'"
+    return ["format=yuv420p|yuva420p"] + (["sendcmd=c='" + ";".join(cmds) + "'"] if cmds else []) + [
+            f"{ny}=sigma={s0:.3f}:steps=3:planes=9:{en}", f"{nc}=sigma={s0 / 2:.3f}:steps=3:planes=6:{en}"]
+
+
+def lines_graph(fx: dict | None, w: int, h: int, fps: float = 30.0) -> str:
+    """⚡ Destello de líneas como trozo de grafo para meter en una cadena: UNA capa encima (overlay) que va cambiando
+    de fila en cada paso de tiempo: las filas van en un PNG animado (APNG, tiempos al milisegundo; en la caché) leído
+    con «movie» y ampliado a w × h. Encima de todo lo del clip (después del temblor, el giro y los fundidos)."""
+    import hashlib
+    from .paths import cache_dir
+    fx = fx or {}
+    d = min(LINES_MAX, float(fx.get("lines", 0) or 0))
+    if d <= 0:
+        return ""
+    t0 = float(fx.get("_t0", 0) or 0)
+    steps, end = _bounds(LINES_Q, d, fps, t0)
+    if end <= 0:
+        return ""
+    entries = [(at, lines_px(fx, k * LINES_Q, w)) for k, at in steps]
+    first = max(i for i, (s, _b) in enumerate(entries) if s <= 0)   # (lo ya pasado en un trozo a mitad del clip)
+    entries = [(0.0, entries[first][1])] + entries[first + 1:]
+    # (a pocos fps dos pasos pueden caer en el mismo fotograma: se queda el último, como en el visor)
+    entries = [e for i, e in enumerate(entries) if i + 1 == len(entries) or entries[i + 1][0] > e[0] + 1e-6]
+    ms = [int(round(s * 1000)) for s, _b in entries]
+    durs = [b_ - a_ for a_, b_ in zip(ms, ms[1:])] + [1000]
+    key = hashlib.md5(repr((w, ms, [b_ for _s, b_ in entries])).encode()).hexdigest()[:16]
+    path = os.path.join(str(cache_dir("destello_lineas")), f"lineas_{key}.apng")
+    if not os.path.exists(path):
+        frames = [lines_row(b_, w) for _s, b_ in entries]
+        tmp = path + f".{os.getpid()}.{next(_NAMES)}.apng"
+        frames[0].save(tmp, format="PNG", save_all=True, append_images=frames[1:], duration=durs, loop=1,
+                       disposal=0, blend=0, default_image=False)
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    from ..export.ffmpeg_export import _filter_path
+    n = next(_NAMES)
+    tt = _tt(fx)
+    return (f"null[lz{n}];movie=filename={_filter_path(path)},scale={w}:{h}:flags=neighbor,format=rgba[lm{n}];"
+            f"[lz{n}][lm{n}]overlay=0:0:format=auto:enable='lt({tt},{end + t0:.6f})'[lo{n}];[lo{n}]null")
+
+
 def roll_at(fx: dict | None, t: float) -> float:
     """Ángulo (grados) del giro de cámara en el instante t."""
     r = float((fx or {}).get("roll", 0) or 0)
@@ -240,11 +412,11 @@ def shake_at(fx: dict | None, t: float) -> tuple[float, float]:
     return a * math.sin(t * SHAKE_FX), a * math.cos(t * SHAKE_FY)
 
 
-def ffmpeg_filters(fx: dict | None, dur: float, w: int, h: int) -> list[str]:
-    """Filtros de FFmpeg (para un clip de w×h cuyo tiempo empieza en 0)."""
+def ffmpeg_filters(fx: dict | None, dur: float, w: int, h: int, fps: float = 30.0) -> list[str]:
+    """Filtros de FFmpeg (para un clip de w×h cuyo tiempo empieza en 0; fps: los de la exportación)."""
     if not is_active(fx):
         return []
-    out = look_filters(fx, w, h)
+    out = look_filters(fx, w, h) + _focus_filters(fx, w, h, fps)
     tt = _tt(fx)
     r = float(fx.get("roll", 0) or 0)
     if r > 0:                    # giro de cámara: ampliar, girar y recortar (sin esquinas negras)
@@ -271,6 +443,9 @@ def ffmpeg_filters(fx: dict | None, dur: float, w: int, h: int) -> list[str]:
     fout = float(fx.get("fade_out", 0))
     if fout > 0:
         out.append(f"fade=t=out:st={max(0.0, dur - fout):.3f}:d={fout:.3f}")
+    lg = lines_graph(fx, w, h, fps)                   # ⚡ las líneas, encima de todo lo del clip
+    if lg:
+        out.append(lg)
     return out
 
 

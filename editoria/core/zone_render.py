@@ -63,7 +63,7 @@ def heavy_reason(p: Project, c) -> str | None:
     return None                                # (una capa de ajuste solo con color: el visor la pinta bien y barata)
 
 
-START_FX = ("fade_in", "flash", "glitch", "invert", "shake", "roll")   # lo que va «al empezar el clip» (segundos)
+START_FX = ("fade_in", "flash", "glitch", "invert", "shake", "roll", "lines", "focus_in")   # lo que va «al empezar el clip» (segundos)
 
 
 def _media_sig(p: Project, ids) -> list:

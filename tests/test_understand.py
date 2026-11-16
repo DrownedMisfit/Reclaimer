@@ -62,7 +62,8 @@ def main():
     print(f"✓ análisis a fondo en {time.time() - t0:.0f} s")
 
     # 3) Entidades e índice
-    ents = LU.build_entities(media, words, LU.STARTER_GLOSSARY)
+    ents = LU.build_entities(media, words, "Jefe Maestro = Master Chief, John-117, el Jefe\nCortana\n"
+                             "Marcus Fenix = Marcus\n")   # (glosario de esta prueba; el de partida es genérico)
     jm = next(e for e in ents if e.name == "Jefe Maestro")
     assert "ref" in jm.refs, "la imagen «jefe maestro.png» enseña cómo es"
     index = LU.build_index(ents, data, {m["media_id"]: m["meta"] for m in media})

@@ -73,7 +73,8 @@ def main():
     lay = ins._audio_lay
     pos = [lay.itemAt(i).widget() for i in range(lay.count())]
     antes = pos[pos.index(sec) - 1]
-    assert antes is not None and getattr(antes, "title", lambda: "")() == "Ecualizador", "justo debajo del ecualizador"
+    titulo = antes.head.text() if hasattr(antes, "head") else getattr(antes, "title", lambda: "")()
+    assert antes is not None and "Ecualizador" in titulo, ("justo debajo del ecualizador", titulo)   # (plegable)
     sec.head.setChecked(False)
     assert not sec.body.isVisibleTo(sec)
     sec.head.setChecked(True)                   # (clic en su cabecera: se abre, como en Resolve)

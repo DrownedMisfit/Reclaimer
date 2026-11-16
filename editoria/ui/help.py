@@ -18,7 +18,7 @@ HELP: dict[str, tuple[str, str]] = {
 Aquí están todos tus archivos (narración, gameplay, cinemáticas, música, imágenes…).
 <ul>
 <li><b>＋ Archivos / ＋ Carpeta</b>: importa archivos o una carpeta entera (con subcarpetas). También puedes arrastrarlos desde el Explorador.</li>
-<li>Se ordenan solos por el nombre de sus carpetas (Gameplay, Cinematics, Music…). Las subcarpetas (Combat, Marcus…) se vuelven etiquetas.</li>
+<li>Se ordenan solos por el nombre de sus carpetas (Gameplay, Cinematics, Music…). Las subcarpetas (Acción, Noche…) se vuelven etiquetas.</li>
 <li><b>Doble clic</b> en un archivo = se añade a la timeline en el cabezal. También puedes arrastrarlo.</li>
 <li><b>Clic derecho</b> en un archivo: cambiar categoría, etiquetas, corregir lo que vio la IA…</li>
 <li>Los archivos originales nunca se modifican.</li>
@@ -53,8 +53,8 @@ La primera vez descarga los modelos (~500 MB); después los clips nuevos se anal
 plano. Todo funciona en tu PC. Pulsarlo mientras analiza lo detiene."""),
     "buscar": ("Buscar en la biblioteca", """
 <b>Búsqueda normal</b>: escribe y se filtra por nombre, categoría, carpeta y lo que vio la IA.<br><br>
-<b>◈ Buscar (por contenido)</b>: actívalo, describe lo que quieres ver («Marcus peleando contra varios
-enemigos», «una cinemática triste») y pulsa Enter. La IA ordena los clips por parecido y encuentra
+<b>◈ Buscar (por contenido)</b>: actívalo, describe lo que quieres ver («una persona corriendo bajo la
+lluvia», «una escena triste») y pulsa Enter. La IA ordena los clips por parecido y encuentra
 el mejor momento de cada uno (★★★ = más parecido). Doble clic en un resultado = se añade desde ese momento."""),
     "visor": ("Visor", """
 Muestra el video tal como saldrá al exportar (encuadres, pantalla dividida, textos y subtítulos).
@@ -239,14 +239,14 @@ Para personajes de videojuegos casi no hay imágenes libres: si salen pocas, <b>
 busca lo mismo en tus videos.<br><br><b>Cada imagen</b> lleva su barra «es lo que buscas: 0–100 %» (lo que cree la IA; «identificando…» mientras la analiza). Arriba a la derecha ✓ (es) y ✗ (no es); arriba a la izquierda <b>»</b> «Saltar» la esconde sin enseñarle nada. La lista no salta sola al principio: «⤒ Inicio» sube. La imagen de «Aparición seleccionada» se puede <b>arrastrar a la línea de tiempo</b>. Las de internet marcadas ✓ se guardan como «lo que buscaste 1, 2, 3…» y en Medios aparecen en «Internet ▸ lo que buscaste»."""),
     "entender": ("Entender mi biblioteca a fondo", """
 La IA revisa <b>cada imagen y cada segundo</b> de tus videos (no solo unos pocos fotogramas), los divide
-en planos y aprende <b>quién y qué aparece</b>. Así, cuando en tu narración dices «el Jefe Maestro», el
+en planos y aprende <b>quién y qué aparece</b>. Así, cuando en tu narración dices «el protagonista», el
 B-roll muestra una imagen, cinemática o momento donde sale.<br><br>
 <b>Cómo aprende los nombres:</b><br>
 • De tus <b>imágenes</b>: «jefe maestro.png» le enseña cómo es, y lo busca en tus videos por parecido.
   Es lo más fiable: añade unas cuantas imágenes con buen nombre.<br>
 • De los nombres de tus archivos y carpetas («Cinemáticas/Cortana.mp4»).<br>
 • De los <b>nombres propios que dices</b> en la narración.<br>
-• Del <b>glosario</b> (a la derecha): «Jefe Maestro = Master Chief, John-117» une apodos y nombres en inglés.<br><br>
+• Del <b>glosario</b> (a la derecha): «El protagonista = Juan, Juanito» une apodos y nombres.<br><br>
 Despliega un nombre para ver dónde lo encontró (con miniaturas). Tarda ≈1 minuto por cada hora de
 video y se guarda: la segunda vez es instantáneo. «Actualizar nombres» recalcula rápido tras editar el glosario."""),
     "primera_version": ("Primera versión automática", """
@@ -622,9 +622,9 @@ La IA (Demucs, en tu tarjeta gráfica) separa las VOCES de la música del juego,
 · En el edit musical: «Opción de sonido» → «Solo los diálogos (sin el ruido de fondo)». La canción no se toca.<br>
 Se hace una vez por archivo y se guarda (la siguiente vez es instantáneo)."""),
     "buscar_palabras": ("🗣 Buscar lo que se dice", """
-Escribe palabras o frases («Marcus, la traición, explosión») y te dice DÓNDE se dicen, gastando poco:
+Escribe palabras o frases («la traición, un coche, explosión») y te dice DÓNDE se dicen, gastando poco:
 solo escucha donde hay voz (se salta la música, el ruido y el silencio), con un modelo pequeño, y deja la tarjeta
-gráfica libre. Tolera acentos y pequeños errores («Marcos» encuentra «Marcus»). Lo escuchado se guarda: buscar
+gráfica libre. Tolera acentos y pequeños errores («Martin» encuentra «Martín»). Lo escuchado se guarda: buscar
 otra palabra en el mismo archivo es instantáneo (y si ya lo transcribiste en «🎙 Transcribir», usa eso).<br>
 <b>Dónde</b>: pestaña IA ✨ → «🗣 Buscar lo que se dice», clic derecho en un clip (✨ IA) o en Medios.<br>
 <b>Resultados</b>: doble clic = ir ahí · arrastrar a la línea de tiempo · «➕ Poner en el cabezal» ·

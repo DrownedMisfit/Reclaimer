@@ -32,5 +32,7 @@
  "edit_grain": "base_sin_1.webp",
  "edit_vignette": "base_sin_1.webp",
  "edit_letterbox": "base_sin_1.webp",
- "edit_extras": "base_sin_8.webp"
+ "edit_extras": "base_sin_8.webp",
+ "look_lines": "base_sin_2.webp",
+ "look_focus_in": "base_sin_2.webp"
 }

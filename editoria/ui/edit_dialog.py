@@ -201,7 +201,7 @@ class EditDialog(QDialog):
         krow = QHBoxLayout()
         krow.addWidget(QLabel("🔑 Planos donde se dice:"))
         self.kw = QLineEdit()
-        self.kw.setPlaceholderText("Marcus, traición, explosión…")
+        self.kw.setPlaceholderText("traición, coche, explosión…")
         self.kw.setToolTip("La IA busca esas palabras en el sonido de tus videos (ligero: solo donde se habla) y "
                            "prefiere los planos donde se dicen.")
         krow.addWidget(self.kw, 1)

@@ -61,6 +61,11 @@ LOOKS = [  # (clave, texto, valor, ayuda)
     ("roll", "↻ Giro de cámara al entrar", 0.4, "La imagen gira y se endereza (segundos)."),
     ("lightleak", "☀ Destello de luz", 0.6, "Una luz cálida cruza la imagen."),
     ("duotone", "🟣 Duotono", 1.0, "Dos tonos: sombras moradas y luces verdes (edits estilizados)."),
+    ("lines", "⚡ Destello de líneas", 0.13, "Al empezar el clip, un haz de líneas verticales blancas cruza el "
+     "centro (unos 4 fotogramas; ponlo en el clip de después de un corte). La duración se cambia en el "
+     "Inspector → Efectos."),
+    ("focus_in", "🔍 Entrar enfocando", 0.3, "El clip empieza muy desenfocado y se enfoca (0,3 s). La duración se "
+     "cambia en el Inspector → Efectos."),
 ]
 
 
@@ -256,7 +261,7 @@ class EffectsPanel(QWidget):
         row.addWidget(b_dir)
         if _hay_sonidos_internet():
             b_web = QPushButton("🌐 Buscar en internet…")
-            b_web.setToolTip("Busca un sonido concreto («warthog de Halo 1», «disparo de tanque de Gears of War 2») "
+            b_web.setToolTip("Busca un sonido concreto («motor de coche», «disparo de tanque») "
                              "en YouTube y Myinstants, lo escuchas y lo guardas o lo pones en el cabezal.")
             b_web.clicked.connect(self.open_sound_search)
             row.addWidget(b_web)

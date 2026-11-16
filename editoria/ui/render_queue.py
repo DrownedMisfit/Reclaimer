@@ -83,7 +83,7 @@ class RenderQueue(QObject):
         script = os.path.join(str(_temp_dir()), f"editoria_cola_{id(job)}.txt")
         try:
             project = Project.from_dict(job["snapshot"])
-            args, total = build_command(project, opts, media_tools.ffmpeg(), script)
+            args, total = build_command(project, opts, media_tools.ffmpeg(), script, raster=False)
         except (ValueError, RuntimeError) as exc:
             job["status"], job["error"] = "error", str(exc)
             self.changed.emit()
@@ -94,9 +94,9 @@ class RenderQueue(QObject):
         self._log: list[str] = []
         from . import export_runner
         self.proc = export_runner.make(project, opts, self)      # por trozos a la vez, si se puede
+        self._script = script
         if self.proc is None:
-            self.proc = QProcess(self)
-            self.proc.setProcessChannelMode(QProcess.MergedChannels)
+            self.proc = export_runner.make_single(project, opts, script, self)
         self.proc.readyReadStandardOutput.connect(self._read)
         self.proc.finished.connect(self._finished)
         export_runner.start(self.proc, args, opts)
@@ -122,6 +122,8 @@ class RenderQueue(QObject):
         self.proc = None
         if proc is not None:
             proc.deleteLater()
+        from . import export_runner
+        export_runner.cleanup(getattr(self, "_script", ""))      # (las imágenes de los subtítulos, fuera)
         if job is not None:
             if job["status"] != "cancelled":
                 if code == 0:

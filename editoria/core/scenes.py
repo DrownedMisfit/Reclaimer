@@ -24,7 +24,8 @@ import uuid
 
 from . import image_anim
 
-FONDOS = [("blur", "Desenfocado"), ("normal", "Normal"), ("dark", "Oscurecido")]
+FONDOS = [("blur", "Desenfocado"), ("normal", "Normal"), ("dark", "Oscurecido"), ("img", "Imagen"),
+          ("img_blur", "Imagen borrosa")]       # (imagen = escena["fondo_img"], la que eligas en 🌐 Internet → Fondo)
 FONDO_POR_DEFECTO = "blur"
 BLUR = 0.6                  # como el estilo «encima, fondo desenfocado» de las imágenes
 OSCURO = -0.9               # exposición del fondo oscurecido (pasos)
@@ -261,6 +262,11 @@ def guardar_plantilla(escena: dict, project, nombre: str) -> str:
     propios = {os.path.normcase(sfx.path_for(k)): k for k in sfx.CATALOG} if escena["sonidos"] else {}
     t = {"nombre": nombre, "dur": round(largo(escena), 3), "fondo": escena.get("fondo", FONDO_POR_DEFECTO),
          "actores": [], "sonidos": []}
+    if t["fondo"] in ("img", "img_blur"):                # 🖼 la imagen de fondo, por su archivo
+        if escena.get("fondo_img") in rutas:
+            t["fondo_ruta"] = rutas[escena["fondo_img"]]
+        else:
+            t["fondo"] = FONDO_POR_DEFECTO
     for a in escena["actores"]:
         if a["media_id"] in rutas:
             t["actores"].append(dict(copy.deepcopy({k: v for k, v in a.items() if k not in ("id", "media_id")}),
@@ -343,6 +349,15 @@ def desde_plantilla(t: dict, a: float, media_de_ruta, dur: float | None = None) 
         s = {k: v for k, v in x.items() if k not in ("ruta", "sfx")}
         s.update(id=_id(), media_id=mid)
         e["sonidos"].append(s)
+    if e["fondo"] in ("img", "img_blur"):
+        ruta = t.get("fondo_ruta", "")
+        mid = media_de_ruta(ruta, "Escenas") if ruta and os.path.isfile(ruta) else None
+        if mid:
+            e["fondo_img"] = mid
+        else:
+            e["fondo"] = FONDO_POR_DEFECTO
+            if ruta:
+                faltan.append(ruta)
     if dur is not None and abs(float(dur) - largo(e)) > 1e-3:
         estirar(e, dur)
     return e, faltan

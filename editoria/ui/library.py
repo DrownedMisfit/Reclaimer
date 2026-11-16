@@ -284,7 +284,7 @@ class LibraryPanel(QWidget):
         self.btn_ai_search = QPushButton("◈ Buscar")
         self.btn_ai_search.setCheckable(True)
         self.btn_ai_search.setToolTip("Buscar por CONTENIDO: describe lo que quieres ver y pulsa Enter.\n"
-                                      "Ej.: «Marcus peleando contra varios enemigos», «una cinemática triste».")
+                                      "Ej.: «una persona corriendo bajo la lluvia», «una escena triste».")
         self.btn_ai_search.toggled.connect(self._on_mode)
         set_help(self.search, "buscar")
         set_help(self.btn_ai_search, "buscar")
@@ -959,7 +959,7 @@ class LibraryPanel(QWidget):
     def _edit_tags(self, ids):
         current = ", ".join(self.ctrl.project.media[ids[0]].tags)
         text, ok = QInputDialog.getText(self, "Etiquetas",
-                                        "Etiquetas separadas por comas (ej.: combate, Marcus, jefe):",
+                                        "Etiquetas separadas por comas (ej.: acción, persona, noche):",
                                         text=current)
         if ok:
             tags = [t.strip() for t in text.split(",") if t.strip()]

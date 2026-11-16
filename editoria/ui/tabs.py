@@ -112,3 +112,53 @@ def sections(pages, key: str = "") -> tuple[QScrollArea, dict]:
     sc.setFrameShape(QScrollArea.NoFrame)
     sc.setWidget(inner)
     return sc, out
+
+
+class _Espejo(QWidget):
+    """(interno) Hace que la sección se oculte cuando el código oculta su grupo (y vuelva al mostrarlo)."""
+
+    def __init__(self, sec, grupo):
+        super().__init__(sec)
+        self.sec, self.grupo = sec, grupo
+        self.hide()
+        grupo.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is self.grupo and ev.type() in (QEvent.HideToParent, QEvent.ShowToParent):
+            self.sec.setVisible(not self.grupo.isHidden())
+        return False
+
+
+def plegar_grupos(pagina: QWidget, clave: str, abiertas=()) -> list:
+    """Cada grupo con título (QGroupBox) que está directamente en la página pasa a ir detrás de su título, plegable
+    como en Resolve: clic en la cabecera = abrir o cerrar; se recuerda cómo lo dejas (clave). Si el código oculta el
+    grupo, se oculta también su sección. Devuelve las secciones creadas."""
+    import re
+    from PySide6.QtWidgets import QGroupBox
+    lay = pagina.layout()
+    if lay is None:
+        return []
+    hechas = []
+    for i in range(lay.count()):
+        w = lay.itemAt(i).widget()
+        if not isinstance(w, QGroupBox) or not w.title():
+            continue
+        titulo = w.title()
+        limpio = re.sub(r"[^\wáéíóúñü ]+", "", titulo, flags=re.I).strip() or titulo
+        oculto = w.isHidden()
+        lay.removeWidget(w)
+        w.setTitle("")
+        w.setFlat(True)
+        caja = QWidget()                              # (lo que se pliega; el grupo dentro, con su propia visibilidad)
+        cv = QVBoxLayout(caja)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.addWidget(w)
+        sec = Section(titulo, caja, titulo in abiertas, f"{clave}/{limpio}")
+        sec._espejo = _Espejo(sec, w)
+        sec.grupo = w
+        if oculto:
+            sec.setVisible(False)
+        lay.insertWidget(i, sec)
+        hechas.append(sec)
+    return hechas

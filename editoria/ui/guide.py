@@ -206,7 +206,7 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
         ("<b>Enséñale qué buscas</b>: en la esquina de cada resultado (tus videos o internet), <b>✓</b> = «aquí está» y "
          "<b>✗</b> = «no es». Con ✓ busca más momentos parecidos; con ✗ aparta los parecidos. La tarjeta <b>«🤔 ¿Es "
          "esto?»</b> te pregunta por lo que más le ayuda a aprender. Se recuerda, y si es un nombre que la IA conoce "
-         "(«Jefe Maestro»), también lo usa el B-roll automático.", "w:moments.grid", None),
+         "(«el protagonista»), también lo usa el B-roll automático.", "w:moments.grid", None),
         ("<b>Imágenes de internet</b>: en «Buscar en» elige 🌐 Internet. La IA esconde las que no se parecen a lo que "
          "pides. En la esquina de cada imagen: <b>✓</b> = «esta es» (suben las parecidas) y <b>✗</b> = «no es» (se "
          "quita, y también las casi iguales). <b>«✨ Buscar más como las ✓»</b> trae más. Se recuerda para la próxima.",
@@ -348,6 +348,9 @@ def reveal(widget: QWidget):
                 if idx >= 0:
                     w.setCurrentIndex(idx)
                     break
+    for w in chain:                                   # (una sección plegada del inspector: se abre)
+        if hasattr(w, "set_open") and hasattr(w, "body") and not w.body.isVisibleTo(w):
+            w.set_open(True, save=False)
     for w in chain:
         if isinstance(w, QScrollArea) and w.widget() is not None and w.widget().isAncestorOf(widget):
             w.ensureWidgetVisible(widget, 20, 20)

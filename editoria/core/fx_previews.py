@@ -107,11 +107,11 @@ def _specs() -> list[tuple[str, str, list[dict], float]]:
     from ..ui.effects_panel import LOOKS
     from . import transitions as TR
     out = []
-    entry = {"glitch", "flash", "shake", "roll", "fade_in"}
+    entry = {"glitch", "flash", "shake", "roll", "fade_in", "lines", "focus_in"}
     for key, _text, val, _tip in LOOKS:
         if key in entry:              # efectos «al entrar»: dos planos para que se vea dos veces en el bucle
             plan = [dict(shot="a", dur=1.5, src=0.3, fx={key: val}), dict(shot="a", dur=1.5, src=2.0, fx={key: val})]
-            at = 1.5 + min(0.12, val / 2)
+            at = 1.5 + (0.01 if key == "lines" else min(0.12, val / 2))
         elif key == "fade_out":
             plan, at = [dict(shot="a", dur=3.0, src=0.5, fx={key: val})], 2.75
         else:

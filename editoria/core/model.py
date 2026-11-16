@@ -263,8 +263,13 @@ class SubtitleStyle:
     max_lines: int = 2
     max_words: int = 0          # palabras como mucho en pantalla a la vez (0 = sin límite; Shorts: 3)
     shadow: float = 0.0         # sombra suave debajo de las letras (% de la altura del video; 0 = sin sombra)
-    animation: str = "none"     # none | fade | pop | karaoke
+    animation: str = "none"     # none | fade | pop | karaoke | words (palabra a palabra, se van sumando)
     emphasis: list[int] = field(default_factory=list)  # índices de palabras resaltadas
+    glow: float = 0.0           # resplandor difuminado alrededor de las letras (% de la altura; 0 = sin resplandor)
+    glow_color: str = "#FFFFFF"
+    fx_color: bool = False      # frases con ¿?¡! o palabras resaltadas: el resplandor pasa a lila y al resaltado
+    fx_stretch: bool = False    # estirón a lo ancho en los primeros fotogramas de cada frase
+    fx_punch: bool = False      # golpe final: la frase crece justo antes de un corte de plano
 
 
 class _Lectura:

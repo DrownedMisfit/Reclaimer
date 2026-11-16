@@ -312,17 +312,20 @@ class TrackLayer:
         extra = {k: float(fx.get(k) or 0) for k in ("rgbsplit", "glow", "punchy", "vhs", "duotone") if float(fx.get(k) or 0) > 0}
         post = [_post_look(pc, pfx, mix) for pc, pfx, mix in (getattr(self, "_post", None) or [])]
         post = [x for x in post if x is not None]
+        focus = float(getattr(self, "_focus", 0.0) or 0.0)     # 🔍 entrar enfocando (cambia en cada fotograma)
         key = key + ((tuple(sorted(crop.items())) if crop else None), tuple(sorted(extra.items())),
-                     tuple(x[0] for x in post))
+                     tuple(x[0] for x in post), focus > 0)
         if key != getattr(self, "_look_key", (False, 0.0, None, "normal", (), (0, 0), None, None, None, None, (), ())):
             self._look_key = key
-            bw, blur, _ck, _bl, _rk, _bs, _ch, _mk, _sm, _cr, _ex, _po = key
+            bw, blur, _ck, _bl, _rk, _bs, _ch, _mk, _sm, _cr, _ex, _po, focus_on = key
             eff = None
-            if ckey is not None or blend != "normal" or regions or chroma or mkey or smask or crop or extra or post:
+            if ckey is not None or blend != "normal" or regions or chroma or mkey or smask or crop or extra or post \
+                    or focus_on:
                 eff = LookEffect(col, bw, blur, blend, regions, self.box.rect(), chroma, mkey, content, smask)
                 eff.crop = crop
                 eff.extra = extra
                 eff.post = [x[1] for x in post]
+                eff.focus = focus
             elif blur > 0:
                 eff = QGraphicsBlurEffect()
                 eff.setBlurRadius(4 + 30 * blur)
@@ -346,8 +349,13 @@ class TrackLayer:
 
     def set_effects(self, fx: dict | None, t: float, dur: float, src_t: float | None = None):
         """Destello / fundido / temblor del clip en el instante t (desde su inicio)."""
+        r0 = self.box.rect()                         # 🔍 entrar enfocando: sigma en fracción del ancho de la caja
+        self._focus = effects.focus_sigma(fx, t, min(r0.width(), r0.height())) / max(1.0, r0.width())
         self._set_look(fx)
         eff = self.box.graphicsEffect()
+        if isinstance(eff, LookEffect) and abs(eff.focus - self._focus) > 1e-9:
+            eff.focus = self._focus
+            eff.update()
         if src_t is not None and getattr(eff, "smask", None) and abs(eff.src_t - src_t) > 1e-4:
             eff.src_t = src_t           # ✂ la máscara del fotograma que se ve
             eff.update()
@@ -378,9 +386,11 @@ class TrackLayer:
         else:
             self.neg.hide()
         dx, dy = effects.shake_at(fx, t)
+        self._shake = QPointF()
         if dx or dy:
             r = self.box.rect()
-            self.box.setPos(self.box.pos() + QPointF(dx * r.width(), dy * r.height()))
+            self._shake = QPointF(dx * r.width(), dy * r.height())
+            self.box.setPos(self.box.pos() + self._shake)
         ang = effects.roll_at(fx, t)                 # ↻ giro de cámara (ampliado para no ver esquinas)
         r = self.box.rect()
         # ⚡ Solo si cambian: Qt repinta la capa (y recalcula su color) aunque se le den los mismos valores
@@ -409,11 +419,53 @@ class TrackLayer:
             self.leak.show()
         elif hasattr(self, "leak"):
             self.leak.hide()
+        # ⚡ Destello de líneas (las mismas franjas que al exportar). FUERA de la capa: su efecto (color, desenfoque…)
+        # no las toca y no tiemblan ni giran con el temblor / giro de cámara (al exportar van encima de todo eso)
+        bars = effects.lines_px(fx, t, int(round(self.box.rect().width())))
+        if bars and not hasattr(self, "lines"):
+            self.lines = _LinesItem()
+            self.box.scene().addItem(self.lines)
+        if hasattr(self, "lines") and bars != self.lines.bars:
+            self.lines.bars = bars
+            self.lines.update()
+        self._sync_lines()
+
+    def _sync_lines(self):
+        """Coloca la capa de líneas donde está el clip, como al exportar: con su giro de capa, su entrada, su opacidad
+        y su recorte de bordes, pero SIN voltear (al exportar se voltea la imagen antes de poner las líneas). Va por
+        debajo de una zona pre-renderizada (Z 8,99), que ya las trae: no se ven dos veces."""
+        it = getattr(self, "lines", None)
+        if it is None:
+            return
+        if not it.bars or not self.box.isVisible():
+            it.hide()
+            return
+        r = self.box.rect()
+        if it.rect() != r:
+            it.setRect(r)
+        it.setPos(self.box.pos() - getattr(self, "_shake", QPointF()))
+        if not it.transform().isIdentity():
+            it.setTransform(QTransform())
+        cr = getattr(self, "_crop", None) or {}
+        keep = QRectF(r.left() + cr.get("l", 0) * r.width(), r.top() + cr.get("t", 0) * r.height(),
+                      r.width() * (1 - cr.get("l", 0) - cr.get("r", 0)),
+                      r.height() * (1 - cr.get("t", 0) - cr.get("b", 0))) if cr else None
+        if keep != it.keep:
+            it.keep = keep
+            it.update()
+        if it.transformOriginPoint() != r.center():
+            it.setTransformOriginPoint(r.center())
+        it.setRotation(getattr(self, "_rot", 0.0))
+        it.setOpacity(self.box.opacity())
+        it.setZValue(self.box.zValue() + 0.02)
+        it.show()
 
     def hide(self):
         self._fill_ok = False
         self.box.hide()
         self.fill.hide()
+        if getattr(self, "lines", None) is not None:
+            self.lines.hide()
         for it in (getattr(self, "_shadow", None), getattr(self, "_outline", None)):
             if it is not None:
                 it.hide()
@@ -428,6 +480,7 @@ class TrackLayer:
             self.box.setPos(pos + QPointF(dx, dy))
         if alpha < 0.999:
             self.box.setOpacity(self.box.opacity() * alpha)
+        self._sync_lines()
         sh, ol = decor.shadow_of(fx), decor.outline_of(fx)
         if not sh and not ol:
             for it in (getattr(self, "_shadow", None), getattr(self, "_outline", None)):
@@ -1895,6 +1948,29 @@ class _InvertItem(QGraphicsRectItem):
         painter.restore()
 
 
+def paint_lines(painter: QPainter, r: QRectF, bars, keep: QRectF | None = None):
+    """⚡ Destello de líneas: franjas blancas (effects.lines_px) encima de la imagen, sin suavizar los bordes (como
+    las filas de la exportación). keep: lo que queda tras el recorte de bordes de la capa."""
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, False)
+    if keep is not None:
+        painter.setClipRect(keep)
+    for x, w, a in bars:
+        painter.fillRect(QRectF(r.left() + x, r.top(), w, r.height()), QColor(255, 255, 255, int(round(255 * a))))
+    painter.restore()
+
+
+class _LinesItem(QGraphicsRectItem):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.bars: list = []
+        self.keep: QRectF | None = None
+        self.setPen(QPen(Qt.NoPen))
+
+    def paint(self, painter, _option, _widget=None):
+        paint_lines(painter, self.rect(), self.bars, self.keep)
+
+
 class LookEffect(QGraphicsEffect):
     """Color del clip en el visor (la misma tabla 3D que se usa al exportar) + blanco y negro y desenfoque."""
 
@@ -1906,6 +1982,7 @@ class LookEffect(QGraphicsEffect):
         self.crop = None                             # ✂ Recortar bordes (fracciones de la caja)
         self.extra: dict = {}                        # efectos de edits: rgbsplit, glow, punchy, vhs
         self.post: list = []                         # 🎨 capas de ajuste de encima (ver _post_look)
+        self.focus = 0.0                             # 🔍 entrar enfocando: sigma en fracción del ancho de la caja
         self.mkey, self.content = mkey, content     # 👤 fondo quieto fuera (y dónde está la imagen en la caja)
         self._plate = None
         self.color, self.bw, self.blur, self.blend = color, bw, blur, blend
@@ -1944,6 +2021,11 @@ class LookEffect(QGraphicsEffect):
                 import cv2
                 k = 1 + 2 * int(2 + 15 * self.blur)
                 rgba[...] = cv2.GaussianBlur(rgba, (k, k), 0)
+        if self.focus > 0:               # 🔍 entrar enfocando: el mismo sigma que el gblur de la exportación
+            s = self.focus * painter.worldTransform().mapRect(self.box).width()
+            if s >= 0.3:
+                rgba = px.view(np.uint8).reshape(h, w, 4)
+                rgba[...] = effects.blur_bgra(rgba, s)
         if self.regions:
             self._blur_regions(px, w, h, painter.worldTransform(), off)
         if self.crop:
@@ -1961,7 +2043,7 @@ class LookEffect(QGraphicsEffect):
             a[:, :x0, 3] = 0
             a[:, x1:, 3] = 0
         for adj in self.post:            # 🎨 capas de ajuste de encima: después de todo lo del propio clip
-            px = _apply_post(px, w, h, adj)
+            px = _apply_post(px, w, h, adj, abs(painter.worldTransform().m11()) or 1.0)
         out = QImage(px.data, w, h, w * 4, QImage.Format_ARGB32).copy()
         painter.save()
         painter.setWorldTransform(QTransform())
@@ -2017,14 +2099,15 @@ def _post_look(color, fx, mix):
     bw = bool(fx.get("bw") or fx.get("oldfilm"))
     blur = round(float(fx.get("blur", 0) or 0), 2)
     extra = {k: float(fx.get(k) or 0) for k in ("rgbsplit", "glow", "punchy", "vhs", "duotone") if float(fx.get(k) or 0) > 0}
+    focus = round(float(fx.get("_focus_px", 0) or 0), 3)    # 🔍 entrar enfocando (sigma en píxeles del proyecto)
     mix = round(max(0.0, min(1.0, float(mix))), 2)
-    if (col is None and not bw and blur <= 0 and not extra) or mix <= 0.01:
+    if (col is None and not bw and blur <= 0 and not extra and focus <= 0) or mix <= 0.01:
         return None
-    key = (C.key(col) if col else None, bw, blur, tuple(sorted(extra.items())), mix)
-    return key, {"color": col, "bw": bw, "blur": blur, "extra": extra, "mix": mix}
+    key = (C.key(col) if col else None, bw, blur, tuple(sorted(extra.items())), mix, focus)
+    return key, {"color": col, "bw": bw, "blur": blur, "extra": extra, "mix": mix, "focus": focus}
 
 
-def _apply_post(px, w, h, adj: dict):
+def _apply_post(px, w, h, adj: dict, scale: float = 1.0):
     import numpy as np
     from ..core import color as C
     orig = px.copy() if adj["mix"] < 0.999 else None
@@ -2041,6 +2124,9 @@ def _apply_post(px, w, h, adj: dict):
             import cv2
             k = 1 + 2 * int(2 + 15 * adj["blur"])
             rgba[...] = cv2.GaussianBlur(rgba, (k, k), 0)
+    if adj.get("focus", 0) > 0:      # 🔍 entrar enfocando de la capa de ajuste (el mismo sigma que al exportar)
+        rgba = px.view(np.uint8).reshape(h, w, 4)
+        rgba[...] = effects.blur_bgra(rgba, adj["focus"] * scale)
     if orig is not None:          # opacidad / fundido de la capa de ajuste: el efecto, a medias
         a = orig.view(np.uint8).reshape(h, w, 4).astype(np.float32)
         b = px.view(np.uint8).reshape(h, w, 4).astype(np.float32)
@@ -3221,7 +3307,9 @@ class PlaybackEngine(QObject):
         vt = {t.id for t in p.tracks if t.kind == TRACK_VIDEO}
         self._bounds = sorted({round(x, 4) for c in p.clips.values() if c.track_id in vt and c.enabled
                                for x in (c.start, c.end)})
+        from ..core import subtitles as _SUBS
         key = (id(p), repr(p.subtitles), repr(p.tracks),
+               tuple(_SUBS.cut_times(p)) if p.subtitles.enabled and getattr(p.subtitles, "fx_punch", False) else None,
                tuple(sorted((m.id, m.kind, m.category) for m in p.media.values() if m.id in rel)),
                tuple((c.id, c.media_id, c.track_id, c.start, c.source_in, c.duration, c.speed, c.reverse, c.enabled)
                      for c in p.clips.values() if c.media_id in rel))
@@ -3506,10 +3594,14 @@ class PlaybackEngine(QObject):
             layer.set_post([] if adj else list(post))
             layer.set_blend(c.blend, 1.0 if adj else curves.opacity(c, t, m.kind == KIND_IMAGE))
             if adj:             # 🎨 su efecto va a lo de debajo; ella solo pone lo de pantalla entera (viñeta, destello)
-                fx_adj = {k: v for k, v in (c.fx or {}).items() if k in ("vignette", "flash")}
+                fx_adj = {k: v for k, v in (c.fx or {}).items() if k in ("vignette", "flash", "lines")}
                 layer.set_effects(fx_adj, t - c.start, c.duration, t - c.start)
                 mix = curves.opacity(c, t, True) * effects.fade_gain(c.fx, t - c.start, c.duration)
-                post.append((None if self.color_bypass else c.color, dict(c.fx or {}), mix))
+                pfx = dict(c.fx or {})
+                fs = effects.focus_sigma(c.fx, t - c.start, min(canvas.W, canvas.H))
+                if fs > 0:
+                    pfx["_focus_px"] = fs
+                post.append((None if self.color_bypass else c.color, pfx, mix))
                 continue
             fx_now = transitions.preview_fx(p, c)
             if under > 0.01:

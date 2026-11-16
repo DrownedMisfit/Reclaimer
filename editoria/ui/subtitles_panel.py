@@ -12,7 +12,8 @@ from .help import set_help
 
 POSITIONS = [("bottom", "Abajo"), ("middle", "Centro"), ("top", "Arriba")]
 ANIMATIONS = [("none", "Ninguna"), ("fade", "Aparecer suave"), ("pop", "Rebote"),
-              ("karaoke", "Karaoke (resalta la palabra que dices)")]
+              ("karaoke", "Karaoke (resalta la palabra que dices)"),
+              ("words", "Palabra a palabra (se van sumando)")]
 
 
 class ColorButton(QPushButton):
@@ -161,6 +162,21 @@ class SubtitlesPanel(QWidget):
                                "cualquier imagen.")
         self.shadow.valueChanged.connect(lambda v: self._set(shadow=v))
         f2.addRow("Sombra suave", self.shadow)
+        # ✨ Resplandor (estilo Neón): halo difuminado alrededor de las letras
+        self.glow = QDoubleSpinBox()
+        self.glow.setRange(0.0, 4.0)
+        self.glow.setSingleStep(0.1)
+        self.glow.setSuffix(" % (0 = sin resplandor)")
+        self.glow.setToolTip("Halo de luz difuminado alrededor de las letras (el estilo «Neón» lo trae; mejor sin "
+                             "contorno). En las frases fuertes puede cambiar de color: pestaña «Animación».")
+        self.glow.valueChanged.connect(lambda v: self._set(glow=v))
+        self.c_glow = ColorButton("Color del resplandor")
+        self.c_glow.setToolTip("Color normal del resplandor (en las frases fuertes pasa al color de resaltado).")
+        self.c_glow.color_changed.connect(lambda c: self._set(glow_color=c))
+        grow = QHBoxLayout()
+        grow.addWidget(self.c_glow)
+        grow.addWidget(self.glow, 1)
+        f2.addRow("Resplandor", grow)
         f2.addRow(brow)
         lay.addWidget(g2)
 
@@ -205,7 +221,24 @@ class SubtitlesPanel(QWidget):
         for key, label in ANIMATIONS:
             self.anim.addItem(label, key)
         self.anim.currentIndexChanged.connect(lambda: self._set(animation=self.anim.currentData()))
+        self.anim.setToolTip("Palabra a palabra: cada palabra aparece justo cuando la dices y se queda («HOLA» → "
+                             "«HOLA A» → «HOLA A TODOS»); con la frase siguiente empieza de nuevo.")
         f4.addRow(self.anim)
+        self.fx_color = QCheckBox("🌈 Brillo que cambia de color")
+        self.fx_color.setToolTip("En las frases con «¿?» o «¡!» y en las palabras resaltadas, el resplandor pasa "
+                                 "de blanco a lila y al color de resaltado (magenta neón) en 0,3 s, y vuelve a "
+                                 "blanco con la frase siguiente. Necesita «Resplandor» (pestaña Colores).")
+        self.fx_color.toggled.connect(lambda v: self._set(fx_color=v))
+        self.fx_stretch = QCheckBox("↔ Estirón al cambiar de frase")
+        self.fx_stretch.setToolTip("Los primeros 2–3 fotogramas de cada frase nueva el texto sale estirado a lo "
+                                   "ancho (160 % → 100 %), como un tirón.")
+        self.fx_stretch.toggled.connect(lambda v: self._set(fx_stretch=v))
+        self.fx_punch = QCheckBox("💥 Golpe final antes de un corte")
+        self.fx_punch.setToolTip("En la frase que acaba justo antes de un corte de plano (o del final del video), "
+                                 "los últimos 0,25 s el texto crece de golpe (100 % → 125 %).")
+        self.fx_punch.toggled.connect(lambda v: self._set(fx_punch=v))
+        for cb in (self.fx_color, self.fx_stretch, self.fx_punch):
+            f4.addRow(cb)
         lay.addWidget(g4)
 
         # --- Palabras resaltadas ---
@@ -336,6 +369,11 @@ class SubtitlesPanel(QWidget):
             if hasattr(self, "shadow"):
                 self.shadow.setValue(float(getattr(st, "shadow", 0.0) or 0.0))
             self.anim.setCurrentIndex(max(0, self.anim.findData(st.animation)))
+            self.glow.setValue(float(getattr(st, "glow", 0.0) or 0.0))
+            self.c_glow.set_color(getattr(st, "glow_color", "#FFFFFF") or "#FFFFFF")
+            self.fx_color.setChecked(bool(getattr(st, "fx_color", False)))
+            self.fx_stretch.setChecked(bool(getattr(st, "fx_stretch", False)))
+            self.fx_punch.setChecked(bool(getattr(st, "fx_punch", False)))
 
             words = p.transcripts.get(st.media_id, {}).get("words", [])
             emph = [words[i][2] for i in st.emphasis if 0 <= i < len(words)]

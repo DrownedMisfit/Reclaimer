@@ -316,9 +316,10 @@ class InspectorPanel(QWidget):
         ef = QFormLayout(self.effects_box)
         self.fx_spins: dict[str, QDoubleSpinBox] = {}
         for key, label in (("flash", "Destello"), ("fade_in", "Fundido de entrada"),
-                           ("fade_out", "Fundido de salida"), ("shake", "Temblor")):
+                           ("fade_out", "Fundido de salida"), ("shake", "Temblor"),
+                           ("lines", "Destello de líneas"), ("focus_in", "Entrar enfocando")):
             spin = QDoubleSpinBox()
-            spin.setRange(0.0, 5.0)
+            spin.setRange(0.0, {"lines": 0.5, "focus_in": 1.5}.get(key, 5.0))   # (⚡ y 🔍: cortos por naturaleza)
             spin.setSingleStep(0.05)
             spin.setDecimals(2)
             spin.setSuffix(" s")
@@ -400,6 +401,11 @@ class InspectorPanel(QWidget):
         self.clip_tabs.addTab(self._build_color_tab(), "Color")
         self.clip_tabs.currentChanged.connect(lambda i: setattr(self, "_last_tab", i))
         self._last_tab = 0
+        # Cada grupo (Información, Ajustes, Mejorar imagen, Efectos…) detrás de su título: un clic lo abre; se recuerda
+        from .tabs import plegar_grupos
+        for i in range(self.clip_tabs.count()):
+            plegar_grupos(self.clip_tabs.widget(i), "secciones/inspector",
+                          abiertas=("Información", "Ajustes", "Ecualizador", "Texto"))
         lay.addWidget(self.clip_tabs)
         lay.addStretch()
         return w
@@ -1351,7 +1357,7 @@ class InspectorPanel(QWidget):
                 for key, spin in self.fx_spins.items():
                     spin.setValue(float(fxd.get(key, 0.0)))
                     spin.setEnabled(editable)
-                for key in ("flash", "shake"):   # en el audio solo tienen sentido los fundidos
+                for key in ("flash", "shake", "lines", "focus_in"):   # en el audio solo tienen sentido los fundidos
                     lbl = self.effects_box.layout().labelForField(self.fx_spins[key])
                     self.fx_spins[key].setVisible(visual)
                     if lbl:
@@ -1627,7 +1633,7 @@ class InspectorPanel(QWidget):
         if self._loading or not self._ids:
             return
         names = {"flash": "Destello", "fade_in": "Fundido de entrada", "fade_out": "Fundido de salida",
-                 "shake": "Temblor"}
+                 "shake": "Temblor", "lines": "Destello de líneas", "focus_in": "Entrar enfocando"}
         p = self.ctrl.project
         for cid in self._ids:
             c = p.clips.get(cid)

@@ -36,24 +36,9 @@ STEP = 1.0              # un fotograma por segundo
 SHOT_CUT = 0.80         # parecido mínimo entre segundos seguidos para seguir en el mismo plano
 
 STARTER_GLOSSARY = """\
-Jefe Maestro = Master Chief, John-117, el Jefe
-Cortana
-Pacto = Covenant
-Inundación = Flood
-Precursores = Forerunner, Forerunners
-Inquisidor = Arbiter, Árbitro
-Spartan = Spartans, Espartano, Espartanos
-Marcus Fenix = Marcus
-Dominic Santiago = Dom
-Kait Diaz = Kait
-Locust = Locusts
-Kratos
-Atreus
-Link
-Zelda
-Ganondorf = Ganon
-Leon Kennedy = Leon S. Kennedy
-Arthur Morgan
+El protagonista = el prota, el héroe
+La villana = la jefa, la antagonista
+La nave = la nave espacial
 """
 
 STOP = set("""el la los las un una unos unas de del al y o que en por para con sin se su sus lo le les me te nos

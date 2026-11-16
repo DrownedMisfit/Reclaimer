@@ -1936,9 +1936,11 @@ class ProjectController(QObject):
                                     source_in=src, speed=sp,
                                     smooth=(sp < 0.999) if smooth is None else (smooth and sp < 0.999),
                                     link=(links.setdefault((x.link, k), new_id()) if x.link else ""))
-                    pfx = {kk: v for kk, v in fx.items() if kk not in ("fade_in", "fade_out", "trans", "flash", "shake")}
+                    pfx = {kk: v for kk, v in fx.items() if kk not in ("fade_in", "fade_out", "trans", "flash", "shake",
+                                                                       "lines", "focus_in")}
                     if k == 0:
-                        pfx.update({kk: fx[kk] for kk in ("fade_in", "trans", "flash", "shake") if kk in fx})
+                        pfx.update({kk: fx[kk] for kk in ("fade_in", "trans", "flash", "shake", "lines", "focus_in")
+                                     if kk in fx})
                     if k == n - 1 and "fade_out" in fx:
                         pfx["fade_out"] = fx["fade_out"]
                     piece.fx = pfx or None
@@ -3025,7 +3027,7 @@ class ProjectController(QObject):
         return self._edit("Volver al original", fn)
 
     # ------------------------------------------------- ⭐ mis efectos para la IA
-    START_FX = ("trans", "fade_in", "flash", "shake", "glitch", "invert")
+    START_FX = ("trans", "fade_in", "flash", "shake", "glitch", "invert", "lines", "focus_in")
 
     def _split_at(self, p: Project, c: Clip, t: float) -> Clip:
         """Divide c (y su sonido vinculado) en t. Devuelve la parte derecha de c. Los efectos «de entrada»
@@ -4929,7 +4931,7 @@ class ProjectController(QObject):
         lista = []
         for escena in escenas:
             esc = scenes.copia(escena)
-            adj = self.generator_media({"kind": "adjust"}) if esc.get("fondo", "normal") != "normal" else None
+            adj = self.generator_media({"kind": "adjust"}) if esc.get("fondo", "normal") in ("blur", "dark") else None
             lista.append((esc, adj, scenes.nota(esc["id"])))
         if not lista:
             return None
@@ -5008,6 +5010,16 @@ class ProjectController(QObject):
                     creados.append(tid)
                 p.scenes[esc["id"]] = esc
                 return creados
+            img = esc.get("fondo_img") if esc.get("fondo") in ("img", "img_blur") else None
+            if img and img in p.media and trozos:          # 🖼 fondo de imagen (nítida o borrosa) detrás de todo
+                nivel = pista_encima(nivel, a, b)
+                fi = Clip(new_id(), img, p.tracks[nivel].id, a, 0.0, b - a, volume=0.0, note=nota,
+                          layout=dict(transform.FULL, fit="cover"))
+                fi.fx = {"fade_in": 0.25, "fade_out": 0.25}
+                if esc["fondo"] == "img_blur":
+                    fi.fx["blur"] = scenes.BLUR
+                p.clips[fi.id] = fi
+                creados.append(fi.id)
             if adj is not None and trozos:
                 nivel = pista_encima(nivel, a, b)
                 fondo = Clip(new_id(), adj, p.tracks[nivel].id, a, 0.0, b - a, volume=0.0, note=nota,
@@ -5106,7 +5118,8 @@ class ProjectController(QObject):
             return min(s["b"], s["a"] + float(m.duration)) if m is not None and m.duration else s["b"]
         esperado = [(pz["a"], pz["b"]) for pz in scenes.piezas(esc)] + [(s["a"], fin_sonido(s))
                                                                        for s in scenes.sonidos(esc)]
-        if esc.get("fondo", "normal") != "normal" and esperado:
+        fondo = esc.get("fondo", "normal")
+        if esperado and (fondo in ("blur", "dark") or (fondo in ("img", "img_blur") and esc.get("fondo_img") in p.media)):
             esperado.append((float(esc["a"]), float(esc["b"])))
         if scenes.es_comparativa(esc):                      # ⚖ sus dos tomas y sus etiquetas
             def dur_de(lado):

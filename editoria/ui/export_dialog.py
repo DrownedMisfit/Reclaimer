@@ -398,10 +398,15 @@ class ExportDialog(QDialog):
             self._proyecto = base
             project = base
             rng = project.marked_range() if self.only_marked.isChecked() else None
+            cues = None
             if rng:
                 from ..core.project_tools import slice_project
                 project = slice_project(project, *rng)
-            args, self.total = build_command(project, opts, media_tools.ffmpeg(), script)
+                if opts.subtitles and base.subtitles.enabled:   # las frases del video entero, desde la marca I
+                    from ..core.subtitles import shift_cues, styled_cues
+                    cues = shift_cues(styled_cues(base), *rng)
+            # (raster=False: los subtítulos Neón / palabra a palabra se dibujan luego, en segundo plano)
+            args, self.total = build_command(project, opts, media_tools.ffmpeg(), script, cues=cues, raster=False)
         except (ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "No se puede exportar", str(exc))
             return
@@ -412,11 +417,11 @@ class ExportDialog(QDialog):
         self.btn_open.setVisible(False)
         from . import export_runner
         # Más rápido: por trozos a la vez (cortando por los cortes del montaje); si no se puede, de una vez
-        self.proc = export_runner.make(project, opts, self)
+        self.proc = export_runner.make(project, opts, self, cues=cues)
         parallel = self.proc is not None
+        self._script = script
         if not parallel:
-            self.proc = QProcess(self)
-            self.proc.setProcessChannelMode(QProcess.MergedChannels)
+            self.proc = export_runner.make_single(project, opts, script, self, cues=cues)
         self.proc.readyReadStandardOutput.connect(self._read)
         self.proc.finished.connect(self._finished)
         self._t0 = time.time()
@@ -454,6 +459,7 @@ class ExportDialog(QDialog):
         self.btn_close.setText("Cerrar")
         self.btn_mini.setVisible(False)
         proc, self.proc = self.proc, None
+        subs_failed = bool(getattr(proc, "subs_failed", False))     # (falló el dibujo de los subtítulos, no FFmpeg)
         if proc is not None:
             proc.deleteLater()
         if code == 0:
@@ -477,7 +483,7 @@ class ExportDialog(QDialog):
                 pass
         elif self._cancelled:
             self.status.setText("Exportación cancelada.")
-        elif self._opts.encoder == "gpu" and not self._retried_cpu:
+        elif self._opts.encoder == "gpu" and not self._retried_cpu and not subs_failed:
             # La tarjeta gráfica falló (driver, tamaño raro…): se reintenta sola con el procesador
             from dataclasses import replace
             self._retried_cpu = True
@@ -492,6 +498,8 @@ class ExportDialog(QDialog):
             if self._opts.encoder == "gpu":
                 self.status.setText("✗ La exportación falló. Prueba con «Codificar con: Procesador». Detalles:")
         self._cancelled = False
+        from . import export_runner
+        export_runner.cleanup(getattr(self, "_script", ""))      # (las imágenes de los subtítulos, fuera)
         if self._oculto:                          # (estabas en Miniatura: vuelve con el resultado, sin robar el foco)
             self._oculto = False
             self.show()

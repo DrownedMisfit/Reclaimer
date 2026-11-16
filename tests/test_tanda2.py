@@ -99,7 +99,7 @@ def main():
     win.timeline.set_selection([A])
     win.inspector.set_selection([A])
     insp = win.inspector
-    assert insp.enhance_box.isVisible() or insp.enhance_box.isVisibleTo(insp)
+    assert not insp.enhance_box.isHidden()          # (disponible; su sección puede estar plegada)
     insp.denoise.setValue(60)
     assert abs(p.clips[A].fx["denoise"] - 0.6) < 1e-6
     insp.stab.setChecked(True)

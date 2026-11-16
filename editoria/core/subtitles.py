@@ -55,6 +55,29 @@ PRESETS: dict[str, dict] = {
                         box=False, position="bottom", margin=5.0, max_chars=48, max_lines=1,
                         animation="fade"),
 }
+# ✨ Neón: blanco en negrita, SIN contorno, con un halo blanco difuminado alrededor,
+# en mayúsculas, centrado y a lo mucho 2 líneas. «palabra a palabra»: además cada palabra aparece cuando la dices,
+# el brillo se vuelve magenta en las frases fuertes, estirón al cambiar de frase y golpe antes de un corte
+NEON = "Neón"
+NEON_WORDS = "Neón palabra a palabra"
+PRESETS[NEON] = dict(font="Arial Black", size=7.0, bold=True, uppercase=True, strip_punct=False,
+                     color="#FFFFFF", highlight="#FF3DF2", outline_color="#000000", outline=0.0, shadow=0.0,
+                     box=False, position="middle", margin=0.0, max_chars=18, max_lines=2, max_words=0,
+                     animation="none", glow=1.2, glow_color="#FFFFFF")
+PRESETS[NEON_WORDS] = dict(PRESETS[NEON], animation="words", fx_color=True, fx_stretch=True, fx_punch=True)
+# Lo que no dice un estilo vuelve a su valor de siempre (si no, al pasar de «Neón» a «YouTube clásico» se quedaría
+# el resplandor o el estirón)
+_FX_OFF = dict(glow=0.0, glow_color="#FFFFFF", fx_color=False, fx_stretch=False, fx_punch=False)
+for _k in PRESETS:
+    PRESETS[_k] = {**_FX_OFF, **PRESETS[_k]}
+
+# ---- Efectos de los subtítulos (el visor y la exportación usan estas mismas fórmulas) ----
+STRONG_CHARS = "?!¿¡"
+LILA = "#B36BFF"
+COLOR_T = 0.3                 # s: el resplandor pasa de blanco a lila y a magenta
+STRETCH_T, STRETCH_X = 0.1, 1.6     # estirón: ~3 fotogramas, del 160 % al 100 % de ancho
+PUNCH_T, PUNCH_S = 0.25, 1.25       # golpe final: los últimos 0,25 s crece del 100 % al 125 %
+PUNCH_BEFORE, PUNCH_AFTER = 0.35, 0.6   # el corte tiene que caer entre fin − 0,35 s y fin + 0,6 s
 
 
 @dataclass
@@ -70,6 +93,7 @@ class Cue:
     start: float
     end: float
     lines: list[list[CueWord]] = field(default_factory=list)
+    punch: bool = False     # termina justo antes de un corte de plano (para el «golpe final»)
 
     @property
     def words(self) -> list[CueWord]:
@@ -188,7 +212,9 @@ def build_cues(p: Project, media_id: str, max_chars: int = 42, max_lines: int = 
             w.text = _clean(w.text, style)
         cw = [w for w in cw if w.text]
         if cw:
-            one = max_words and len(" ".join(w.text for w in cw)) <= max_chars   # cabe en una línea: una línea
+            # Cabe en una línea: una línea (Shorts y Neón: la 2.ª línea solo si no cabe)
+            one = (max_words or (style is not None and needs_raster(style))) and \
+                len(" ".join(w.text for w in cw)) <= max_chars
             cues.append(Cue(cw[0].start, cw[-1].end + hold, _balance(cw, 1 if one else max_lines)))
     # Que ningún bloque se solape con el siguiente
     for a, b in zip(cues, cues[1:]):
@@ -204,9 +230,154 @@ def styled_cues(p: Project) -> list[Cue]:
     st = p.subtitles
     if not st.media_id or st.media_id not in p.transcripts:
         return []
-    return build_cues(p, st.media_id, max_chars=st.max_chars, max_lines=st.max_lines,
+    cues = build_cues(p, st.media_id, max_chars=st.max_chars, max_lines=st.max_lines,
                       max_dur=3.0 if st.animation == "karaoke" else 5.0, style=st,
                       max_words=int(getattr(st, "max_words", 0) or 0))
+    if getattr(st, "fx_punch", False):
+        mark_punch(p, cues)
+    return cues
+
+
+JUMP_MAX = 4.0     # s de archivo saltados entre dos trozos seguidos del mismo medio que NO cuentan como corte
+
+
+def cut_times(p: Project) -> list[float]:
+    """Cambios de plano de verdad (para el «golpe final»): donde empieza o acaba un clip que tapa toda la pantalla
+    (pistas de video visibles) y el final del video. NO cuentan: las uniones de dos trozos seguidos del mismo
+    archivo que siguen (o saltan hacia delante a lo mucho JUMP_MAX s: los cortes de «eliminar silencios»), las capas
+    de ajuste, los colores/degradados, los textos ni las imágenes o videos pequeños encima."""
+    from . import generators
+    from .model import TRACK_VIDEO
+    from ..export.ffmpeg_export import _full_frame
+    vt = {t.id for t in p.tracks if t.kind == TRACK_VIDEO and not t.hidden}
+    clips = [c for c in p.clips.values() if c.track_id in vt and c.enabled and c.text is None
+             and not generators.is_generated(p.media_of(c)) and _full_frame(p, c)]
+    fps = float(p.fps or 30.0)
+
+    def seguido(a, b) -> bool:          # b empieza justo donde acaba a y es el mismo plano (o un salto corto)
+        if a.media_id != b.media_id or abs(a.end - b.start) > 0.5 / fps or bool(a.reverse) != bool(b.reverse):
+            return False
+        try:
+            fin_a = a.src_at(a.duration)
+        except Exception:  # noqa: BLE001 - (un clip raro: mejor contarlo como corte)
+            return False
+        salto = (fin_a - b.source_in) if a.reverse else (b.source_in - fin_a)
+        return -1.5 / fps <= salto <= JUMP_MAX
+    joined_ends: set[int] = set()
+    by_end: dict[int, list] = {}
+    for c in clips:                      # (⚡ por fotograma: con miles de clips, sin compararlos todos con todos)
+        by_end.setdefault(round(c.end * fps), []).append(c)
+    xs = set()
+    for c in clips:
+        f = round(c.start * fps)
+        prev = [o for k in (f - 1, f, f + 1) for o in by_end.get(k, []) if o is not c and seguido(o, c)]
+        if not prev:
+            xs.add(round(c.start, 4))
+        for o in prev:
+            joined_ends.add(id(o))
+    for c in clips:
+        if id(c) not in joined_ends:
+            xs.add(round(c.end, 4))
+    xs.add(round(p.duration(), 4))
+    return sorted(x for x in xs if x > 0)
+
+
+def shift_cues(cues: list[Cue], a: float, b: float) -> list[Cue]:
+    """Las frases que se ven en [a, b], con los tiempos desde «a» (para exportar un trozo con las MISMAS frases que
+    el video entero: una frase que cruza el límite sigue como iba, sin volver a empezar ni otro estirón o golpe)."""
+    out = []
+    for c in cues:
+        if c.end <= a or c.start >= b:
+            continue
+        lines = [[CueWord(w.start - a, w.end - a, w.text, w.index) for w in line] for line in c.lines]
+        out.append(Cue(c.start - a, c.end - a, lines, c.punch))
+    return out
+
+
+def mark_punch(p: Project, cues: list[Cue]) -> None:
+    """Marca las frases que acaban justo antes de un corte (o del final del video): ahí va el «golpe final»."""
+    import bisect
+    cuts = cut_times(p)
+    for c in cues:
+        k = bisect.bisect_left(cuts, c.end - PUNCH_BEFORE)
+        c.punch = k < len(cuts) and cuts[k] <= c.end + PUNCH_AFTER
+
+
+# ---------------------------------------------------------------- estado animado de un subtítulo en el instante t
+def word_start(cue: Cue, i: int) -> float:
+    """Cuándo aparece la palabra i del bloque (la primera, con el bloque)."""
+    return cue.start if i == 0 else cue.words[i].start
+
+
+def words_shown(cue: Cue, style: SubtitleStyle, t: float) -> int:
+    """Cuántas palabras del bloque se ven (palabra a palabra: solo las ya dichas; si no, todas)."""
+    ws = cue.words
+    if getattr(style, "animation", "") != "words":
+        return len(ws)
+    n = 1
+    for i in range(1, len(ws)):
+        if t + 1e-6 >= ws[i].start:
+            n = i + 1
+        else:
+            break
+    return n
+
+
+def color_trigger(cue: Cue, style: SubtitleStyle) -> float | None:
+    """Desde cuándo el resplandor cambia de color: frase con ¿?¡! (desde que empieza) o con una palabra resaltada
+    (desde que la dices). None si no cambia."""
+    if not getattr(style, "fx_color", False):
+        return None
+    ws = cue.words
+    if any(ch in w.text for w in ws for ch in STRONG_CHARS):
+        return cue.start
+    emph = set(style.emphasis)
+    ts = [word_start(cue, i) for i, w in enumerate(ws) if w.index in emph]
+    return min(ts) if ts else None
+
+
+def _mix(a: str, b: str, u: float) -> str:
+    a, b = a.lstrip("#"), b.lstrip("#")
+    ca = [int(a[i:i + 2], 16) for i in (0, 2, 4)]
+    cb = [int(b[i:i + 2], 16) for i in (0, 2, 4)]
+    u = max(0.0, min(1.0, u))
+    return "#" + "".join(f"{round(x + (y - x) * u):02X}" for x, y in zip(ca, cb))
+
+
+def glow_color_at(cue: Cue, style: SubtitleStyle, t: float) -> str:
+    """Color del resplandor en t: blanco → lila → magenta (el resaltado) en COLOR_T s; vuelve con la frase nueva."""
+    base = getattr(style, "glow_color", "#FFFFFF") or "#FFFFFF"
+    t0 = color_trigger(cue, style)
+    if t0 is None or t < t0:
+        return base.upper()
+    u = (t - t0) / COLOR_T
+    if u < 0.5:
+        return _mix(base, LILA, u * 2)
+    return _mix(LILA, style.highlight, (u - 0.5) * 2)
+
+
+def scale_at(cue: Cue, style: SubtitleStyle, t: float) -> tuple[float, float]:
+    """(ancho, alto) del texto en t: estirón al empezar la frase y golpe final antes de un corte."""
+    sx = sy = 1.0
+    if getattr(style, "fx_stretch", False):
+        u = (t - cue.start) / STRETCH_T
+        if 0 <= u < 1:
+            sx *= STRETCH_X + (1 - STRETCH_X) * u
+    if getattr(style, "fx_punch", False) and cue.punch:
+        u = (t - (cue.end - PUNCH_T)) / PUNCH_T
+        if u >= 0:
+            k = 1 + (PUNCH_S - 1) * (1 - (1 - min(1.0, u)) ** 3)      # de golpe (rápido al principio)
+            sx *= k
+            sy *= k
+    return sx, sy
+
+
+def needs_raster(style: SubtitleStyle) -> bool:
+    """¿Se exportan como imágenes dibujadas igual que en el visor? (resplandor, palabra a palabra o los efectos
+    nuevos no se pueden hacer igual con un archivo .ass)."""
+    return (float(getattr(style, "glow", 0) or 0) > 0 or getattr(style, "animation", "") == "words"
+            or bool(getattr(style, "fx_color", False) or getattr(style, "fx_stretch", False)
+                    or getattr(style, "fx_punch", False)))
 
 
 def _srt_time(t: float) -> str:

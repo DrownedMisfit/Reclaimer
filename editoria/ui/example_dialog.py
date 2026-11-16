@@ -345,7 +345,7 @@ class ExampleDialog(QDialog):
         nrow = QHBoxLayout()
         nrow.addWidget(QLabel("¿Qué es?"))
         self.name = QLineEdit(name)
-        self.name.setPlaceholderText("Ej.: Jefe Maestro, una roca, el logo de Xbox…")
+        self.name.setPlaceholderText("Ej.: una persona, una roca, un logo…")
         nrow.addWidget(self.name, 1)
         lay.addLayout(nrow)
         self.msg = QLabel("")

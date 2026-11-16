@@ -242,8 +242,9 @@ class AIPanel(QWidget):
         self.understand_label = _dim()
         self.understand_label.setWordWrap(True)
         v2.addWidget(self.understand_label)
-        self.continuous = QCheckBox("Gameplay continuo de fondo cuando no nombras nada concreto")
-        self.continuous.setToolTip("Sigue el mismo clip de gameplay donde se quedó (cambia al cambiar de tema), "
+        self.continuous = QCheckBox("Fondo continuo")
+        self.continuous.setToolTip("Gameplay continuo de fondo cuando no nombras nada concreto: sigue el mismo clip "
+                                   "donde se quedó (cambia al cambiar de tema), "
                                    "en vez de saltar entre clips.")
         v2.addWidget(self.continuous)
         row3 = QHBoxLayout()
@@ -355,8 +356,9 @@ class AIPanel(QWidget):
         self.loud.toggled.connect(lambda on: not self._audio_loading and
                                   self.ctrl.set_settings(loudnorm=on))
         v4.addWidget(self.loud)
-        self.btn_beats = QPushButton("🥁 Llevar los cortes del B-roll al ritmo de la música")
-        self.btn_beats.setToolTip("Detecta los golpes de la música y mueve cada corte de la pista de video "
+        self.btn_beats = QPushButton("🥁 Cortes del B-roll al ritmo")
+        self.btn_beats.setToolTip("Lleva los cortes del B-roll al ritmo de la música: detecta los golpes y mueve cada "
+                                  "corte de la pista de video "
                                   "elegida en B-roll al golpe más cercano (como mucho 0,3 s).")
         self.btn_beats.clicked.connect(self.snap_to_beats)
         v4.addWidget(self.btn_beats)
@@ -941,7 +943,8 @@ class AIPanel(QWidget):
         def work(progress, _cancelled):
             import subprocess
             progress(0.0, "🎧 Preparando el audio con efectos…")
-            opts = ExportOptions(path=out, width=320, height=180, fps=15, encoder="cpu", bitrate_mbps=1)
+            opts = ExportOptions(path=out, width=320, height=180, fps=15, encoder="cpu", bitrate_mbps=1,
+                                 subtitles=False)        # (es para escuchar: sin dibujar subtítulos)
             args, _total = build_command(part, opts, media_tools.ffmpeg(),
                                          os.path.join(str(_temp_dir()), "editoria_escucha_filtro.txt"))
             r = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL,

@@ -101,7 +101,7 @@ def plan(project: Project, opts, total: float) -> list[tuple[float, float]] | No
 
 class ParallelExport:
     def __init__(self, project: Project, opts, ffmpeg: str, work_dir: str, chunks: list[tuple[float, float]],
-                 total: float):
+                 total: float, cues=None):
         self.project, self.opts, self.ffmpeg, self.dir = project, opts, ffmpeg, os.path.abspath(work_dir)
         self.chunks, self.total = chunks, total
         self.done_s = [0.0] * len(chunks)     # segundos hechos de cada trozo
@@ -109,10 +109,16 @@ class ParallelExport:
         self.procs: list[subprocess.Popen] = []
         self._lock = threading.Lock()
         self.cancel = False
+        self._given_cues = cues               # (frases ya calculadas: p. ej. las del video entero en un tramo marcado)
+        self._cues = None
+        self.subs_s = [0.0] * len(chunks)     # segundos (del trozo) con los subtítulos ya dibujados
+        self._subs_w = 0.0                    # cuánto de la barra es dibujar subtítulos (0 si no hay que dibujarlos)
         self.log: list[str] = []
 
     def fraction(self) -> float:
         v = sum(self.done_s) / max(1e-3, self.total)
+        if self._subs_w:
+            v = self._subs_w * sum(self.subs_s) / max(1e-3, self.total) + (1 - self._subs_w) * v
         return min(1.0, 0.94 * v + 0.04 * self.audio_f)
 
     def stop(self):
@@ -152,14 +158,23 @@ class ParallelExport:
 
     def _chunk(self, i: int) -> str:
         from ..core.project_tools import slice_project
-        from .ffmpeg_export import build_command
+        from .ffmpeg_export import build_command, prepare_subtitles
         a, b = self.chunks[i]
         d = os.path.join(self.dir, f"trozo_{i:03d}")
         os.makedirs(d, exist_ok=True)
         out = os.path.join(self.dir, f"trozo_{i:03d}.mp4")
         q = slice_project(self.project, a, b)
-        args, _t = build_command(q, replace(self.opts, path=out, video_only=True, duration=b - a, loudnorm=False),
-                                 self.ffmpeg, os.path.join(d, "filtro.txt"))
+        cues = None
+        if self._cues is not None:       # las MISMAS frases que el video entero, desde el inicio del trozo
+            from ..core.subtitles import shift_cues
+            cues = shift_cues(self._cues, a, b)
+        o = replace(self.opts, path=out, video_only=True, duration=b - a, loudnorm=False)
+        script = os.path.join(d, "filtro.txt")
+        args, _t = build_command(q, o, self.ffmpeg, script, cues=cues, raster=False)
+        # Las imágenes de los subtítulos de este trozo (si las lleva): cancelable y contando en la barra
+        prepare_subtitles(q, o, script, cues, cancelled=lambda: self.cancel,
+                          progress=lambda f, i=i, dur=b - a: self.subs_s.__setitem__(i, f * dur))
+        self.subs_s[i] = b - a
         # Varios trozos a la vez: cada FFmpeg con pocos hilos (si cada uno intenta usar TODOS, se estorban)
         th = str(FILTER_THREADS)
         args = args[:1] + ["-filter_complex_threads", th, "-filter_threads", th] + args[1:]
@@ -210,6 +225,14 @@ class ParallelExport:
     def run(self) -> str:
         """Hace todo (bloquea: llamar desde un hilo). Devuelve la ruta final o lanza RuntimeError."""
         os.makedirs(self.dir, exist_ok=True)
+        # Subtítulos: las frases (y su «golpe final») se calculan UNA vez con el proyecto entero; cada trozo recibe
+        # las suyas desplazadas (si no, una frase que cruza el límite de un trozo volvía a empezar en el siguiente)
+        self._cues = self._given_cues
+        if self._cues is None and self.opts.subtitles and self.project.subtitles.enabled:
+            from ..core.subtitles import styled_cues
+            self._cues = styled_cues(self.project)
+        from .ffmpeg_export import raster_needed
+        self._subs_w = 0.15 if self._cues and raster_needed(self.project, self.opts) else 0.0
         try:
             with ThreadPoolExecutor(max_workers=workers(self.opts.low_priority)) as pool:
                 fa = pool.submit(self._audio)

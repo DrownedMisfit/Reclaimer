@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 
 from ..core.model import KIND_AUDIO, KIND_IMAGE, KIND_VIDEO, TRACK_AUDIO, TRACK_TEXT, TRACK_VIDEO, Project
 from ..core import audio_fx, color, curves, effects, equalizer, transform, transitions
-from ..core.subtitles import styled_cues
+from ..core.subtitles import needs_raster, styled_cues
 from .ass_subtitles import build_ass
 
 FONTS_DIR = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
@@ -267,7 +267,7 @@ def _clip_video_filters(k: int, c, m, W: int, H: int, F: str) -> list[str]:
         pre_d = {k: v for k, v in fxd.items() if k in FILL_PRE}
         fxd = {k: v for k, v in fxd.items() if k not in FILL_PRE}
         pre_list = effects.look_filters(pre_d, sw0, sh0)
-    fx = ",".join(effects.ffmpeg_filters(fxd, c.duration, bw, bh))
+    fx = ",".join(effects.ffmpeg_filters(fxd, c.duration, bw, bh, float(F)))
     fx = fx + "," if fx else ""
     if c.color and not color.is_neutral(c.color):     # la misma tabla 3D que ves en el visor
         lut = color_lut(c.color)
@@ -562,7 +562,7 @@ def color_lut(col: dict) -> str:
     return f"format=gbrp16le,lut3d=file={_filter_path(color.cube_file(col))}:interp=tetrahedral,format=yuv420p"
 
 
-def adjust_filters(i: int, c, last: str, W: int, H: int) -> tuple[list[str], str]:
+def adjust_filters(i: int, c, last: str, W: int, H: int, fps: float = 30.0) -> tuple[list[str], str]:
     """🎨 Capa de ajuste: su color y sus efectos se aplican a TODO lo de debajo mientras dura. Solo se procesa ese
     tramo (trim) y se vuelve a poner encima; su opacidad y sus fundidos suavizan el efecto (no funden a negro)."""
     a, b = c.start, c.end
@@ -571,7 +571,7 @@ def adjust_filters(i: int, c, last: str, W: int, H: int) -> tuple[list[str], str
     chain = []
     if c.color and not color.is_neutral(c.color):
         chain.append(color_lut(c.color))
-    chain += effects.ffmpeg_filters(fx, c.duration, W, H)
+    chain += effects.ffmpeg_filters(fx, c.duration, W, H, fps)
     glow = float(fx.get("glow", 0) or 0) > 0
     alpha = []
     if c.opacity < 0.999 or c.op_kf or fin > 0 or fout > 0:
@@ -640,9 +640,38 @@ def _runs(project: Project, track_id: str) -> list[list]:
 
 
 
+def subs_dir(script_path: str) -> str:
+    """Carpeta propia de las imágenes de subtítulos de UNA exportación (junto a su guion de filtros)."""
+    return os.path.splitext(script_path)[0] + "_subs"
+
+
+def raster_needed(project: Project, opts: ExportOptions) -> bool:
+    """¿Esta exportación lleva subtítulos dibujados como imágenes (Neón, palabra a palabra…)?"""
+    return bool(opts.subtitles and not opts.audio_only and project.subtitles.enabled
+                and needs_raster(project.subtitles))
+
+
+def prepare_subtitles(project: Project, opts: ExportOptions, script_path: str, cues=None, progress=None,
+                      cancelled=None) -> str | None:
+    """Dibuja las imágenes de los subtítulos de build_command(…, raster=False). Va en segundo plano (tarda: una
+    imagen por cada cambio del texto), con progreso y cancelable. Devuelve la lista ffconcat (o None)."""
+    if not raster_needed(project, opts):
+        return None
+    cues = styled_cues(project) if cues is None else cues
+    if not cues:
+        return None
+    from ..ui.subtitle_item import raster_subtitles
+    total = opts.duration or project.duration()
+    return raster_subtitles(cues, project.subtitles, opts.width, opts.height, float(opts.fps), total,
+                            subs_dir(script_path), progress, cancelled)
+
+
 def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
-                  script_path: str) -> tuple[list[str], float]:
-    """Devuelve (argumentos de ffmpeg, duración total). Escribe el filtro en script_path."""
+                  script_path: str, cues=None, raster: bool = True) -> tuple[list[str], float]:
+    """Devuelve (argumentos de ffmpeg, duración total). Escribe el filtro en script_path.
+    cues: las frases ya calculadas (un trozo de la exportación en paralelo recibe las del video entero, desplazadas:
+    core.subtitles.shift_cues). raster=False: los subtítulos que van como imágenes NO se dibujan aquí (el que llama
+    hace prepare_subtitles en segundo plano antes de lanzar FFmpeg; así la ventana no se queda congelada)."""
     total = opts.duration or project.duration()
     if total <= 0:
         raise ValueError("La timeline está vacía: no hay nada que exportar.")
@@ -759,7 +788,7 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
             from ..core import generators
             if generators.is_adjust(m):           # 🎨 capa de ajuste: actúa sobre todo lo que hay debajo
                 if not tr.hidden and not opts.audio_only and c.id not in chained:
-                    fl, last = adjust_filters(len(filters), c, last, W, H)
+                    fl, last = adjust_filters(len(filters), c, last, W, H, float(F))
                     filters += fl
                 continue
             if m.kind == KIND_IMAGE:
@@ -903,8 +932,21 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
 
     # --- subtítulos incrustados ---
     if opts.subtitles and project.subtitles.enabled:
-        cues = styled_cues(project)
-        if cues:
+        cues = styled_cues(project) if cues is None else cues
+        if cues and needs_raster(project.subtitles):
+            # ✨ Resplandor, palabra a palabra, estirón, golpe…: imágenes dibujadas con el MISMO código que el visor
+            # (un .ass no puede hacerlo igual), una por cada cambio, recortadas a la franja del texto y encima
+            from ..ui.subtitle_item import subtitle_band
+            y0, _bh = subtitle_band(cues, project.subtitles, W, H)
+            if raster:
+                lst = prepare_subtitles(project, opts, script_path, cues)
+            else:
+                lst = os.path.join(subs_dir(script_path), "subtitulos.ffconcat")
+            k = add_input(["-f", "concat", "-safe", "0"], lst)
+            filters.append(f"[{k}:v]format=rgba[subimg]")
+            filters.append(f"[{last}][subimg]overlay=x=0:y={y0}:eof_action=pass[subs]")
+            last = "subs"
+        elif cues:
             ass_path = os.path.join(os.path.dirname(script_path), "editoria_subtitulos.ass")
             ass_text = build_ass(cues, project.subtitles, W, H)
             with open(ass_path, "w", encoding="utf-8") as f:

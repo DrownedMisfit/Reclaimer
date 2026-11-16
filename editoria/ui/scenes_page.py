@@ -415,7 +415,49 @@ class SceneTimeline(QWidget):
         if e.key() == Qt.Key_S and not e.modifiers() or (e.key() == Qt.Key_B and e.modifiers() & Qt.ControlModifier):
             self.page.cortar()
             return
-        super().keyPressEvent(e)                          # (Espacio, Supr: los recoge la página)
+        if self.teclas_de_vista(e):
+            return
+        super().keyPressEvent(e)                          # (Espacio, Supr, Ctrl+Z/C/X/V: los recoge la página)
+
+    def acercar(self, factor: float):
+        """🔍 Acercar (>1) o alejar (<1) alrededor de la línea roja (como en la línea de tiempo normal)."""
+        x = self.x_de(self.t) if self.IZQ <= self.x_de(self.t) <= self.width() - self.DER else \
+            self.IZQ + (self.width() - self.DER - self.IZQ) / 2
+        t0 = self.t_de(x)
+        self.zoom = max(1.0, min(60.0, self.zoom * factor))
+        self.off = t0 - (x - self.IZQ) / self._pps()
+        self._ajustar_off()
+        self.update()
+
+    def teclas_de_vista(self, e) -> bool:
+        """+ / − (o Ctrl + / Ctrl −) acercan y alejan · Mayús+Z ve toda la escena · ← → un fotograma (Mayús: 1 s) ·
+        Inicio / Fin. Devuelve True si la tecla era suya."""
+        k, mods = e.key(), e.modifiers()
+        if k in (Qt.Key_Plus, Qt.Key_Equal):
+            self.acercar(1.25)
+        elif k in (Qt.Key_Minus, Qt.Key_Underscore):
+            self.acercar(0.8)
+        elif k == Qt.Key_Z and mods & Qt.ShiftModifier and not mods & Qt.ControlModifier:
+            self.zoom, self.off = 1.0, 0.0
+            self._ajustar_off()
+            self.update()
+        elif k in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End):
+            if self.page._timer.isActive():
+                self.page.parar()
+            total = scenes.largo(self.page.escena)
+            if k == Qt.Key_Home:
+                t = 0.0
+            elif k == Qt.Key_End:
+                t = total
+            else:
+                paso = 1.0 if mods & Qt.ShiftModifier else 1.0 / 30
+                t = self.t + (paso if k == Qt.Key_Right else -paso)
+            self.t = max(0.0, min(total, t))
+            self.cabezal.emit(self.t)
+            self.update()
+        else:
+            return False
+        return True
 
     def mousePressEvent(self, e):
         pos = e.position()
@@ -540,6 +582,7 @@ class ScenesPage(QWidget):
         p = self.ctrl.project
         self.escena = scenes.copia(escena) if escena else self._nueva_desde_marcas()
         self.sucia = escena is None
+        self._hist, self._pos_hist = [scenes.copia(self.escena)], 0     # (Ctrl+Z desde que se abre)
         self._job = None
         self._pix: dict[str, QPixmap] = {}
         self._items: dict[str, _Actor] = {}
@@ -595,10 +638,10 @@ class ScenesPage(QWidget):
         for k, n in scenes.FONDOS:
             self.fondo.addItem(n, k)
         self.fondo.setCurrentIndex(max(0, self.fondo.findData(self.escena.get("fondo", scenes.FONDO_POR_DEFECTO))))
-        self.fondo.setToolTip("El video de debajo mientras dura la escena: desenfocado (los personajes resaltan), "
-                              "normal u oscurecido.")
-        self.fondo.currentIndexChanged.connect(lambda _i: (self.escena.__setitem__("fondo", self.fondo.currentData()),
-                                                            self._ensuciar(), self._fondo_visor()))
+        self.fondo.setToolTip("Lo de detrás mientras dura la escena: el video de debajo (desenfocado, normal u "
+                              "oscurecido) o una imagen tuya (nítida o borrosa; se elige con clic derecho en una "
+                              "imagen → «🖼 Usar de fondo», o en 🌐 Internet → 🖼 Fondo).")
+        self.fondo.currentIndexChanged.connect(lambda _i: self._cambio_fondo())
         self.b_play = QPushButton("▶")
         self.b_play.setToolTip("Reproducir la escena (Espacio).")
         self.b_play.clicked.connect(self.alternar)
@@ -680,9 +723,15 @@ class ScenesPage(QWidget):
         centro.addWidget(self.view)
         centro.addWidget(self.insp)
         centro.setStretchFactor(1, 1)
+        abajo = QWidget()
+        av = QVBoxLayout(abajo)
+        av.setContentsMargins(0, 0, 0, 0)
+        av.setSpacing(2)
+        av.addLayout(self._barra_reproduccion())
+        av.addWidget(self.tl, 1)
         vert = QSplitter(Qt.Vertical)
         vert.addWidget(centro)
-        vert.addWidget(self.tl)
+        vert.addWidget(abajo)
         vert.setStretchFactor(0, 3)
         vert.setStretchFactor(1, 1)
         lay = QVBoxLayout(self)
@@ -748,9 +797,16 @@ class ScenesPage(QWidget):
 
     def _ensuciar(self):
         scenes.encajar(self.escena)
+        if getattr(self, "_t_hist", None) is None:
+            self._t_hist = QTimer(self)
+            self._t_hist.setSingleShot(True)
+            self._t_hist.setInterval(300)
+            self._t_hist.timeout.connect(self._guardar_hist)
+        self._t_hist.start()
         self.sucia = True
         self.marca.setText("● sin aplicar")
         self.marca.setToolTip("Hay cambios que aún no están en la línea de tiempo: pulsa «✓ Aplicar».")
+        self._act_tiempo()
 
     # ================================================================ barra de arriba
     def _llenar_escenas(self):
@@ -788,6 +844,8 @@ class ScenesPage(QWidget):
         """Cambia la escena que se edita en la página."""
         self.parar()
         self.escena, self.sucia, self.aviso_estado = escena, sucia, aviso
+        import copy as _c
+        self._hist, self._pos_hist = [_c.deepcopy(escena)], 0     # (Ctrl+Z empieza aquí)
         self.tl.sel = ("", None)
         self.tl.t = 0.0
         self.marca.setText("● sin aplicar" if sucia else "")
@@ -808,6 +866,11 @@ class ScenesPage(QWidget):
         self.fondo.blockSignals(True)
         self.fondo.setCurrentIndex(max(0, self.fondo.findData(self.escena.get("fondo", "blur"))))
         self.fondo.blockSignals(False)
+        self._act_tiempo()
+        if self.escena.get("fondo") in ("img", "img_blur") and \
+                (self.escena.get("fondo_img") or "") not in self.ctrl.project.media:
+            self.win.statusBar().showMessage("⚠ Falta la imagen de fondo de la escena: elige otra (clic derecho en "
+                                             "una imagen → «🖼 Usar de fondo») o cambia «Fondo».", 9000)
         self._texto_aplicar()
         self._textos_añadir()
 
@@ -1035,8 +1098,64 @@ class ScenesPage(QWidget):
             self._fondo_pix = None
         self._fondo_visor()
 
+    def _cambio_fondo(self):
+        self.escena["fondo"] = self.fondo.currentData()
+        if self.fondo.currentData() in ("img", "img_blur") and \
+                (self.escena.get("fondo_img") or "") not in self.ctrl.project.media:
+            self._ir_a_buscar_fondo()                                   # (aún no hay imagen: a buscar una)
+        self._ensuciar()
+        self._fondo_visor()
+
+    def _ir_a_buscar_fondo(self):
+        """Sin imagen de fondo todavía: abre 🌐 Internet en modo 🖼 Fondo y lo dice."""
+        if hasattr(self, "material"):
+            self.material.setCurrentIndex(0)                            # (🧍 Personajes, por si estabas en Sonidos)
+        if hasattr(self, "sub_img") and hasattr(self, "_grupo_web"):
+            self.sub_img.setCurrentIndex(self.sub_img.count() - 1)
+            for bm in self._grupo_web.buttons():
+                if bm.property("modo") == "fondo" and not bm.isChecked():
+                    bm.click()
+        self.win.statusBar().showMessage("🖼 Elige la imagen de fondo: búscala aquí (clic derecho → «Usar de fondo») "
+                                         "o, en 🗂 Local, clic derecho en una de las tuyas.", 8000)
+
+    def _usar_de_fondo(self, mid: str):
+        """🖼 Esa imagen pasa a ser el fondo de la escena (nítida; en «Fondo» puedes elegir «Imagen borrosa»)."""
+        if not mid or mid not in self.ctrl.project.media:
+            return
+        self.escena["fondo_img"] = mid
+        if self.escena.get("fondo") not in ("img", "img_blur"):
+            self.escena["fondo"] = "img"
+        self.fondo.blockSignals(True)
+        self.fondo.setCurrentIndex(max(0, self.fondo.findData(self.escena["fondo"])))
+        self.fondo.blockSignals(False)
+        self._ensuciar()
+        self._fondo_visor()
+
+    def _menu_lista_img(self, pos):
+        it = self.lista_img.itemAt(pos)
+        if it is None:
+            return
+        from PySide6.QtWidgets import QMenu
+        mid = it.data(Qt.UserRole)
+        menu = QMenu(self)
+        menu.addAction("🎬 Añadir a la escena", lambda: self._añadir_actor(mid))
+        menu.addAction("🖼 Usar de fondo de la escena", lambda: self._usar_de_fondo(mid))
+        menu.exec(self.lista_img.viewport().mapToGlobal(pos))
+
     def _fondo_visor(self):
         pix = getattr(self, "_fondo_pix", None)
+        if self.escena.get("fondo") in ("img", "img_blur"):    # 🖼 la imagen elegida de fondo (cubre el cuadro)
+            m = self.ctrl.project.media.get(self.escena.get("fondo_img") or "")
+            src = QPixmap(m.path) if m is not None and os.path.isfile(m.path) else QPixmap()
+            if not src.isNull():
+                img = src.scaled(self.W, self.H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                img = img.copy((img.width() - self.W) // 2, (img.height() - self.H) // 2, self.W, self.H)
+                if self.escena["fondo"] == "img_blur":
+                    peq = img.scaled(self.W // 10, self.H // 10, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                    img = peq.scaled(self.W, self.H, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                self._fondo_item.setPixmap(img)
+                self._velo.setBrush(QBrush(QColor(0, 0, 0, 0)))
+                return
         if pix is None:
             self._fondo_item.setPixmap(QPixmap())
         elif self.escena.get("fondo") == "blur":       # (una idea de cómo quedará: el desenfoque de verdad, al aplicar)
@@ -1155,6 +1274,76 @@ class ScenesPage(QWidget):
         else:
             self.reproducir()
 
+    def _barra_reproduccion(self) -> QHBoxLayout:
+        """⏮ ◀ ▶ ▶| ⏭ · el tiempo · 🔊 volumen de la vista previa · 🔍 acercar / alejar / ver toda la escena."""
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QSlider
+        fila = QHBoxLayout()
+        fila.setContentsMargins(2, 0, 2, 0)
+
+        def boton(texto, tip, fn):
+            b = QPushButton(texto)
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setFixedWidth(34)
+            b.clicked.connect(fn)
+            fila.addWidget(b)
+            return b
+        boton("⏮", "Al principio de la escena (Inicio)", lambda: self._saltar_a(0.0))
+        boton("◀", "Un segundo atrás (Mayús + ←; ← un fotograma)", lambda: self._saltar_a(self.tl.t - 1.0))
+        self.b_play2 = boton("▶", "Reproducir / pausar la escena (Espacio)", self.alternar)
+        boton("▶|", "Un segundo adelante (Mayús + →; → un fotograma)", lambda: self._saltar_a(self.tl.t + 1.0))
+        boton("⏭", "Al final de la escena (Fin)", lambda: self._saltar_a(scenes.largo(self.escena)))
+        self.lbl_tiempo = QLabel("0:00.00 / 0:00.00")
+        self.lbl_tiempo.setToolTip("Dónde está la línea roja / lo que dura la escena")
+        fila.addSpacing(8)
+        fila.addWidget(self.lbl_tiempo)
+        fila.addStretch(1)
+        fila.addWidget(QLabel("🔊"))
+        self.vol_vista = QSlider(Qt.Horizontal)
+        self.vol_vista.setRange(0, 100)
+        self.vol_vista.setFixedWidth(110)
+        self.vol_vista.setValue(int(QSettings("EditorIA", "EditorIA").value("escenas/volumen_vista", 80)))
+        self.vol_vista.setToolTip("Volumen al reproducir la escena aquí (no cambia la escena ni lo exportado)")
+        self.vol_vista.valueChanged.connect(self._vol_vista)
+        fila.addWidget(self.vol_vista)
+        fila.addSpacing(8)
+        boton("−", "Alejar la línea de la escena (−, o Ctrl + rueda)", lambda: self.tl.acercar(0.8))
+        boton("+", "Acercar la línea de la escena (+, o Ctrl + rueda)", lambda: self.tl.acercar(1.25))
+        boton("⤢", "Ver toda la escena (Mayús + Z)", lambda: (setattr(self.tl, "zoom", 1.0),
+                                                             setattr(self.tl, "off", 0.0), self.tl.update()))
+        self.tl.cabezal.connect(self._act_tiempo)
+        return fila
+
+    def _vol_vista(self, v: int):
+        from PySide6.QtCore import QSettings
+        QSettings("EditorIA", "EditorIA").setValue("escenas/volumen_vista", int(v))
+        for pl in self._sonando:                            # (lo que ya suena cambia al momento)
+            try:
+                out, s = pl.audioOutput(), getattr(pl, "_snd", None)
+                if out is not None and s is not None:
+                    out.setVolume(min(1.0, float(s.get("vol", 1.0)) * v / 100.0))
+            except RuntimeError:
+                pass
+
+    def _act_tiempo(self, t: float | None = None):
+        if not hasattr(self, "lbl_tiempo"):
+            return
+        t = float(self.tl.t if t is None else t)
+        total = scenes.largo(self.escena)
+
+        def f(x):
+            return f"{int(x // 60)}:{x % 60:05.2f}"
+        self.lbl_tiempo.setText(f"{f(t)} / {f(total)}")
+
+    def _saltar_a(self, t: float):
+        if self._timer.isActive():
+            self.parar()
+        self.tl.t = max(0.0, min(scenes.largo(self.escena), float(t)))
+        self.tl.update()
+        self.vista_previa_en(self.tl.t)
+        self._act_tiempo()
+
     def reproducir(self):
         if self.tl.t >= scenes.largo(self.escena) - 0.05:
             self.tl.t = 0.0
@@ -1163,10 +1352,14 @@ class ScenesPage(QWidget):
         self._reloj = (_time.monotonic(), self.tl.t)
         self._timer.start()
         self.b_play.setText("⏸")
+        if hasattr(self, "b_play2"):
+            self.b_play2.setText("⏸")
 
     def parar(self):
         self._timer.stop()
         self.b_play.setText("▶")
+        if hasattr(self, "b_play2"):
+            self.b_play2.setText("▶")
         for pl in self._sonando:
             try:
                 pl.pause()
@@ -1188,6 +1381,7 @@ class ScenesPage(QWidget):
                 self._sonar(s)
         self._t_prev = t
         self.vista_previa_en(t)
+        self._act_tiempo(t)
         self._muestra_grabacion()
 
     def _sonar(self, s: dict):
@@ -1200,8 +1394,10 @@ class ScenesPage(QWidget):
         from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
         pl = QMediaPlayer(self)
         out = QAudioOutput(pl)
-        out.setVolume(float(s.get("vol", 1.0)))
+        maestro = self.vol_vista.value() / 100.0 if hasattr(self, "vol_vista") else 1.0
+        out.setVolume(min(1.0, float(s.get("vol", 1.0)) * maestro))   # (🔊 de la barra: solo para escuchar aquí)
         pl.setAudioOutput(out)
+        pl._snd = s
         pl.setSource(QUrl.fromLocalFile(m.path))
         pl.play()
         quedan = scenes.largo(self.escena) - float(s["t"])
@@ -1227,6 +1423,8 @@ class ScenesPage(QWidget):
                                                                                not e.modifiers()):
             self.cortar()                                  # (✂ también con el foco en el visor)
             return
+        if self._teclas_de_edicion(e) or self.tl.teclas_de_vista(e):
+            return
         if e.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             f = self.focusWidget()
             if f is None or f in (self, self.view, self.tl) or isinstance(f, QGraphicsView):
@@ -1249,12 +1447,11 @@ class ScenesPage(QWidget):
         v.setContentsMargins(4, 4, 4, 4)
         self.sub_img.addTab(w, "🗂 Local")
         self._busq = {}
-        self.sub_img.addTab(self._tab_busqueda("png"), "✂ PNG")
         web = self._tab_busqueda("web")
         self.sub_img.addTab(web, "🌐 Internet")
         self.sub_img.setTabToolTip(0, "Tus imágenes de Medios y las de tu PC")
-        self.sub_img.setTabToolTip(1, "Google Imágenes, solo PNG con fondo transparente (personajes ya recortados)")
-        self.sub_img.setTabToolTip(2, "Google Imágenes, cualquier imagen")
+        self.sub_img.setTabToolTip(1, "Buscar en internet: ✂ PNG recortado (personajes y objetos sin fondo) o "
+                                      "🖼 Fondo (una imagen grande para el fondo de la escena)")
         self.lista_img = QListWidget()
         self.lista_img.setViewMode(QListWidget.IconMode)
         self.lista_img.setIconSize(QPixmap(72, 72).size())
@@ -1264,6 +1461,8 @@ class ScenesPage(QWidget):
         self.lista_img.setToolTip("Tus imágenes (Medios). ✓ = recorte con fondo transparente. Doble clic = añadirla a "
                                   "la escena.")
         self.lista_img.itemDoubleClicked.connect(lambda it: self._añadir_actor(it.data(Qt.UserRole)))
+        self.lista_img.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lista_img.customContextMenuRequested.connect(self._menu_lista_img)
         b = self.b_add_img = QPushButton("➕ Añadir a la escena")
         b.setObjectName("primary")
         b.setToolTip("Añade la imagen elegida como personaje (entra desde abajo y se queda; luego eliges qué hace con "
@@ -1284,10 +1483,10 @@ class ScenesPage(QWidget):
         if _hay("editoria.ai.character_search"):
             fila = QHBoxLayout()
             self.q_personaje = QLineEdit()
-            self.q_personaje.setPlaceholderText("Personaje (Master Chief, Elite…)")
+            self.q_personaje.setPlaceholderText("Personaje u objeto…")
             self.q_juego = QLineEdit()
-            self.q_juego.setPlaceholderText("Juego (Halo, Gears of War…)")
-            self.q_juego.setText(str(self._ajuste("escenas/juego", "Halo")))
+            self.q_juego.setPlaceholderText("Saga o serie (opcional)…")
+            self.q_juego.setText(str(self._ajuste("escenas/juego", "")))
             for q in (self.q_personaje, self.q_juego):
                 q.returnPressed.connect(self._buscar_personajes)
             self.b_buscar_img = QPushButton("🌐")
@@ -1322,24 +1521,46 @@ class ScenesPage(QWidget):
 
     # ---------------------------------------------------------------- ✂ PNG / 🌐 Internet (como en 🖼 Miniatura)
     _BUSQ_URL = {"png": "https://www.google.com/search?tbm=isch&tbs=ic:trans,ift:png&q={q}",
-                 "web": "https://www.google.com/search?tbm=isch&q={q}"}
+                 "fondo": "https://www.google.com/search?tbm=isch&tbs=isz:l,iar:{ar}&q={q}"}
+    _MODO_TXT = {"png": ("🔎 persona, perro, coche…", "Clic derecho en una imagen → «Usar en la escena»",
+                         "🎬 Usar en la escena"),
+                 "fondo": ("🔎 ciudad de noche, bosque, playa…", "Clic derecho en una imagen → «Usar de fondo»",
+                           "🖼 Usar de fondo de la escena")}
 
-    def _tab_busqueda(self, modo: str) -> QWidget:
+    def _tab_busqueda(self, modo: str = "web") -> QWidget:
+        from PySide6.QtWidgets import QButtonGroup
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(4, 6, 4, 4)
+        modos = QHBoxLayout()                              # ✂ PNG recortado / 🖼 Fondo (como en 🖼 Miniatura)
+        self._modo_web = "png"
+        self._grupo_web = QButtonGroup(w)
+        self._grupo_web.setExclusive(True)
+        for clave, texto, tip in (("png", "✂ PNG recortado", "Personajes y objetos con fondo transparente (si tienen "
+                                                              "un fondo liso, se les quita)"),
+                                  ("fondo", "🖼 Fondo", "Imágenes grandes para el fondo de la escena (luego, en "
+                                                         "«Fondo», elige si la quieres nítida o borrosa)")):
+            bm = QPushButton(texto)
+            bm.setCheckable(True)
+            bm.setToolTip(tip)
+            bm.setProperty("modo", clave)
+            bm.setChecked(clave == "png")
+            self._grupo_web.addButton(bm)
+            modos.addWidget(bm)
+        modos.addStretch(1)
+        v.addLayout(modos)
         fila = QHBoxLayout()
         q = QLineEdit()
-        q.setPlaceholderText("🔎 Master Chief, Elite, tanque…" if modo == "png" else "🔎 Lo que quieras buscar…")
+        q.setPlaceholderText(self._MODO_TXT["png"][0])
         q.setClearButtonEnabled(True)
-        q.returnPressed.connect(lambda m=modo: self._buscar_web(m))
+        q.returnPressed.connect(lambda: self._buscar_web(self._modo_web))
         b = QPushButton("Buscar")
         b.setObjectName("primary")
-        b.clicked.connect(lambda _c=False, m=modo: self._buscar_web(m))
+        b.clicked.connect(lambda _c=False: self._buscar_web(self._modo_web))
         fila.addWidget(q, 1)
         fila.addWidget(b)
         v.addLayout(fila)
-        estado = QLabel("Clic derecho en una imagen → «Usar en la escena»")
+        estado = QLabel(self._MODO_TXT["png"][1])
         estado.setObjectName("hint")
         estado.setWordWrap(True)
         estado.setToolTip("Se baja la imagen grande (de su página); si tiene un fondo liso (blanco, negro), en ✂ PNG se "
@@ -1347,7 +1568,20 @@ class ScenesPage(QWidget):
         v.addWidget(estado)
         caja = QVBoxLayout()
         v.addLayout(caja, 1)
-        self._busq[modo] = {"q": q, "estado": estado, "caja": caja, "vista": None, "job": None}
+        d = {"q": q, "estado": estado, "caja": caja, "vista": None, "job": None}
+        for clave in ("png", "fondo", "web"):              # (los dos modos comparten el mismo buscador)
+            self._busq[clave] = d
+
+        def cambiar(bm):
+            self._modo_web = bm.property("modo")
+            q.setPlaceholderText(self._MODO_TXT[self._modo_web][0])
+            estado.setText(self._MODO_TXT[self._modo_web][1])
+            vista = getattr(self, "_vista_web", None)
+            if vista is not None:
+                vista.texto_usar = self._MODO_TXT[self._modo_web][2]
+                if q.text().strip():
+                    self._buscar_web(self._modo_web)
+        self._grupo_web.buttonClicked.connect(cambiar)
         return w
 
     def _buscar_web(self, modo: str):
@@ -1361,7 +1595,7 @@ class ScenesPage(QWidget):
         if vista is None:                                  # (UN navegador, creado la primera vez que buscas)
             from .thumbnail_editor import _PngView
             vista = self._vista_web = _PngView(self)
-            vista.texto_usar = "🎬 Usar en la escena"
+            vista.texto_usar = self._MODO_TXT.get(modo, self._MODO_TXT["png"])[2]
             vista.use_image.connect(lambda url, fb: self._usar_web(self._modo_web, url, fb))
         self._modo_web = modo
         for dd in self._busq.values():                     # (se pasa a la pestaña desde la que buscas)
@@ -1370,7 +1604,9 @@ class ScenesPage(QWidget):
         d["caja"].addWidget(vista, 1)
         if modo == "png" and "png" not in texto.lower():
             texto += " png"
-        d["vista"].load(QUrl(self._BUSQ_URL[modo].format(q=urllib.parse.quote_plus(texto))))
+        p = self.ctrl.project
+        url = self._BUSQ_URL.get(modo, self._BUSQ_URL["png"])
+        d["vista"].load(QUrl(url.format(q=urllib.parse.quote_plus(texto), ar="t" if p.height > p.width else "w")))
 
     def _usar_web(self, modo: str, url: str, fallback: str = ""):
         """Clic derecho → «Usar en la escena»: se baja (en ✂ PNG, sin su fondo liso), va a Medios y a la escena."""
@@ -1382,7 +1618,7 @@ class ScenesPage(QWidget):
         if d["job"] is not None and d["job"].isRunning():
             d["estado"].setText("⏳ Espera a que termine de bajar la anterior…")
             return
-        keep = modo == "web"
+        keep = modo == "fondo"
 
         def work(_p, _c):
             try:
@@ -1398,9 +1634,19 @@ class ScenesPage(QWidget):
             except Exception as exc:  # noqa: BLE001
                 d["estado"].setText(f"✗ No se pudo añadir: {exc}")
                 return
-            self._llenar_imagenes()
             mid = next((i for i in ids if i in self.ctrl.project.media), None)
-            if mid:
+            if mid:                                        # (con el nombre de lo que buscaste, no el del archivo)
+                base = d["q"].text().strip()[:30] or "Imagen de internet"
+                usados = {m.name for m in self.ctrl.project.media.values()}
+                n = 1
+                while f"{base} {n}" in usados:
+                    n += 1
+                self.ctrl.project.media[mid].name = f"{base} {n}"
+            self._llenar_imagenes()
+            if mid and modo == "fondo":                    # 🖼 de fondo de la escena (nítida; «Fondo» → borrosa)
+                self._usar_de_fondo(mid)
+                d["estado"].setText("✓ Fondo de la escena puesto (en «Fondo» puedes elegir «Imagen borrosa»)")
+            elif mid:
                 self._añadir_actor(mid)
                 d["estado"].setText(f"✓ Añadida a la escena y a Medios · {e.get('badge', '')}")
             else:
@@ -1536,7 +1782,7 @@ class ScenesPage(QWidget):
                     continue
             return out
         self.res_img.clear()
-        self._lanzar(fn, self._resultados_personajes, f"Buscando «{quien}» en la wiki de {juego or 'Halo'}…",
+        self._lanzar(fn, self._resultados_personajes, f"Buscando «{quien}»" + (f" en la wiki de {juego}" if juego else "") + "…",
                      self.estado_img)
 
     def _resultados_personajes(self, res):
@@ -1594,13 +1840,39 @@ class ScenesPage(QWidget):
         b_arch_s.setToolTip("Añadir un sonido de tu PC (MP3, WAV, OGG…) en la línea roja de la escena.")
         b_arch_s.clicked.connect(lambda: self._desde_archivo("sonido"))
         v.addWidget(self.lista_snd, 1)
+        from PySide6.QtCore import QSettings as _QS
+        from PySide6.QtWidgets import QSlider
+        fv = QHBoxLayout()
+        fv.addWidget(QLabel("🔊"))
+        self.vol_snd = QSlider(Qt.Horizontal)
+        self.vol_snd.setRange(0, 100)
+        self.vol_snd.setValue(int(_QS("EditorIA", "EditorIA").value("escenas/volumen_sonidos", 50)))
+        self.vol_snd.setToolTip("Volumen al escucharlos aquí y con el que entran en la escena (luego cada sonido se "
+                                "ajusta en su panel)")
+        self.lbl_vol_snd = QLabel(f"{self.vol_snd.value()} %")
+
+        def vol_snd(v):
+            self.lbl_vol_snd.setText(f"{v} %")
+            _QS("EditorIA", "EditorIA").setValue("escenas/volumen_sonidos", int(v))
+            try:
+                self.player.audioOutput().setVolume(v / 100.0)
+            except (AttributeError, RuntimeError):
+                pass
+        self.vol_snd.valueChanged.connect(vol_snd)
+        fv.addWidget(self.vol_snd, 1)
+        fv.addWidget(self.lbl_vol_snd)
+        v.addLayout(fv)
+        try:
+            self.player.audioOutput().setVolume(self.vol_snd.value() / 100.0)
+        except (AttributeError, RuntimeError):
+            pass
         fila_s = QHBoxLayout()
         fila_s.addWidget(b, 1)
         fila_s.addWidget(b_arch_s)
         v.addLayout(fila_s)
         if _hay("editoria.ui.sounds_internet"):
             b2 = QPushButton("🌐 Buscar en internet…")
-            b2.setToolTip("Busca un sonido concreto («AR de Halo 1», «disparo de tanque de Gears of War 2»), lo "
+            b2.setToolTip("Busca un sonido concreto («motor de coche», «disparo de tanque»), lo "
                           "escuchas y lo pones en la escena.")
             b2.clicked.connect(self._buscar_sonidos)
             v.addWidget(b2)
@@ -1641,10 +1913,17 @@ class ScenesPage(QWidget):
         from ..core import sfx
         return sfx.path_for(ref[4:]) if ref.startswith("sfx:") else ref
 
-    def _escuchar(self, ref: str):
+    def _escuchar(self, ref: str, vol: float | None = None):
+        """Escuchar un sonido: al volumen de 🔊 de la lista o, si se da, al suyo (el del sonido de la escena)."""
         if os.environ.get("EDITORIA_SIN_SONIDO") or not ref:
             return
         from PySide6.QtCore import QUrl
+        try:
+            if vol is None:
+                vol = self.vol_snd.value() / 100.0 if hasattr(self, "vol_snd") else 0.5
+            self.player.audioOutput().setVolume(min(1.0, max(0.0, vol)))
+        except (AttributeError, RuntimeError):
+            pass
         try:
             self.player.pause()             # (stop() a veces se bloquea)
             self.player.setSource(QUrl.fromLocalFile(self._ruta_sonido(ref)))
@@ -1663,7 +1942,9 @@ class ScenesPage(QWidget):
             return
         m = self.ctrl.project.media[mid]
         dur = float(m.duration or 0) or 1.5
-        s = scenes.nuevo_sonido(self.escena, mid, self.tl.t, min(dur, scenes.largo(self.escena) - self.tl.t + 2.0))
+        vol = self.vol_snd.value() / 100.0 if hasattr(self, "vol_snd") else 0.5
+        s = scenes.nuevo_sonido(self.escena, mid, self.tl.t, min(dur, scenes.largo(self.escena) - self.tl.t + 2.0),
+                                vol)
         self._ensuciar()
         self.tl.sel = ("sonido", s)
         self._elegir("sonido", s)
@@ -1795,7 +2076,8 @@ class ScenesPage(QWidget):
         self.s_vol.setToolTip("Volumen (100 % = como está el archivo).")
         self.s_vol.valueChanged.connect(lambda v: self._sonido_prop("vol", round(v / 100.0, 2)))
         b_oir = QPushButton("▶ Escuchar")
-        b_oir.clicked.connect(lambda: self._escuchar(self.ctrl.project.media[self._snd_sel["media_id"]].path)
+        b_oir.clicked.connect(lambda: self._escuchar(self.ctrl.project.media[self._snd_sel["media_id"]].path,
+                                                     float(self._snd_sel.get("vol", 1.0)))
                               if getattr(self, "_snd_sel", None) and self._snd_sel["media_id"] in
                               self.ctrl.project.media else None)
         b_oir.setToolTip("Escuchar este sonido.")
@@ -2155,6 +2437,132 @@ class ScenesPage(QWidget):
             self._ensuciar()
             self._reconstruir()
 
+    # ================================================================ ⌨ teclas como en la línea de tiempo normal
+    def _teclas_de_edicion(self, e) -> bool:
+        """Ctrl+Z / Ctrl+Y (o Ctrl+Mayús+Z) deshacer y rehacer en la escena · Ctrl+C copiar · Ctrl+X cortar ·
+        Ctrl+V pegar en la línea roja · Ctrl+D duplicar. Devuelve True si la tecla era suya."""
+        mods, k = e.modifiers(), e.key()
+        if not mods & Qt.ControlModifier:
+            return False
+        from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit
+        f = self.focusWidget()
+        if isinstance(f, (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox)) or \
+                (f is not None and f.__class__.__name__.startswith("QWebEngine")):
+            return False                                   # (escribiendo en un cuadro o en la web: sus teclas)
+        if k == Qt.Key_Z and not mods & Qt.ShiftModifier:
+            self.deshacer()
+        elif k == Qt.Key_Y or (k == Qt.Key_Z and mods & Qt.ShiftModifier):
+            self.rehacer()
+        elif k == Qt.Key_C:
+            self.copiar()
+        elif k == Qt.Key_X:
+            tipo, obj = self.tl.sel
+            if self.copiar():
+                if tipo == "fase" and obj.get("tipo") in ("entrada", "salida"):
+                    self.win.statusBar().showMessage("La entrada y la salida no se quitan: se copian (Ctrl+V la pone "
+                                                     "en otro personaje) y se cambian en su panel.", 6000)
+                else:
+                    self._borrar_elegido()
+        elif k == Qt.Key_V:
+            self.pegar()
+        elif k == Qt.Key_D:
+            antes = getattr(self, "_portapapeles", None)
+            if self.copiar():
+                self.pegar()
+            self._portapapeles = antes
+        else:
+            return False
+        return True
+
+    def _guardar_hist(self):
+        """(cada cambio, ya asentado: una foto de la escena para Ctrl+Z)"""
+        import copy as _c
+        foto = _c.deepcopy(self.escena)
+        h = getattr(self, "_hist", None)
+        if h is None:
+            self._hist, self._pos_hist = [foto], 0
+            return
+        if h and h[self._pos_hist] == foto:
+            return
+        self._hist = h[:self._pos_hist + 1] + [foto]
+        self._hist = self._hist[-100:]
+        self._pos_hist = len(self._hist) - 1
+
+    def _volver_a(self, i: int):
+        import copy as _c
+        self.escena = _c.deepcopy(self._hist[i])
+        self._pos_hist = i
+        self.tl.sel = ("", None)
+        self._elegir("", None)
+        scenes.encajar(self.escena)
+        self.sucia = True
+        self.marca.setText("● sin aplicar")
+        self._recargar_barra()
+        self._reconstruir()
+        self._fondo_visor()
+        self._tomar_fondo()
+
+    def deshacer(self):
+        if getattr(self, "_t_hist", None) is not None and self._t_hist.isActive():
+            self._t_hist.stop()
+            self._guardar_hist()
+        if getattr(self, "_hist", None) and self._pos_hist > 0:
+            self._volver_a(self._pos_hist - 1)
+            self.win.statusBar().showMessage("↶ Deshecho en la escena (Ctrl+Y lo rehace).", 3000)
+
+    def rehacer(self):
+        if getattr(self, "_hist", None) and self._pos_hist < len(self._hist) - 1:
+            self._volver_a(self._pos_hist + 1)
+
+    def copiar(self) -> bool:
+        import copy as _c
+        tipo, obj = self.tl.sel
+        if tipo not in ("actor", "fase", "sonido") or obj is None:
+            self.win.statusBar().showMessage("Elige antes un personaje, una fase o un sonido de la escena.", 4000)
+            return False
+        actor = self._buscar_actor_de(obj) if tipo == "fase" else None
+        self._portapapeles = (tipo, _c.deepcopy(obj), actor["id"] if actor else None)
+        return True
+
+    def pegar(self):
+        """En la línea roja: un sonido empieza ahí; una fase se mete ahí en su personaje (o en el elegido); un
+        personaje sale al lado del original."""
+        import copy as _c
+        pp = getattr(self, "_portapapeles", None)
+        if not pp:
+            self.win.statusBar().showMessage("No hay nada copiado (Ctrl+C).", 4000)
+            return
+        tipo, obj, actor_id = pp
+        t = float(self.tl.t)
+        if tipo == "sonido":
+            nuevo = scenes.nuevo_sonido(self.escena, obj["media_id"], t, obj.get("dur", 1.0), obj.get("vol", 0.5))
+            self.tl.sel = ("sonido", nuevo)
+        elif tipo == "fase":
+            sel_t, sel_o = self.tl.sel
+            actor = sel_o if sel_t == "actor" else (self._buscar_actor_de(sel_o) if sel_t == "fase" else None)
+            actor = actor or next((a for a in self.escena["actores"] if a["id"] == actor_id), None)
+            if actor is None:
+                self.win.statusBar().showMessage("Elige el personaje donde pegar la fase.", 4000)
+                return
+            if obj.get("tipo") in ("entrada", "salida"):     # (la entrada / salida se cambia, no se duplica)
+                scenes.poner_fase(actor, obj["tipo"], obj["anim"], obj.get("dur"))
+            else:
+                f = {k: v for k, v in obj.items() if k != "auto"}
+                f["tipo"] = "accion"
+                scenes.insertar_en(self.escena, actor, t, f)
+        else:
+            caja = dict(obj["caja"])
+            caja["x"] = min(0.95, float(caja.get("x", 0)) + 0.06)
+            nuevo = scenes.nuevo_actor(self.escena, obj["media_id"], caja)
+            nid = nuevo["id"]
+            nuevo.clear()
+            nuevo.update(_c.deepcopy(obj), id=nid, caja=caja)  # (todo igual: fases, lado, retraso de entrada…)
+            self._reconstruir()
+            self.tl.sel = ("actor", nuevo)
+        self._ensuciar()
+        self.tl.refrescar()
+        self._reconstruir()
+
     def _borrar_elegido(self):
         tipo, obj = self.tl.sel
         if tipo == "fase":
@@ -2230,7 +2638,7 @@ class ScenesPage(QWidget):
         def recoger(x):
             if isinstance(x, dict):
                 for k, v in x.items():
-                    if k == "media_id" and isinstance(v, str) and v in p.media:
+                    if k in ("media_id", "fondo_img") and isinstance(v, str) and v in p.media:
                         usados[v] = p.media[v].path
                     else:
                         recoger(v)
@@ -2263,7 +2671,7 @@ class ScenesPage(QWidget):
         def cambiar(x):
             if isinstance(x, dict):
                 for k, v in list(x.items()):
-                    if k == "media_id" and v in nuevo and nuevo[v]:
+                    if k in ("media_id", "fondo_img") and v in nuevo and nuevo[v]:
                         x[k] = nuevo[v]
                     else:
                         cambiar(v)

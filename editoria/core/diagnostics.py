@@ -32,7 +32,7 @@ CACHE: list[tuple[str, str, str, str, str]] = [
      "Se recalcula la próxima vez que hagas un edit (unos minutos)."),
     ("huellas_a_fondo", "«Entender mi biblioteca a fondo»", "La revisión de cada segundo de tus videos.", "aviso",
      "Habría que volver a pasar «🔬 Entender mi biblioteca a fondo» (puede tardar mucho)."),
-    ("entidades", "Nombres aprendidos (IA)", "Quién y qué reconoce la IA (Jefe Maestro…).", "aviso",
+    ("entidades", "Nombres aprendidos (IA)", "Quién y qué reconoce la IA (personas, objetos…).", "aviso",
      "Se pierde lo aprendido hasta que vuelvas a «Entender mi biblioteca a fondo»."),
     ("recortes", "Recortes de miniaturas (quitar fondo)", "Los usan tus miniaturas.", "no",
      "Tus miniaturas perderían los recortes: no se borra desde aquí."),

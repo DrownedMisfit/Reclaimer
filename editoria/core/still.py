@@ -5,6 +5,7 @@ se renderiza ese instante con el mismo motor que la exportación, a la resoluci�
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 
 from .model import Project
@@ -12,7 +13,7 @@ from .project_tools import slice_project
 
 
 def render_frame(project: Project, t: float, out_png: str, ffmpeg: str) -> str:
-    from ..export.ffmpeg_export import ExportOptions, build_command
+    from ..export.ffmpeg_export import ExportOptions, build_command, subs_dir
     fps = float(project.fps or 30.0)
     total = project.duration()
     if total <= 0:
@@ -21,14 +22,19 @@ def render_frame(project: Project, t: float, out_png: str, ffmpeg: str) -> str:
     # Un margen de 1 s a cada lado: si se renderizara solo ese instante, los textos y los clips «empezarían» ahí
     # y saldrían a media aparición (fundido de entrada transparente). Luego se saca justo el fotograma de t.
     a = max(0.0, t - 1.0)
-    part = slice_project(project, a, min(total, t + 1.0))
+    b = min(total, t + 1.0)
+    part = slice_project(project, a, b)
+    cues = None
+    if project.subtitles.enabled:        # las frases del video entero (una que empezó antes sigue como iba)
+        from .subtitles import shift_cues, styled_cues
+        cues = shift_cues(styled_cues(project), a, b)
     base = os.path.splitext(out_png)[0]
     tmp, script = base + ".tmp.mp4", base + ".filtro.txt"
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         opts = ExportOptions(path=tmp, width=project.width, height=project.height, fps=fps, encoder="cpu",
                              bitrate_mbps=80, loudnorm=False, video_only=True, duration=part.duration())
-        args, _total = build_command(part, opts, ffmpeg, script)
+        args, _total = build_command(part, opts, ffmpeg, script, cues=cues)
         r = subprocess.run(args, capture_output=True, text=True, stdin=subprocess.DEVNULL, creationflags=flags)
         if r.returncode != 0 or not os.path.exists(tmp):
             raise RuntimeError("No se pudo preparar el fotograma: " + (r.stderr or "")[-300:])
@@ -44,3 +50,4 @@ def render_frame(project: Project, t: float, out_png: str, ffmpeg: str) -> str:
                 os.remove(f)
             except OSError:
                 pass
+        shutil.rmtree(subs_dir(script), ignore_errors=True)     # (las imágenes de los subtítulos, fuera)

@@ -49,7 +49,7 @@ class KeywordsDialog(QDialog):
         lay.addWidget(tip)
         row = QHBoxLayout()
         self.query = QLineEdit()
-        self.query.setPlaceholderText("Marcus, la traición, explosión…")
+        self.query.setPlaceholderText("la traición, un coche, explosión…")
         self.query.returnPressed.connect(self.search)
         row.addWidget(self.query, 1)
         self.scope = QComboBox()
