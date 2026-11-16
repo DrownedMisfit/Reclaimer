@@ -127,6 +127,7 @@ class MotorInstallDialog(QDialog):
         self.b_cancelar.setText("Cancelar")
         self.paso.setText("Empezando…")
         self.ok = None
+        self._cancelado = False
         env = dict(os.environ, RECLAIMER_UI="1", PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
         orden = orden_instalador()
 
@@ -208,8 +209,13 @@ class MotorInstallDialog(QDialog):
         else:
             self.ok = False
             self.b_ir.setVisible(True)                     # (se puede volver a intentar)
-            self.paso.setText("✗ No se terminó de instalar." if error is None or "cancel" not in error.lower()
-                              else "Cancelado.")
+            cancelado = getattr(self, "_cancelado", False) or (error is not None and "cancel" in error.lower())
+            self._cancelado = False
+            if cancelado:                                  # (lo paraste tú: no es un fallo)
+                self.paso.setText("Cancelado.")
+                self.detalle.setText("Puedes volver a intentarlo cuando quieras: lo que ya se bajó no se repite.")
+                return
+            self.paso.setText("✗ No se terminó de instalar.")
             self.detalle.setText((error or "Abre «▸ Ver detalles» para ver qué pasó. Puedes volver a intentarlo: lo "
                                   "que ya se bajó no se repite.")[:300])
 
@@ -218,12 +224,14 @@ class MotorInstallDialog(QDialog):
             self.reject()
             return
         self.paso.setText("Cancelando…")
+        self._cancelado = True
         self._job.cancel()
         if self._pid:
             matar_arbol(self._pid)
 
     def done(self, r):
         if self._job is not None:                 # (cerrar mientras instala = cancelar)
+            self._cancelado = True
             self._job.cancel()
             if self._pid:
                 matar_arbol(self._pid)

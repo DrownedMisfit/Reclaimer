@@ -271,7 +271,7 @@ def main():
     assert fus and fus[-1].currentData() == "multiply"
     cv.viewport().repaint()
     pump(app, 0.1)
-    textos = [b.text() for b in ed.findChildren(QPushButton) if b.isVisibleTo(ed)]
+    textos = [b.text() for b in ed.findChildren(QPushButton) if not b.isHidden()]   # (en su sección plegable)
     assert any("Cambiar la imagen" in x for x in textos) and any("Guardar este estilo" in x for x in textos)
     print("✓ panel: Fusión, 🌗 Bordes suaves, 🔁 Cambiar la imagen y ⭐ Mis estilos a la vista")
     # pincel: dureza y opacidad se recuerdan y van al trazo

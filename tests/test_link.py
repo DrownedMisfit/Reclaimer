@@ -57,12 +57,14 @@ def main():
     while ctrl.analyzing:
         pump(app, 0.1)
     p = ctrl.project
-    assert mid in ctrl.peaks, "forma de onda del sonido del video"
     v1 = [t for t in p.tracks if t.kind == TRACK_VIDEO][-1]
 
     # --- 1) Al poner el video, su sonido va debajo, vinculado
     created = ctrl.add_media([mid], v1.id, 1.0)
     assert len(created) == 2, created
+    # (picos perezosos: ya no se calculan al importar, sino cuando hacen falta; los pedimos aquí)
+    ctrl.ensure_peaks(mid, wait=True)
+    assert mid in ctrl.peaks, "forma de onda del sonido del video"
     vc, ac = p.clips[created[0]], p.clips[created[1]]
     atr = p.track(ac.track_id)
     assert atr.kind == TRACK_AUDIO and atr.name == "Audio de video"

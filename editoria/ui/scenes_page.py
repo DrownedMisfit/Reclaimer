@@ -827,7 +827,7 @@ class ScenesPage(QWidget):
         clave = self.sel_escena.currentData()
         if clave == self.escena["id"]:
             return
-        if self.sucia and not self._descartar_ok():
+        if self.sucia and self._tiene_contenido() and not self._descartar_ok():
             self._llenar_escenas()
             return
         if clave == "__nueva__":
@@ -1490,7 +1490,7 @@ class ScenesPage(QWidget):
             for q in (self.q_personaje, self.q_juego):
                 q.returnPressed.connect(self._buscar_personajes)
             self.b_buscar_img = QPushButton("🌐")
-            self.b_buscar_img.setToolTip("Buscar imágenes del personaje en la wiki del juego (Fandom): los «render» "
+            self.b_buscar_img.setToolTip("Buscar imágenes del personaje en la wiki de la saga o serie (Fandom): los «render» "
                                          "en PNG, que suelen venir recortados, salen primero.")
             self.b_buscar_img.clicked.connect(self._buscar_personajes)
             fila.addWidget(self.q_personaje, 2)
@@ -1512,7 +1512,7 @@ class ScenesPage(QWidget):
             b2.clicked.connect(lambda: self._bajar_personaje(self.res_img.currentItem())
                                if self.res_img.currentItem() else None)
             wv = web.layout()                              # (en tu copia: también las wikis del juego, en 🌐)
-            wv.addWidget(QLabel("🌐 En la wiki del juego"))
+            wv.addWidget(QLabel("🌐 En su wiki (Fandom)"))
             wv.addLayout(fila)
             wv.addWidget(self.res_img, 2)
             wv.addWidget(self.estado_img)

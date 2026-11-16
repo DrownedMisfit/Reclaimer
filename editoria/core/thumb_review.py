@@ -30,6 +30,13 @@ def feed_ventana(doc: dict) -> tuple[float, float]:
     return (H - alto) / 2, (H + alto) / 2
 
 
+def zona_libre_short(doc: dict) -> tuple[float, float]:
+    """(arriba, abajo) en píxeles: lo que no tapa la interfaz de Shorts NI recorta el feed (con un margen)."""
+    H = float(doc["h"])
+    y0, y1 = feed_ventana(doc)
+    return max(H * 0.1, y0 + H * 0.015), min(H * 0.75, y1 - H * 0.015)
+
+
 def simulate_feed(doc: dict, width: int) -> QImage:
     """La miniatura como sale en el feed de inicio: recortada arriba y abajo, con las esquinas redondeadas."""
     full = T.render(doc, width / doc["w"])
@@ -173,7 +180,8 @@ def analyze(doc: dict) -> list[dict]:
                             "(esquina inferior derecha).", "fix": {"layer": lay["id"], "action": "avoid_zones",
                                                                   "label": "Apartarlo"}})
         else:
-            if b.top() < H * 0.1 or b.bottom() > H * 0.75:
+            arriba, abajo = zona_libre_short(doc)
+            if b.top() < arriba or b.bottom() > abajo:
                 out.append({"level": "warn", "text": f"En Shorts, la interfaz tapa arriba y abajo: «{name}» queda "
                             "en una zona tapada.", "fix": {"layer": lay["id"], "action": "avoid_zones",
                                                           "label": "Moverlo a la zona libre"}})
@@ -260,7 +268,7 @@ def apply_fix(doc: dict, fix: dict) -> dict:
                 lay["scale"] = round(lay["scale"] * (W - 2 * m) / b.width(), 3)
                 b = _bbox(lay)
             if d["format"] == "short":
-                top, bottom = H * 0.1, H * 0.75
+                top, bottom = zona_libre_short(d)
                 if b.top() < top:
                     lay["y"] += top - b.top()
                 elif b.bottom() > bottom:

@@ -76,7 +76,15 @@ def main():
     assert by_name["intro.mp4"].category == "Cinemáticas"
     assert by_name["narracion.wav"].category == "Narración"
     assert by_name["captura.png"].category == "Imágenes"
-    assert pelea.id in ctrl.thumbs and by_name["narracion.wav"].id in ctrl.peaks
+    assert pelea.id in ctrl.thumbs, "miniatura al importar"
+    nid = by_name["narracion.wav"].id
+    # (picos perezosos: la forma de onda ya no se calcula al importar, sino cuando hace falta; se pide aquí)
+    ctrl.ensure_peaks(nid)
+    t0 = time.time()
+    while nid not in ctrl.peaks and time.time() - t0 < 30:
+        app.processEvents()
+        time.sleep(0.05)
+    assert nid in ctrl.peaks, "forma de onda de la narración"
     print("✓ importación y clasificación")
 
     p = ctrl.project

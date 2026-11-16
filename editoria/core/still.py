@@ -5,7 +5,6 @@ se renderiza ese instante con el mismo motor que la exportación, a la resoluci�
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 
 from .model import Project
@@ -13,7 +12,7 @@ from .project_tools import slice_project
 
 
 def render_frame(project: Project, t: float, out_png: str, ffmpeg: str) -> str:
-    from ..export.ffmpeg_export import ExportOptions, build_command, subs_dir
+    from ..export.ffmpeg_export import ExportOptions, build_command, cleanup_script
     fps = float(project.fps or 30.0)
     total = project.duration()
     if total <= 0:
@@ -28,7 +27,11 @@ def render_frame(project: Project, t: float, out_png: str, ffmpeg: str) -> str:
     if project.subtitles.enabled:        # las frases del video entero (una que empezó antes sigue como iba)
         from .subtitles import shift_cues, styled_cues
         cues = shift_cues(styled_cues(project), a, b)
-    base = os.path.splitext(out_png)[0]
+    # Los temporales, en la carpeta temporal de Reclaimer (no junto a la imagen: quedaban «editoria_textos» y un
+    # .ass en la carpeta del proyecto) y con nombre propio (dos fotogramas a la vez no se pisan)
+    from .model import new_id
+    from .paths import temp_dir
+    base = os.path.join(str(temp_dir()), f"editoria_fotograma_{new_id()}")
     tmp, script = base + ".tmp.mp4", base + ".filtro.txt"
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -45,9 +48,8 @@ def render_frame(project: Project, t: float, out_png: str, ffmpeg: str) -> str:
             raise RuntimeError("No se pudo guardar la imagen: " + (r.stderr or "")[-300:])
         return out_png
     finally:
-        for f in (tmp, script):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-        shutil.rmtree(subs_dir(script), ignore_errors=True)     # (las imágenes de los subtítulos, fuera)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        cleanup_script(script)     # (el guion, las imágenes de textos y subtítulos y el .ass, fuera)

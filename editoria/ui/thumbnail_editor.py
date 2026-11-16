@@ -110,6 +110,10 @@ class _Muestra(QWidget):
         if e.button() == Qt.LeftButton:
             self.al_pulsar()
 
+    def click(self):
+        """Como un botón: usar este color."""
+        self.al_pulsar()
+
     def paintEvent(self, _e):
         from PySide6.QtGui import QPainter, QPen, QColor
         p = QPainter(self)
@@ -877,7 +881,7 @@ class Canvas(QGraphicsView):
             p.setBrush(Qt.NoBrush)
         elif self.guides == "youtube":                          # lo que tapan YouTube y Shorts encima de la imagen
             zones = ([(0.855, 0.86, 0.985, 0.965, "Duración")] if d.get("format") != "short" else
-                     [(0.0, 0.0, 1.0, 0.07, "Barra de arriba"), (0.83, 0.42, 0.99, 0.9, "Botones"),
+                     [(0.0, 0.0, 1.0, 0.10, "Barra de arriba"), (0.83, 0.42, 0.99, 0.9, "Botones"),
                       (0.0, 0.8, 0.8, 0.97, "Título y canal")])
             f = p.font()
             f.setPixelSize(max(10, int(H * 0.022)))
@@ -1267,6 +1271,12 @@ class Canvas(QGraphicsView):
                 if not d.get("movido"):                 # un clic sin arrastrar: deja de elegir (como siempre)
                     self.set_words(set())
                 self.editor._fill_props()               # (la barra, con lo elegido al soltar)
+                ed = getattr(self.editor, "_text_edit", None)
+                if d.get("movido") and ed is not None:  # (Supr / Ctrl+C / escribir: sobre esas palabras, no la capa)
+                    try:
+                        ed.setFocus()
+                    except RuntimeError:
+                        pass
             self._drag = None
             if d.get("word") is not None and (d["lay"]["x"], d["lay"]["y"]) == (d["x0"], d["y0"]):
                 self.set_words({d["word"]}, d["lay"])     # Ctrl + clic sin mover: esa palabra
@@ -1613,6 +1623,35 @@ class ThumbnailEditor(QMainWindow):
         super().showEvent(e)
         if hasattr(self, "_mat_soon"):           # (al volver a la página: lo importado mientras tanto)
             self._mat_soon.start()
+        QTimer.singleShot(0, self._repartir)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        QTimer.singleShot(0, self._repartir)
+
+    def _repartir(self):
+        """En ventanas estrechas, el lienzo se queda al menos con el 45 % del ancho: los paneles de los lados se
+        estrechan (hasta su mínimo) en vez de dejar la miniatura diminuta."""
+        sp = getattr(self, "_split", None)
+        try:
+            if sp is None or sp.count() < 4 or not sp.isVisible():
+                return
+            sizes = sp.sizes()
+            total = sum(sizes)
+            falta = int(total * 0.45) - sizes[2]
+            if total <= 0 or falta <= 0:
+                return
+            minimos = [max(sp.widget(i).minimumWidth(), sp.widget(i).minimumSizeHint().width()) for i in range(4)]
+            for i in (1, 0, 3):                    # (primero las capas, luego la columna izquierda y la derecha)
+                quita = min(falta, max(0, sizes[i] - minimos[i]))
+                sizes[i] -= quita
+                sizes[2] += quita
+                falta -= quita
+                if falta <= 0:
+                    break
+            sp.setSizes(sizes)
+        except RuntimeError:
+            pass
 
     def closeEvent(self, e):
         if hasattr(self, "_mat_soon"):
@@ -1629,12 +1668,17 @@ class ThumbnailEditor(QMainWindow):
         while self.brush_busy() and time.time() - t0 < 6:         # (los trazos que falten: que no se pierdan)
             QApplication.processEvents()
             time.sleep(0.01)
-        self.canvas.wait_renders()
-        self._learn()
-        self._save()
-        super().closeEvent(e)
-        if not getattr(self, "_gone", False):
-            self.closed.emit()                     # (en la página Miniatura: el editor vuelve a su sitio)
+        try:
+            self.canvas.wait_renders()
+            try:
+                self._learn()
+            except Exception:  # noqa: BLE001 - aprender es opcional: que no impida guardar ni cerrar
+                pass
+            self._save()
+        finally:                                   # (aunque algo falle: el editor recupera sus paneles y atajos)
+            super().closeEvent(e)
+            if not getattr(self, "_gone", False):
+                self.closed.emit()                 # (en la página Miniatura: el editor vuelve a su sitio)
 
     # ----------------------------------------------------------- barra
     def _build_toolbar(self):
@@ -1731,7 +1775,8 @@ class ThumbnailEditor(QMainWindow):
             self.guides_combo.addItem(label, key)
         self.guides_combo.setToolTip("Guías encima de la miniatura para colocar las cosas: el centro, tercios (regla "
                                      "de los tercios), cuartos, o lo que tapa YouTube (la duración en los videos; "
-                                     "los botones y el título en los Shorts). No salen al exportar.")
+                                     "los botones y el título en los Shorts) y, en vertical, lo que recorta el feed de Shorts. "
+                                     "No salen al exportar.")
         self.guides_combo.currentIndexChanged.connect(self._guides_changed)
         tb.addWidget(self.guides_combo)
         self.act_zoom_out = tb.addAction("−", lambda: self.canvas.set_zoom(self.canvas.zoom / 1.25))
@@ -1743,10 +1788,7 @@ class ThumbnailEditor(QMainWindow):
         self.canvas.zoomChanged.connect(lambda z: self.act_zoom_fit.setText(f"{round(z * 100)} %"))
         # con ≈ Licuar / ✋ Estirar, al cambiar el zoom cambia la resolución de la vista rápida: se prepara otra vez
         self.canvas.zoomChanged.connect(lambda _z: self._warm_liquify() if self.canvas.tool == "liquify" else None)
-        g0 = QSettings("EditorIA", "EditorIA").value("miniatura/guias", "", type=str)
-        if not g0 and self.doc.get("format") == "short":       # (📱 vertical: de entrada, el recorte del feed)
-            g0 = "feed"
-        self.guides_combo.setCurrentIndex(max(0, self.guides_combo.findData(g0)))
+        self._poner_guia_del_formato()
         spacer = QWidget()
         spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding, spacer.sizePolicy().verticalPolicy())
         tb.addWidget(spacer)
@@ -3093,8 +3135,33 @@ class ThumbnailEditor(QMainWindow):
     def _guides_changed(self, _i: int = 0):
         from PySide6.QtCore import QSettings
         self.canvas.guides = self.guides_combo.currentData() or ""
-        QSettings("EditorIA", "EditorIA").setValue("miniatura/guias", self.canvas.guides)
+        if not getattr(self, "_poniendo_guia", False):   # (cada formato recuerda la suya)
+            QSettings("EditorIA", "EditorIA").setValue(f"miniatura/guias/{self.doc.get('format', '')}",
+                                                       self.canvas.guides)
         self.canvas.viewport().update()
+
+    def _poner_guia_del_formato(self):
+        """La guía que usaste en este formato; en 📱 vertical, de entrada, el recorte del feed. «Recorte del feed»
+        solo se puede elegir en vertical."""
+        from PySide6.QtCore import QSettings
+        fmt = self.doc.get("format", "")
+        st = QSettings("EditorIA", "EditorIA")
+        g0 = st.value(f"miniatura/guias/{fmt}", None)
+        if g0 is None:                                              # (nunca la elegiste en este formato)
+            g0 = "feed" if fmt == "short" else st.value("miniatura/guias", "", type=str)
+        g0 = str(g0 or "")
+        if g0 == "feed" and fmt != "short":
+            g0 = ""
+        i_feed = self.guides_combo.findData("feed")
+        item = self.guides_combo.model().item(i_feed) if i_feed >= 0 else None
+        if item is not None:
+            item.setEnabled(fmt == "short")
+        self._poniendo_guia = True
+        try:
+            self.guides_combo.setCurrentIndex(max(0, self.guides_combo.findData(g0)))
+            self._guides_changed()
+        finally:
+            self._poniendo_guia = False
 
     def _liq_button(self):
         """Botón «≈ Licuar»: si venías de «✋ Estirar», vuelve a inflar."""
@@ -3667,6 +3734,7 @@ class ThumbnailEditor(QMainWindow):
         self.doc = copy.deepcopy(p.thumbnails[fmt]) if p.thumbnails.get(fmt) else T.new_doc(fmt)
         self.history, self.pos = [json.dumps(self.doc)], 0
         self.canvas.sel = ""
+        self._poner_guia_del_formato()
         self.refresh_all()
         self._ab_update()
 

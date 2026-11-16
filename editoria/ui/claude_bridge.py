@@ -29,6 +29,13 @@ def bridge_file() -> str:
     return os.path.join(str(app_data_dir()), "puente_claude.json")
 
 
+def shared_bridge_file() -> str:
+    """Una copia en %LOCALAPPDATA%\\Reclaimer: el servidor MCP la mira si no encuentra la de su carpeta de datos (la
+    versión «todo en uno» guarda sus datos junto a Reclaimer.exe y el MCP, arrancado por Claude, no lo sabe)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "Reclaimer", "puente_claude.json")
+
+
 def enabled() -> bool:
     return str(QSettings("EditorIA", "EditorIA").value(KEY, "false")) == "true"
 
@@ -72,10 +79,25 @@ class ClaudeBridge(QObject):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self._data(), f)
         os.replace(tmp, bridge_file())
+        self._write_shared()
+
+    def _write_shared(self):
+        try:                                    # (la copia para el MCP: si no se puede, da igual)
+            shared = shared_bridge_file()
+            if os.path.normcase(os.path.abspath(shared)) == os.path.normcase(os.path.abspath(bridge_file())):
+                return
+            os.makedirs(os.path.dirname(shared), exist_ok=True)
+            with open(shared + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(self._data(), f)
+            os.replace(shared + ".tmp", shared)
+        except OSError:
+            pass
 
     def _check_file(self):
         if self.server is None:
             return
+        if not os.path.exists(shared_bridge_file()):
+            self._write_shared()
         try:
             with open(bridge_file(), encoding="utf-8") as f:
                 ok = json.load(f) == self._data()
@@ -93,13 +115,14 @@ class ClaudeBridge(QObject):
         if self.server is not None:
             self.server.close()
             self.server = None
-        try:
-            with open(bridge_file(), encoding="utf-8") as f:
-                mine = json.load(f).get("pid") == os.getpid()
-            if mine:                                  # (en Windows no se puede borrar mientras está abierto)
-                os.remove(bridge_file())
-        except (OSError, ValueError):
-            pass
+        for path in (bridge_file(), shared_bridge_file()):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    mine = json.load(f).get("pid") == os.getpid()
+                if mine:                              # (en Windows no se puede borrar mientras está abierto)
+                    os.remove(path)
+            except (OSError, ValueError):
+                pass
 
     # ------------------------------------------------------------ conexiones
     def _on_conn(self):
@@ -512,6 +535,7 @@ class ClaudeBridge(QObject):
         fps = p.fps if p.fps in (24, 25, 30, 50, 60) else 60
         opts = ExportOptions(path=path, width=w, height=h, fps=float(fps), codec="h264", encoder="gpu",
                              bitrate_mbps=target_bitrate(key, w, h), target=key)
-        self.win.render_queue.add(p, opts, "🤝 " + TARGETS[key]["name"])
+        job = self.win.render_queue.add(p, opts, "🤝 " + TARGETS[key]["name"])
+        path = job["opts"]["path"]                  # (si otro trabajo de la cola ya iba a ese archivo: « (2)»…)
         self.win.render_queue.start()
         reply(True, f"✓ Exportando para {TARGETS[key]['name']} en segundo plano → {path} (progreso en «estado»).")

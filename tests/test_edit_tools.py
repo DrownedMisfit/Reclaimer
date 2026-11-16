@@ -49,6 +49,8 @@ def main():
     ctrl = win.ctrl
     p = ctrl.project
     vmid, amid = ctrl.import_now([vid, music])
+    for mid in (vmid, amid):              # (picos perezosos: ya no llegan solos al importar; se piden)
+        ctrl.ensure_peaks(mid, wait=True)
     t0 = time.time()
     while (vmid not in ctrl.peaks or amid not in ctrl.peaks) and time.time() - t0 < 30:
         pump(app, 0.1)

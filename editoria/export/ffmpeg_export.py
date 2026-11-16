@@ -645,6 +645,66 @@ def subs_dir(script_path: str) -> str:
     return os.path.splitext(script_path)[0] + "_subs"
 
 
+def texts_dir(script_path: str) -> str:
+    """Carpeta propia de las imágenes de los textos de UNA exportación (antes «editoria_textos», compartida: dos
+    exportaciones a la vez se pisaban texto_0.png)."""
+    return os.path.splitext(script_path)[0] + "_textos"
+
+
+def ass_file(script_path: str) -> str:
+    """Archivo .ass propio de los subtítulos de UNA exportación (antes «editoria_subtitulos.ass», compartido)."""
+    return os.path.splitext(script_path)[0] + ".ass"
+
+
+def partial_path(path: str) -> str:
+    """Donde se escribe una exportación mientras se hace: «<nombre>.parcial.mp4» (la misma extensión, para que FFmpeg
+    sepa el formato). Solo si sale bien pasa a llamarse como pediste: cancelar o un fallo no deja un video roto con
+    el nombre final ni destruye el que ya había («Reemplazar»)."""
+    stem, ext = os.path.splitext(path)
+    return f"{stem}.parcial{ext or '.mp4'}"
+
+
+def finish_partial(partial: str, final: str) -> bool:
+    """La exportación salió bien: el parcial pasa a ser el archivo final (si ya había uno, lo reemplaza ahora)."""
+    for _ in range(20):            # (Windows suelta el archivo un instante después de cerrar FFmpeg)
+        try:
+            os.replace(partial, final)
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            import time
+            time.sleep(0.1)
+    return False
+
+
+def discard_partial(partial: str) -> None:
+    """Cancelada o fallida: el parcial a medias, fuera (el archivo final, si existía, sigue intacto)."""
+    if not partial:
+        return
+    for _ in range(20):
+        try:
+            os.remove(partial)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            import time
+            time.sleep(0.1)
+
+
+def cleanup_script(script_path: str) -> None:
+    """Borra el guion de filtros de una exportación y todo lo que cuelga de él (textos, subtítulos, .ass)."""
+    import shutil
+    for d in (subs_dir(script_path), texts_dir(script_path)):
+        shutil.rmtree(d, ignore_errors=True)
+    for f in (ass_file(script_path), script_path):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
 def raster_needed(project: Project, opts: ExportOptions) -> bool:
     """¿Esta exportación lleva subtítulos dibujados como imágenes (Neón, palabra a palabra…)?"""
     return bool(opts.subtitles and not opts.audio_only and project.subtitles.enabled
@@ -905,7 +965,7 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
               for c in project.clips_on(tr.id) if c.enabled and c.text]
     if titles:
         from ..core import title_render
-        tdir = os.path.join(os.path.dirname(script_path), "editoria_textos")
+        tdir = texts_dir(script_path)
         os.makedirs(tdir, exist_ok=True)
         for i, (a, b, t) in enumerate(titles):
             img, pos = title_render.render(t, W, H)
@@ -947,7 +1007,7 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
             filters.append(f"[{last}][subimg]overlay=x=0:y={y0}:eof_action=pass[subs]")
             last = "subs"
         elif cues:
-            ass_path = os.path.join(os.path.dirname(script_path), "editoria_subtitulos.ass")
+            ass_path = ass_file(script_path)
             ass_text = build_ass(cues, project.subtitles, W, H)
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_text)

@@ -229,6 +229,8 @@ class SaveSettingsDialog(QDialog):
         if not p:
             return
         win = self.mgr.win
+        if hasattr(win, "salir_de_paginas") and not win.salir_de_paginas():
+            return
         if not win._confirm_discard():
             return
         try:

@@ -405,27 +405,36 @@ class ExportDialog(QDialog):
                 if opts.subtitles and base.subtitles.enabled:   # las frases del video entero, desde la marca I
                     from ..core.subtitles import shift_cues, styled_cues
                     cues = shift_cues(styled_cues(base), *rng)
+            # Se escribe en «<nombre>.parcial.mp4»: solo si sale bien pasa a llamarse como pediste (cancelar o un
+            # fallo no deja un video roto con el nombre final ni destruye el que había al elegir «Reemplazar»)
+            from dataclasses import replace
+
+            from ..export.ffmpeg_export import partial_path
+            work = replace(opts, path=partial_path(opts.path))
             # (raster=False: los subtítulos Neón / palabra a palabra se dibujan luego, en segundo plano)
-            args, self.total = build_command(project, opts, media_tools.ffmpeg(), script, cues=cues, raster=False)
-        except (ValueError, RuntimeError) as exc:
+            args, self.total = build_command(project, work, media_tools.ffmpeg(), script, cues=cues, raster=False)
+        except (ValueError, RuntimeError, OSError) as exc:
             QMessageBox.warning(self, "No se puede exportar", str(exc))
             return
-        self._opts = opts
+        self._opts = opts               # (la ruta FINAL: la que se enseña al terminar)
+        self._partial = work.path
+        from . import export_runner as _er
+        _er.track_partial(work.path)    # (si Reclaimer se cierra de golpe, se borra al arrancar)
         self._log = []
         self.log_view.clear()
         self.log_view.setVisible(False)
         self.btn_open.setVisible(False)
         from . import export_runner
         # Más rápido: por trozos a la vez (cortando por los cortes del montaje); si no se puede, de una vez
-        self.proc = export_runner.make(project, opts, self, cues=cues)
+        self.proc = export_runner.make(project, work, self, cues=cues)
         parallel = self.proc is not None
         self._script = script
         if not parallel:
-            self.proc = export_runner.make_single(project, opts, script, self, cues=cues)
+            self.proc = export_runner.make_single(project, work, script, self, cues=cues)
         self.proc.readyReadStandardOutput.connect(self._read)
         self.proc.finished.connect(self._finished)
         self._t0 = time.time()
-        export_runner.start(self.proc, args, opts)
+        export_runner.start(self.proc, args, work)
         self.btn_export.setEnabled(False)
         self.btn_close.setText("Cancelar")
         self.btn_mini.setVisible(hasattr(self.parent(), "go_page"))
@@ -462,6 +471,15 @@ class ExportDialog(QDialog):
         subs_failed = bool(getattr(proc, "subs_failed", False))     # (falló el dibujo de los subtítulos, no FFmpeg)
         if proc is not None:
             proc.deleteLater()
+        from .export_runner import discard_partial, finish_partial, looks_like_encoder_failure
+        partial = getattr(self, "_partial", "")
+        if code == 0 and self._cancelled:
+            code = 1                              # (cancelaste: no se da por bueno aunque FFmpeg acabara justo)
+        if code == 0 and not finish_partial(partial, self._opts.path):
+            code = 1                              # (no se pudo poner el nombre final: se cuenta como fallo)
+            self._log.append(f"✗ No se pudo renombrar {partial} → {self._opts.path} (¿está abierto en otro programa?)")
+        if code != 0:
+            discard_partial(partial)              # (el archivo bueno de antes, si lo había, sigue intacto)
         if code == 0:
             self.progress.setValue(1000)
             self.progress.setFormat("100 %")
@@ -483,7 +501,8 @@ class ExportDialog(QDialog):
                 pass
         elif self._cancelled:
             self.status.setText("Exportación cancelada.")
-        elif self._opts.encoder == "gpu" and not self._retried_cpu and not subs_failed:
+        elif (self._opts.encoder == "gpu" and not self._retried_cpu and not subs_failed
+              and looks_like_encoder_failure(self._log)):     # (disco lleno o archivo que falta: no se reintenta)
             # La tarjeta gráfica falló (driver, tamaño raro…): se reintenta sola con el procesador
             from dataclasses import replace
             self._retried_cpu = True
@@ -524,6 +543,23 @@ class ExportDialog(QDialog):
             return
         super().reject()
 
+    def abort_for_exit(self, ms: int = 3000):
+        """Al cerrar el programa: para la exportación, espera un momento y borra el archivo a medias y los temporales
+        (el aviso de «terminado» ya no llega: el programa se está cerrando)."""
+        from . import export_runner
+        proc = self.proc
+        self._cerrando_app = True
+        self._oculto = False
+        self._cancelled = True
+        if proc is not None:
+            try:
+                proc.kill()
+                proc.waitForFinished(ms)
+            except RuntimeError:
+                pass
+        export_runner.cleanup(getattr(self, "_script", ""))
+        export_runner.discard_partial(getattr(self, "_partial", ""))
+
     def _a_miniatura(self):
         """🖼 Esconde el diálogo (la exportación sigue: FFmpeg va aparte) y abre la página Miniatura."""
         win = self.parent()
@@ -550,7 +586,5 @@ class ExportDialog(QDialog):
             self.reject()
             return
         if self.proc is not None:
-            self._cancelled = True
-            self.proc.kill()
-            self.proc.waitForFinished(3000)
+            self.abort_for_exit()
         super().closeEvent(e)

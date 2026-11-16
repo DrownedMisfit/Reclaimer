@@ -253,11 +253,13 @@ def render(p: Project, zone: Zone, width: int = WIDTH, cancelled=None) -> str:
                 err = f.read()[-2000:].decode("utf-8", "replace")
         except OSError:
             err = ""
-        for x in (out[:-4] + "_filtro.txt", log_path):
-            try:
+        for x in (out[:-4] + "_filtro.txt", log_path) + (() if proc.returncode == 0 else (tmp,)):
+            try:          # (cancelado o fallido: el .tmp.mp4 a medias también fuera)
                 os.remove(x)
             except OSError:
                 pass
+        from ..export.ffmpeg_export import cleanup_script
+        cleanup_script(out[:-4] + "_filtro.txt")      # (textos y subtítulos de ese guion)
     if proc.returncode != 0 or not os.path.exists(tmp):
         try:
             os.remove(tmp)

@@ -94,19 +94,22 @@ class _StateCommand(QUndoCommand):
     El «después» de un paso y el «antes» del siguiente son el mismo objeto: no se guarda dos veces."""
 
     def __init__(self, ctrl: "ProjectController", before: bytes, after: bytes, text: str,
-                 merge_id: int = -1):
+                 merge_id: int = -1, firma: frozenset | None = None):
         super().__init__(text)
         self._ctrl, self._before, self._after = ctrl, before, after
         self._first = True
         self._merge_id = merge_id
+        self._firma = firma          # (los clips que cambió: solo se junta con un paso de los MISMOS clips)
         self._time = time.monotonic()
 
     def id(self) -> int:
         return self._merge_id
 
     def mergeWith(self, other) -> bool:
-        """Cambios seguidos del mismo tipo (p. ej. ajustar el tamaño) cuentan como un solo paso."""
+        """Cambios seguidos del mismo tipo (p. ej. ajustar el tamaño) DEL MISMO clip cuentan como un solo paso."""
         if other.id() != self._merge_id or other.text() != self.text() or other._time - self._time > 3.0:
+            return False
+        if getattr(other, "_firma", None) != self._firma:   # otro clip: su propio paso de deshacer
             return False
         self._after = other._after
         self._time = other._time
@@ -394,7 +397,19 @@ class ProjectController(QObject):
                 self.message.emit(str(exc))
             return None
         except BaseException:
+            restaurado = False
+            try:                                   # (un fallo inesperado tampoco deja el proyecto a medias)
+                import copy as _copy
+                self.project.apply_timeline_state(_copy.deepcopy(before))
+                restaurado = True
+            except Exception:
+                pass
             self._bump_rev()                       # (proyecto a medias: nada memorizado vale)
+            if restaurado:
+                try:                               # (la interfaz suelta los clips viejos y vuelve a pintar)
+                    self.project_changed.emit()
+                except Exception:
+                    pass
             raise
         self._bump_rev()                           # (ya cambió: quien lea antes del aviso no usa lo memorizado)
         after = self.project.timeline_state()
@@ -408,7 +423,12 @@ class ProjectController(QObject):
             packed_before = _Packed(before)
         packed_after = _Packed(after)                # (⚡ se comprime en segundo plano)
         self._last_packed = (after, packed_after)
-        self.undo_stack.push(_StateCommand(self, packed_before, packed_after, text, merge_id))
+        firma = None
+        if merge_id != -1:                           # qué clips cambió (para no juntar pasos de clips distintos)
+            antes_c = {d.get("id"): d for d in before.get("clips", ())}
+            firma = frozenset(d.get("id") for d in after.get("clips", ()) if antes_c.get(d.get("id")) != d) | \
+                frozenset(set(antes_c) - {d.get("id") for d in after.get("clips", ())})
+        self.undo_stack.push(_StateCommand(self, packed_before, packed_after, text, merge_id, firma))
         self._fresh_rev = None
         r0 = self.rev
         self.project_changed.emit()
@@ -449,6 +469,12 @@ class ProjectController(QObject):
             raise EditError("🔒 Ese clip está bloqueado. Desbloquéalo para modificarlo.")
 
     @staticmethod
+    def _libre(p: Project, c: Clip) -> bool:
+        """¿Se puede tocar el clip? (ni él ni su pista están bloqueados, y la pista existe)."""
+        tr = p.track(c.track_id)
+        return not c.locked and tr is not None and not tr.locked
+
+    @staticmethod
     def track_kind_for(m: MediaItem) -> str:
         return TRACK_AUDIO if m.kind == KIND_AUDIO else TRACK_VIDEO
 
@@ -474,6 +500,7 @@ class ProjectController(QObject):
                 right = replace(c, id=new_id(), start=b, duration=c.end - b,
                                 source_in=c.piece_src(b - c.start, c.duration) if shift_src else 0.0,
                                 link=self._new_link(c.link, relink))
+                self._shift_img_kf(p, right, b - c.start)
                 if shift_src:
                     c.source_in = c.piece_src(0.0, a - c.start)
                 c.duration = a - c.start
@@ -486,8 +513,20 @@ class ProjectController(QObject):
                 cut = b - c.start
                 if shift_src:
                     c.source_in = c.piece_src(cut, c.duration)
+                self._shift_img_kf(p, c, cut)
                 c.start = b
                 c.duration -= cut
+
+    def _shift_img_kf(self, p: Project, c: Clip, d: float):
+        """🎞 En una IMAGEN las claves de zoom, posición/tamaño y opacidad cuentan desde el inicio del clip (en un video,
+        desde el archivo). Si el inicio del contenido avanza d segundos (dividir, recortar el borde izquierdo, roll,
+        slide…), las claves retroceden d para que la animación siga en su sitio. Siempre listas nuevas (no compartidas)."""
+        if not self._is_image(p, c):
+            return
+        for attr in ("zoom_kf", "layout_kf", "op_kf"):
+            kf = getattr(c, attr, None)
+            if kf:
+                setattr(c, attr, [dict(k, t=round(k["t"] - d, 4)) for k in kf])
 
     @staticmethod
     def _new_link(old: str, relink: dict | None) -> str:
@@ -505,6 +544,9 @@ class ProjectController(QObject):
             return None
         if abs(m.width / m.height - p.width / p.height) < 0.02:
             return None                       # misma forma que la pantalla: la llena
+        from . import generators
+        if generators.is_generated(m):        # 🟦 color sólido / degradado / capa de ajuste: siempre toda la pantalla
+            return dict(transform.FULL, fit="stretch")
         vtracks = [t.id for t in p.tracks if t.kind == TRACK_VIDEO and t.role != "fondo"]
         if vtracks and track_id != vtracks[-1]:
             return dict(transform.FULL, bg="none")
@@ -531,21 +573,30 @@ class ProjectController(QObject):
         def fn(p: Project):
             p.format = fmt
             _label, p.width, p.height = FORMATS[fmt]
-            p.fps = 60.0              # fluidez: siempre 60 fotogramas por segundo (Edit, Short y YouTube)
+            # (los fotogramas por segundo NO se tocan: los proyectos nuevos ya nacen a 60 y los tuyos se respetan)
+            from . import generators, transform
             auto = {"blurfill", "mirrorfill"}
+
+            def editable(c) -> bool:          # (ni clips bloqueados ni los de una pista bloqueada o que ya no existe)
+                tr = p.track(c.track_id)
+                return not c.locked and tr is not None and not tr.locked
+
             for c in p.clips.values():
-                if c.text is not None or c.locked:
+                if c.text is not None or not editable(c):
                     continue
+                m = p.media_of(c)
                 if c.layout is None or (c.layout.get("fit") in auto and c.origin == ORIGIN_AI):
-                    c.layout = self._auto_layout(p, p.media_of(c), c.track_id)
+                    c.layout = self._auto_layout(p, m, c.track_id)
+                elif generators.is_generated(m) and c.layout == dict(transform.FULL, bg="none"):
+                    c.layout = self._auto_layout(p, m, c.track_id)   # 🟦 (lo dejó así una versión anterior)
             if p.height > p.width and self.encuadre_auto_vertical:  # 📱 al pasar a vertical: arriba y abajo borroso
                 from . import fill as FILL
                 for c in p.clips.values():
-                    if self._horizontal_sin_encuadre(p, c) and not c.locked and not p.track(c.track_id).locked:
+                    if editable(c) and self._horizontal_sin_encuadre(p, c):
                         self._poner_relleno(c, FILL.DEFAULT)
             elif p.height <= p.width:               # (el relleno que puso el vertical, fuera: en 16:9 alarga el render)
                 for c in p.clips.values():
-                    if ((c.fx or {}).get("relleno") or {}).get("auto") and not c.locked and                             not p.track(c.track_id).locked:
+                    if ((c.fx or {}).get("relleno") or {}).get("auto") and editable(c):
                         fx = {k: v for k, v in c.fx.items() if k != "relleno"}
                         c.fx = fx or None
             st = p.subtitles
@@ -740,18 +791,7 @@ class ProjectController(QObject):
         new_track=True (soltar debajo de la última pista): cada tipo de archivo va a una pista NUEVA."""
         def fn(p: Project):
             hechos = self._place_media(p, media_ids, track_id, start, origin, overwrite, new_track, audio=audio)
-            for cid in hechos or []:                   # 🔊 los efectos de sonido, a la mitad (suenan muy fuertes)
-                c = p.clips.get(cid)
-                m = p.media_of(c) if c is not None else None
-                if m is not None and m.kind == KIND_AUDIO and m.category in ("Efectos", "Efectos de sonido") and \
-                        c.volume == 1.0:
-                    c.volume = 0.5
-            if self.encuadre_auto_vertical and p.height > p.width:    # 📱 vertical (Vertical/Edits): fondo borroso
-                from . import fill as FILL
-                for cid in hechos or []:
-                    c = p.clips.get(cid)
-                    if c is not None and self._horizontal_sin_encuadre(p, c):
-                        self._poner_relleno(c, FILL.DEFAULT)
+            self._tras_colocar(p, hechos)
             return hechos
 
         n = len(media_ids)
@@ -759,6 +799,25 @@ class ProjectController(QObject):
         if created:
             self.clips_placed.emit(list(created))
         return created
+
+    def _tras_colocar(self, p: Project, ids):
+        """Lo que se hace con TODO clip recién puesto en la línea de tiempo (dentro de un _edit), venga de donde venga
+        (añadir, B-roll de la IA, momentos, palabras clave, mis efectos…):
+          · 🔊 los efectos de sonido, a la mitad (suenan muy fuertes);
+          · 📱 en un proyecto vertical, un video/imagen horizontal que no tapa nada de debajo, con el fondo borroso."""
+        ids = [i for i in (ids or []) if isinstance(i, str)]
+        for cid in ids:
+            c = p.clips.get(cid)
+            m = p.media_of(c) if c is not None else None
+            if m is not None and m.kind == KIND_AUDIO and m.category in ("Efectos", "Efectos de sonido") and \
+                    c.volume == 1.0:
+                c.volume = 0.5
+        if self.encuadre_auto_vertical and p.height > p.width:
+            from . import fill as FILL
+            for cid in ids:
+                c = p.clips.get(cid)
+                if c is not None and self._horizontal_sin_encuadre(p, c):
+                    self._poner_relleno(c, FILL.DEFAULT)
 
     def add_media_at_times(self, media_ids: list[str], times: list[float], text: str = "",
                            origin: str = ORIGIN_USER, modo: str = "partes"):
@@ -818,6 +877,7 @@ class ProjectController(QObject):
                 if modo != "entero":
                     sig[mid] = src + d
             created += self._place_batch(p, tandas)      # todo en la misma pista de palabras clave
+            self._tras_colocar(p, created)
             if not created:
                 raise EditError("No hay sitio para ponerlo: el video no da para tantos trozos.")
             if sin_sitio:
@@ -912,6 +972,7 @@ class ProjectController(QObject):
                         k = image_anim.elegir(image_anim.texto_en(p, c.start))
                         if k:                         # (si lo que dices no pide nada, se queda como siempre)
                             image_anim.apply(c, k, 0, caja=dict(image_anim.CAJA_PERSONAJE))
+            self._tras_colocar(p, created)              # (después de animar: lo animado no lleva relleno)
             if not created:
                 raise EditError("⚡ No se pudo acomodar nada.")
             return created
@@ -1006,6 +1067,7 @@ class ProjectController(QObject):
                         created.append(ac)
             if not created:
                 raise EditError("No había huecos libres donde insertar (la IA no tapa tus clips).")
+            self._tras_colocar(p, created)
             return created
 
         return self._edit(text, fn)
@@ -1104,6 +1166,7 @@ class ProjectController(QObject):
                     delta = new - x.start
                     if not self._is_image(p, x):
                         x.source_in = max(0.0, x.piece_src(delta, x.duration))
+                    self._shift_img_kf(p, x, delta)
                     x.start = new
                     x.duration -= delta
                 else:
@@ -1149,14 +1212,26 @@ class ProjectController(QObject):
         lo desincronizaría (o lo solaparía)."""
         return any(x.id not in skip and x.start < b - EPS and x.end > a + EPS for x in p.clips.values())
 
+    MAGNET_LOCK_MSG = ("🧲🔒 No junté: detrás hay un clip o una pista bloqueada (no se mueve) y se desincronizaría. "
+                       "Desbloquéala, o usa Mayús+Supr / Ctrl+borde para juntar solo esa pista.")
+
+    @staticmethod
+    def _magnet_locked(p: Project, from_t: float, skip=frozenset()) -> bool:
+        """¿Algo que empieza en from_t o después (y no se mueve con lo editado) está bloqueado, él o su pista?
+        Entonces no se puede adelantar todo lo de detrás sin desfasarlo."""
+        cerradas = {t.id for t in p.tracks if t.locked}
+        return any(o.id not in skip and o.start >= from_t - EPS and (o.locked or o.track_id in cerradas)
+                   for o in p.clips.values())
+
     @staticmethod
     def _magnet_shift(p: Project, from_t: float, dt: float, skip: set[str] = frozenset()):
         """Mueve dt TODO lo que empieza en from_t o después, en TODAS las pistas (y los marcadores): nada se desfasa."""
+        cerradas = {t.id for t in p.tracks if t.locked}
         for o in p.clips.values():
             if o.id in skip or o.start < from_t - EPS:
                 continue
-            if o.locked:
-                raise EditError("🔒 Hay un clip bloqueado detrás: no se puede juntar.")
+            if o.locked or o.track_id in cerradas:
+                raise EditError("🔒 Hay un clip o una pista bloqueada detrás: no se puede juntar.")
             o.start = max(0.0, o.start + dt)
         for m in p.markers:
             if m.time >= from_t - EPS:
@@ -1172,7 +1247,7 @@ class ProjectController(QObject):
         p0 = self.project
         de_principal = [i for i in clip_ids if i in p0.clips and p0.clips[i].track_id == main_track]
         borrar = list(dict.fromkeys(self.linked_ids(de_principal) + [i for i in clip_ids if i in p0.clips]))
-        state = {"juntado": False, "bloqueado": False}
+        state = {"juntado": False, "bloqueado": False, "candado": False}
 
         def fn(p: Project):
             clips = [p.clips[i] for i in borrar if i in p.clips]
@@ -1188,6 +1263,9 @@ class ProjectController(QObject):
             for a, b in tramos:                        # del último al primero (así los tiempos siguen valiendo)
                 if b - a <= EPS:
                     continue
+                if self._magnet_locked(p, b, fuera):  # 🔒 detrás hay algo bloqueado: se borra, pero sin juntar
+                    state["candado"] = True
+                    continue
                 if self._magnet_blocked(p, set(), a, b) or any(
                         x.track_id == main_track and x.start < b - EPS and x.end > a + EPS for x in p.clips.values()):
                     state["bloqueado"] = True
@@ -1197,7 +1275,9 @@ class ProjectController(QObject):
             return True
 
         r = self._edit("Eliminar (pista magnética)", fn)
-        if r and state["bloqueado"]:
+        if r and state["candado"]:
+            self.message.emit(self.MAGNET_LOCK_MSG)
+        elif r and state["bloqueado"]:
             self.message.emit(self.MAGNET_MSG)
         return state["juntado"] if r else None
 
@@ -1219,6 +1299,10 @@ class ProjectController(QObject):
         otros = {x.id for x in p.clips.values() if x.track_id not in tracks}
         if any(x.start < e - EPS and x.end > min(e, e + shift) + EPS for x in p.clips.values() if x.id in otros):
             self.message.emit(self.MAGNET_MSG)
+            return self.trim_clip(clip_id, edge, nt, linked=linked, overwrite=True)
+        con_ellos = ids | {x.id for x in p.clips.values() if x.track_id in tracks}
+        if abs(shift) > EPS and self._magnet_locked(p, e, con_ellos):
+            self.message.emit(self.MAGNET_LOCK_MSG)       # 🔒 algo bloqueado detrás: recorta, pero sin juntar
             return self.trim_clip(clip_id, edge, nt, linked=linked, overwrite=True)
 
         def fn(p2: Project):
@@ -1261,6 +1345,7 @@ class ProjectController(QObject):
                         else:   # se añade material antes: el trozo empieza antes en el archivo
                             x.source_in = max(0.0, x.source_in + (0.0 if x.reverse else delta * x.speed))
                     x.duration -= delta
+                    self._shift_img_kf(p, x, delta)
                     if x.reverse and delta < 0 and not img:
                         pass    # al revés, el material añadido al inicio es el FINAL del archivo (source_in igual)
                 else:
@@ -1320,6 +1405,7 @@ class ProjectController(QObject):
                         R.source_in = R.piece_src(delta, R.duration)
                     elif not R.reverse:
                         R.source_in = max(0.0, R.source_in + delta * R.speed)
+                self._shift_img_kf(p, R, delta)
                 R.start += delta
                 R.duration -= delta
 
@@ -1377,7 +1463,7 @@ class ProjectController(QObject):
             if c is None:
                 return
             group = [c] + [o for o in self.partners(p, c) if abs(o.start - c.start) < EPS and abs(o.end - c.end) < EPS
-                           and not o.locked]
+                           and self._libre(p, o)]   # (su pareja en una pista 🔒 no se desliza)
             lims = [self.slide_limits(x.id) for x in group]
             d = min(max(dt, max(l[0] for l in lims)), min(l[1] for l in lims))
             if abs(d) < EPS:
@@ -1406,6 +1492,7 @@ class ProjectController(QObject):
                     nxt.source_in = nxt.piece_src(d, nxt.duration)
                 elif not nxt.reverse:
                     nxt.source_in = max(0.0, nxt.source_in + d * nxt.speed)
+            self._shift_img_kf(p, nxt, d)
             nxt.start += d
             nxt.duration -= d
         c.start += d
@@ -1415,6 +1502,9 @@ class ProjectController(QObject):
         def fn(p: Project):
             if clip_ids:
                 targets = [p.clips[cid] for cid in clip_ids if cid in p.clips]
+                libres = [c for c in targets if self._libre(p, c)]
+                if libres:            # (la pareja vinculada en una pista 🔒 no se corta; si TODO está bloqueado, se avisa)
+                    targets = libres
             else:
                 targets = [c for c in p.clips.values()
                            if not c.locked and not p.track(c.track_id).locked]
@@ -1433,12 +1523,7 @@ class ProjectController(QObject):
                 right = replace(c, id=new_id(), start=t, duration=c.end - t, fx=rfx or None,
                                 source_in=0.0 if self._is_image(p, c) else c.piece_src(t - c.start, c.duration),
                                 link=relink.setdefault(c.link, new_id()) if (c.link and both) else "")
-                if self._is_image(p, c):    # imágenes: sus claves cuentan desde el inicio del clip (🎞 animaciones)
-                    d = t - c.start
-                    if c.layout_kf:
-                        right.layout_kf = [dict(k, t=round(k["t"] - d, 4)) for k in c.layout_kf]
-                    if c.op_kf:
-                        right.op_kf = [dict(k, t=round(k["t"] - d, 4)) for k in c.op_kf]
+                self._shift_img_kf(p, right, t - c.start)   # imágenes: sus claves cuentan desde su inicio (🎞)
                 if not self._is_image(p, c):
                     c.source_in = c.piece_src(0.0, t - c.start)
                 c.duration = t - c.start
@@ -1732,7 +1817,10 @@ class ProjectController(QObject):
                 m = p.media_of(c)
                 new = max(MIN_CLIP, float(dur))
                 if m is not None and m.kind != KIND_IMAGE and m.duration > 0 and c.speed > 0:
-                    new = min(new, (m.duration - c.source_in) / c.speed if not c.reverse else new)
+                    if c.reverse:     # al revés, alargar es leer material de ANTES (como el recorte del borde derecho)
+                        new = min(new, (c.source_in + c.src_len) / c.speed)
+                    else:
+                        new = min(new, (m.duration - c.source_in) / c.speed)
                 for x in group:
                     old_end, delta = x.end, new - x.duration
                     for o in p.clips_on(x.track_id):
@@ -1740,6 +1828,9 @@ class ProjectController(QObject):
                             if o.locked:
                                 raise EditError("🔒 Hay un clip bloqueado detrás.")
                             o.start += delta
+                    xm = p.media_of(x)
+                    if x.reverse and x.speed > 0 and xm is not None and xm.kind != KIND_IMAGE:
+                        x.source_in = max(0.0, x.source_in + x.src_len - new * x.speed)   # (conserva el inicio)
                     x.duration = new
 
         return self._edit("Cambiar duración", fn)
@@ -1801,9 +1892,19 @@ class ProjectController(QObject):
             a = t + min(off for _d, off in group)
             b = t + max(off + d["duration"] for d, off in group)
             tr = p.track(tid)
-            kind = tr.kind if tr else (TRACK_AUDIO if p.media[group[0][0]["media_id"]].kind == KIND_AUDIO
-                                        else TRACK_VIDEO)
-            dest = self._free_track(p, kind, tid if tr else "", a, b)
+            if group[0][0].get("text"):                # 🅣 los textos, a una pista de textos (la suya si sigue libre)
+                kind = TRACK_TEXT
+            elif tr is not None:
+                kind = tr.kind
+            else:                                      # su pista ya no existe (otro proyecto/pestaña): una de su tipo
+                m0 = p.media.get(group[0][0].get("media_id", ""))
+                if m0 is None:
+                    continue
+                kind = TRACK_AUDIO if m0.kind == KIND_AUDIO else TRACK_VIDEO
+            if kind == TRACK_TEXT and (tr is None or tr.kind != TRACK_TEXT):
+                dest = self._text_track(p, a, b)
+            else:
+                dest = self._free_track(p, kind, tid if tr else "", a, b)
             for d, off in group:
                 c = Clip(**{k: v for k, v in d.items() if k in Clip.__dataclass_fields__})
                 c.id, c.track_id, c.start = new_id(), dest, t + off
@@ -2204,6 +2305,7 @@ class ProjectController(QObject):
                 c.zoom_kf, c.origin = [], ORIGIN_AI
                 c.layout = self._auto_layout(p, m, c.track_id)
                 c.note = note or c.note
+                self._tras_colocar(p, [c.id])
                 return c.id
             if mode == "after":
                 tc = p.clips.get(target or "")
@@ -2219,8 +2321,8 @@ class ProjectController(QObject):
             c = Clip(new_id(), m.id, tid, t0, s0, d, volume=volume, origin=ORIGIN_AI, note=note,
                      layout=self._auto_layout(p, m, tid))
             p.clips[c.id] = c
-            if volume > 0:
-                self._link_audio(p, c, m, volume)
+            ac = self._link_audio(p, c, m, volume) if volume > 0 else None
+            self._tras_colocar(p, [c.id, ac])
             return c.id
 
         label = {"insert": "IA · Insertar momento", "after": "IA · Añadir momento después",
@@ -3032,7 +3134,8 @@ class ProjectController(QObject):
     def _split_at(self, p: Project, c: Clip, t: float) -> Clip:
         """Divide c (y su sonido vinculado) en t. Devuelve la parte derecha de c. Los efectos «de entrada»
         (destello, transición…) se quedan en la izquierda y el fundido de salida pasa a la derecha."""
-        group = [c] + [o for o in self.partners(p, c) if o.start + MIN_CLIP < t < o.end - MIN_CLIP]
+        group = [c] + [o for o in self.partners(p, c) if o.start + MIN_CLIP < t < o.end - MIN_CLIP
+                       and self._libre(p, o)]   # (su pareja en una pista 🔒 no se parte: se queda con la izquierda)
         link = new_id() if (c.link and len(group) > 1) else ""
         right_c = c
         for o in group:
@@ -3042,10 +3145,7 @@ class ProjectController(QObject):
             right = replace(o, id=new_id(), start=t, duration=o.end - t, fx=rfx or None,
                             source_in=0.0 if self._is_image(p, o) else o.piece_src(t - o.start, o.duration),
                             link=link)
-            if self._is_image(p, o) and o.layout_kf:   # imágenes: sus claves cuentan desde el inicio del clip
-                right.layout_kf = [dict(k, t=round(k["t"] - (t - o.start), 4)) for k in o.layout_kf]
-            if self._is_image(p, o) and o.op_kf:       # (la opacidad igual: si no, «morir» se repetiría)
-                right.op_kf = [dict(k, t=round(k["t"] - (t - o.start), 4)) for k in o.op_kf]
+            self._shift_img_kf(p, right, t - o.start)  # imágenes: sus claves (zoom, caja, opacidad) desde su inicio
             if not self._is_image(p, o):
                 o.source_in = o.piece_src(0.0, t - o.start)
             o.duration = t - o.start
@@ -3084,6 +3184,7 @@ class ProjectController(QObject):
                     tid = self._free_track(p, TRACK_AUDIO, pref.id, t0, t0 + m.duration)
                     sc = Clip(new_id(), m.id, tid, t0, 0.0, m.duration, origin=ORIGIN_AI, note="⭐ " + info["name"])
                     p.clips[sc.id] = sc
+                    self._tras_colocar(p, [sc.id])        # (🔊 a la mitad, como al añadirlo tú)
                     n += 1
                     continue
                 c = p.clips.get(it["clip_id"])
@@ -4264,7 +4365,8 @@ class ProjectController(QObject):
 
     @staticmethod
     def _horizontal_sin_encuadre(p: Project, c) -> bool:
-        """Un video o imagen horizontal en una pista de video, sin relleno ni «sigue la acción» ni animación propia."""
+        """Un video o imagen horizontal en una pista de video, sin relleno ni «sigue la acción» ni animación propia, y
+        sin nada debajo (en otra pista de video) mientras dura."""
         if c.text is not None or p.track(c.track_id) is None or p.track(c.track_id).kind != TRACK_VIDEO:
             return False
         m = p.media_of(c)
@@ -4281,9 +4383,30 @@ class ProjectController(QObject):
             if caja != (0.0, 0.0, 1.0, 1.0) or lay.get("follow") or lay.get("rot") or lay.get("crop") or \
                     lay.get("fit") == "cover":
                 return False
-        if m.kind == KIND_IMAGE:                           # una imagen solo en la pista de video de más abajo
-            primera = max((i for i, t in enumerate(p.tracks) if t.kind == TRACK_VIDEO), default=None)
-            if primera is None or p.track_index(c.track_id) != primera:
+        if m.kind == KIND_IMAGE:                           # un recorte (PNG con transparencia): sin fondo borroso
+            from . import image_anim
+            if image_anim.tiene_transparencia(m.path):
+                return False
+        # 📱 solo lo que va «al fondo»: si en una pista de video de DEBAJO hay algo que se VE durante la mayor parte
+        # del clip (≥ 50 %), el relleno borroso lo taparía (un video o una imagen en V2 encima de lo de V1). No cuentan
+        # clips desactivados, pistas ocultas, textos ni capas de ajuste; un solape de un fotograma tampoco.
+        idx = p.track_index(c.track_id)
+        debajo = {t.id for i, t in enumerate(p.tracks) if i > idx and t.kind == TRACK_VIDEO and not t.hidden}
+        if debajo and c.duration > EPS:
+            tramos = []
+            for o in p.clips.values():
+                if o.track_id not in debajo or o.id == c.id or not o.enabled or o.text is not None:
+                    continue
+                a, b = max(o.start, c.start), min(o.end, c.end)
+                if b - a <= EPS or generators.is_adjust(p.media_of(o)):
+                    continue
+                tramos.append((a, b))
+            tapado, fin = 0.0, -math.inf             # (unión de los tramos: lo que se solapa no cuenta dos veces)
+            for a, b in sorted(tramos):
+                if b > fin:
+                    tapado += b - max(a, fin)
+                    fin = b
+            if tapado >= 0.5 * c.duration:
                 return False
         return True
 
@@ -5238,6 +5361,7 @@ class ProjectController(QObject):
             ids = self._place_clip_items(p, media_id, [(t, d, source_in) for t, d in zip(times, durations)])
             if not ids:
                 raise EditError("No hay sitio para ponerlo: los momentos son demasiado cortos.")
+            self._tras_colocar(p, ids)
             return ids
 
         res = self._edit("📍 Poner donde lo dices", fn)
@@ -5316,7 +5440,8 @@ class ProjectController(QObject):
                 if a + d - x >= 0.5:
                     trozos.append((x, a + d))
                 for x0, x1 in trozos:
-                    c = Clip(new_id(), m.id, tid, x0, src + (x0 - a), x1 - x0, volume=0.0, origin=ORIGIN_USER,
+                    c = Clip(new_id(), m.id, tid, x0, 0.0 if m.kind == KIND_IMAGE else src + (x0 - a), x1 - x0,
+                             volume=0.0, origin=ORIGIN_USER,
                              note=note, layout=self._auto_layout(p, m, tid))
                     p.clips[c.id] = c
                     ids.append(c.id)

@@ -100,6 +100,8 @@ def main():
     # 3b) Ctrl+X: quita lo elegido; Ctrl+V lo pone otra vez en el mismo sitio
     from PySide6.QtTest import QTest
     ed.canvas.sel = lay["id"]
+    ed.window().activateWindow()                  # (sin ventana activa, Qt no da el foco y no hay atajos)
+    pump(app, 0.1)
     ed.canvas.setFocus()
     n0, x0, y0 = len(ed.doc["layers"]), ed.cur()["x"], ed.cur()["y"]
     QTest.keyClick(ed.canvas, Qt.Key_X, Qt.ControlModifier)

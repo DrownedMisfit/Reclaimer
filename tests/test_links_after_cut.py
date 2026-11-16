@@ -99,8 +99,17 @@ def main():
 
     # --- Supr solo borra esa pareja
     antes = len(p.clips)
+    win.activateWindow()                    # (el atajo Supr es de la ventana: tiene que estar activa y con el foco)
+    tl.setFocus()
+    pump(app, 0.1)
     QTest.keyClick(tl, Qt.Key_Delete)
     pump(app, 0.3)
+    if len(p.clips) == antes:               # (sin ventana real, «offscreen» no activa la ventana: la MISMA acción Supr)
+        from PySide6.QtGui import QAction, QKeySequence
+        supr = [a for a in win.findChildren(QAction) if a.shortcut() == QKeySequence(Qt.Key_Delete)]
+        assert supr, "la ventana debe tener una acción con el atajo Supr"
+        supr[0].trigger()
+        pump(app, 0.3)
     assert len(p.clips) == antes - 2, (antes, len(p.clips))
     n_links2, malos2 = grupos_ok(p)
     assert malos2 == 0, malos2

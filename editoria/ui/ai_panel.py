@@ -938,18 +938,30 @@ class AIPanel(QWidget):
         if part.duration() <= 0:
             self.ctrl.message.emit("No hay nada en los próximos 10 segundos.")
             return
-        out = os.path.join(str(_temp_dir()), "editoria_escucha.mp4")
+        # (nombre propio cada vez: el reproductor aún puede tener abierto el de la vez anterior y FFmpeg no podría
+        # escribir encima; el guion y sus textos, también propios, para no pisar una exportación en marcha)
+        from ..core.model import new_id
+        out = os.path.join(str(_temp_dir()), f"editoria_escucha_{new_id()}.mp4")
+        script = os.path.join(str(_temp_dir()), f"editoria_escucha_{new_id()}_filtro.txt")
 
         def work(progress, _cancelled):
             import subprocess
+
+            from ..export.ffmpeg_export import cleanup_script
             progress(0.0, "🎧 Preparando el audio con efectos…")
             opts = ExportOptions(path=out, width=320, height=180, fps=15, encoder="cpu", bitrate_mbps=1,
                                  subtitles=False)        # (es para escuchar: sin dibujar subtítulos)
-            args, _total = build_command(part, opts, media_tools.ffmpeg(),
-                                         os.path.join(str(_temp_dir()), "editoria_escucha_filtro.txt"))
-            r = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL,
-                               creationflags=media_tools.NO_WINDOW)
+            try:
+                args, _total = build_command(part, opts, media_tools.ffmpeg(), script)
+                r = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL,
+                                   creationflags=media_tools.NO_WINDOW)
+            finally:
+                cleanup_script(script)
             if r.returncode != 0:
+                try:
+                    os.remove(out)
+                except OSError:
+                    pass
                 raise RuntimeError(r.stderr.decode(errors="replace")[-300:])
             return out
 
@@ -959,6 +971,12 @@ class AIPanel(QWidget):
                 self._fx_out = QAudioOutput(self)
                 self._fx_player.setAudioOutput(self._fx_out)
             self._fx_player.setSource(QUrl())
+            old, self._fx_file = getattr(self, "_fx_file", None), path
+            if old and old != path:              # (el de la vez anterior ya está suelto: fuera)
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
             self._fx_player.setSource(QUrl.fromLocalFile(path))
             self._fx_player.play()
             self.status.setText("🎧 Reproduciendo 10 s con los efectos de audio…")

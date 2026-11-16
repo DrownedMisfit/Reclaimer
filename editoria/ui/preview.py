@@ -2276,9 +2276,11 @@ class _TitleEdit(QLineEdit):
         self.setToolTip("Nombre del video / proyecto: clic para cambiarlo (Intro = listo, Esc = dejarlo).\n"
                         "Se usa al guardar y como nombre del archivo al exportar. Ctrl+Z lo deshace.")
         self.setPlaceholderText("Nombre del video…")
+        self.setFocusPolicy(Qt.ClickFocus)        # (fuera de la cadena de Tab: S, Supr, Ctrl+Z… van al editor)
         from PySide6.QtWidgets import QSizePolicy
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._shown = ""
+        self._editando = False                    # (escribiendo: volver con Alt+Tab no lo cierra)
         self.textChanged.connect(self._fit)
         self.editingFinished.connect(self._done)
 
@@ -2302,6 +2304,14 @@ class _TitleEdit(QLineEdit):
             self.setText(text)
             self.setCursorPosition(0)
 
+    def focusInEvent(self, e):
+        if e.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason) or \
+                (e.reason() == Qt.ActiveWindowFocusReason and not self._editando):
+            self.clearFocus()                     # (solo se escribe aquí si haces clic; si no, las teclas son del editor)
+            return
+        self._editando = True
+        super().focusInEvent(e)
+
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
             self.setText(self._shown)
@@ -2311,7 +2321,21 @@ class _TitleEdit(QLineEdit):
         if e.key() in (Qt.Key_Return, Qt.Key_Enter):
             self.clearFocus()
 
+    def focusOutEvent(self, e):
+        if e.reason() not in (Qt.ActiveWindowFocusReason, Qt.PopupFocusReason):
+            self._editando = False
+        super().focusOutEvent(e)
+
+    def editar(self):
+        """✏ Cambiar el nombre con el teclado (F2): el cuadro queda listo para escribir, con todo elegido."""
+        self._editando = True
+        self.setFocus(Qt.OtherFocusReason)
+        self.selectAll()
+
     def _done(self):
+        from PySide6.QtWidgets import QApplication as _QA
+        if self.hasFocus() and self._editando and _QA.activeWindow() is None:
+            return                                # (se fue a otra ventana con Alt+Tab: sigue escribiendo al volver)
         try:
             name = " ".join(self.text().split()).strip()
         except RuntimeError:                      # se está cerrando la ventana

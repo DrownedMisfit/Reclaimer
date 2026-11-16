@@ -343,7 +343,8 @@ def main(out):
     ed.act_zoom_fit.trigger()
     assert abs(cv_.zoom - 1.0) < 1e-6 and abs(cv_.transform().m11() - k1) < 1e-6
     labels = [ed.guides_combo.itemText(i) for i in range(ed.guides_combo.count())]
-    assert labels == ["▦ Sin guías", "▦ Centro", "▦ Tercios", "▦ Cuartos", "▦ Lo que tapa YouTube"], labels
+    assert labels == ["▦ Sin guías", "▦ Centro", "▦ Tercios", "▦ Cuartos", "▦ Lo que tapa YouTube",
+                      "▦ Recorte del feed de Shorts (recomendado)"], labels
     ed.guides_combo.setCurrentIndex(2)
     assert cv_.guides == "tercios"
     pix = cv_.viewport().grab().toImage()

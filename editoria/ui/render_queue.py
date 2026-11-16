@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QHeaderView, QLabel, QPushB
 
 from ..core import media as media_tools
 from ..core.model import Project
-from ..export.ffmpeg_export import ExportOptions, build_command
+from ..export.ffmpeg_export import ExportOptions, build_command, partial_path
 
 STATUS = {"pending": "⏳ En cola", "running": "▶ Exportando", "done": "✓ Listo", "error": "✗ Falló",
           "cancelled": "■ Cancelado"}
@@ -40,11 +40,58 @@ class RenderQueue(QObject):
         if rng:
             from ..core.project_tools import slice_project
             snap = slice_project(project, *rng)
+        opts = self._free_path(opts)
         job = {"name": name, "snapshot": snap.to_dict(), "opts": asdict(opts), "status": "pending",
                "progress": 0.0, "error": "", "added": time.strftime("%H:%M")}
         self.jobs.append(job)
         self.changed.emit()
         return job
+
+    @staticmethod
+    def _key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    def _free_path(self, opts: ExportOptions) -> ExportOptions:
+        """Dos trabajos de la cola nunca escriben en el mismo archivo: si ya hay uno en cola o exportándose con esa
+        ruta, este se llama «<nombre> (2)», «(3)»… (un nombre nuevo que tampoco exista ya en la carpeta)."""
+        taken = {self._key(j["opts"]["path"]) for j in self.jobs if j["status"] in ("pending", "running")}
+        try:                       # (y la que esté haciendo la ventana Exportar)
+            dlg = getattr(self.parent(), "_export_dlg", None)
+            if dlg is not None and dlg.exportando() and getattr(dlg, "_opts", None) is not None:
+                taken.add(self._key(dlg._opts.path))
+        except (AttributeError, RuntimeError):
+            pass
+        if self._key(opts.path) not in taken:
+            return opts
+        from dataclasses import replace
+        stem, ext = os.path.splitext(opts.path)
+        k = 2
+        while True:
+            cand = f"{stem} ({k}){ext}"
+            if self._key(cand) not in taken and not os.path.exists(cand):
+                return replace(opts, path=cand)
+            k += 1
+
+    def busy(self) -> bool:
+        """¿Exportando o con trabajos por exportar?"""
+        return self.proc is not None or any(j["status"] == "pending" for j in self.jobs)
+
+    def pending_count(self) -> int:
+        return sum(1 for j in self.jobs if j["status"] == "pending")
+
+    def abort(self, ms: int = 3000):
+        """Al cerrar el programa: para lo que se esté exportando, espera un momento y borra sus temporales y el
+        archivo a medias (el final, si ya existía, queda como estaba)."""
+        proc = self.proc
+        self.stop()
+        if proc is not None:
+            try:
+                proc.waitForFinished(ms)
+            except RuntimeError:
+                pass
+        from . import export_runner
+        export_runner.cleanup(getattr(self, "_script", ""))
+        export_runner.discard_partial(getattr(self, "_partial", ""))
 
     def remove(self, i: int):
         if 0 <= i < len(self.jobs) and self.jobs[i] is not self.current:
@@ -73,34 +120,54 @@ class RenderQueue(QObject):
             self.proc.kill()
 
     def _next(self):
-        job = next((j for j in self.jobs if j["status"] == "pending"), None)
-        if job is None or self._stop:
-            self.current = None
-            self.changed.emit()
-            return
-        opts = ExportOptions(**job["opts"])
-        os.makedirs(os.path.dirname(opts.path) or ".", exist_ok=True)
+        while True:
+            job = next((j for j in self.jobs if j["status"] == "pending"), None)
+            if job is None or self._stop:
+                self.current = None
+                self.changed.emit()
+                return
+            if self._launch(job):
+                return
+            self.changed.emit()          # (ese falló al prepararse: sigue con el siguiente)
+
+    def _launch(self, job: dict, cpu: bool = False) -> bool:
+        """Arranca un trabajo. Si no se puede ni preparar (carpeta sin permiso, proyecto roto…), lo marca como
+        fallido y devuelve False: la cola nunca se queda parada en silencio."""
+        from dataclasses import replace
+
+        from . import export_runner
         script = os.path.join(str(_temp_dir()), f"editoria_cola_{id(job)}.txt")
         try:
+            opts = ExportOptions(**job["opts"])
+            if cpu:
+                opts = replace(opts, encoder="cpu")
+            os.makedirs(os.path.dirname(opts.path) or ".", exist_ok=True)
+            # Se escribe en «<nombre>.parcial.mp4»; solo si sale bien pasa a llamarse como pediste
+            work = replace(opts, path=partial_path(opts.path))
             project = Project.from_dict(job["snapshot"])
-            args, total = build_command(project, opts, media_tools.ffmpeg(), script, raster=False)
-        except (ValueError, RuntimeError) as exc:
-            job["status"], job["error"] = "error", str(exc)
-            self.changed.emit()
-            self._next()
-            return
-        job["status"], job["total"], job["t0"] = "running", total, time.time()
-        self.current = job
-        self._log: list[str] = []
-        from . import export_runner
-        self.proc = export_runner.make(project, opts, self)      # por trozos a la vez, si se puede
-        self._script = script
-        if self.proc is None:
-            self.proc = export_runner.make_single(project, opts, script, self)
-        self.proc.readyReadStandardOutput.connect(self._read)
-        self.proc.finished.connect(self._finished)
-        export_runner.start(self.proc, args, opts)
+            args, total = build_command(project, work, media_tools.ffmpeg(), script, raster=False)
+            job["status"], job["total"], job["t0"] = "running", total, job.get("t0") or time.time()
+            job["cpu"] = cpu
+            self.current = job
+            self._log: list[str] = []
+            self._script, self._partial, self._final = script, work.path, opts.path
+            self._encoder = opts.encoder
+            export_runner.track_partial(work.path)      # (si Reclaimer se cierra de golpe, se borra al arrancar)
+            proc = export_runner.make(project, work, self)      # por trozos a la vez, si se puede
+            if proc is None:
+                proc = export_runner.make_single(project, work, script, self)
+            self.proc = proc
+            proc.readyReadStandardOutput.connect(self._read)
+            proc.finished.connect(self._finished)
+            export_runner.start(proc, args, work)
+        except Exception as exc:  # noqa: BLE001 - cualquier fallo al preparar: ese trabajo falla y la cola sigue
+            self.proc = None
+            self.current = None
+            export_runner.cleanup(script)
+            job["status"], job["error"] = "error", str(exc) or exc.__class__.__name__
+            return False
         self.changed.emit()
+        return True
 
     def _read(self):
         job = self.current
@@ -122,15 +189,29 @@ class RenderQueue(QObject):
         self.proc = None
         if proc is not None:
             proc.deleteLater()
+        subs_failed = bool(getattr(proc, "subs_failed", False))     # (falló el dibujo de los subtítulos, no FFmpeg)
         from . import export_runner
-        export_runner.cleanup(getattr(self, "_script", ""))      # (las imágenes de los subtítulos, fuera)
+        export_runner.cleanup(getattr(self, "_script", ""))      # (guion, textos y subtítulos, fuera)
+        partial, final = getattr(self, "_partial", ""), getattr(self, "_final", "")
         if job is not None:
-            if job["status"] != "cancelled":
-                if code == 0:
-                    job["status"], job["progress"] = "done", 1.0
-                    job["secs"] = int(time.time() - job.get("t0", time.time()))
-                else:
-                    job["status"], job["error"] = "error", "\n".join(self._log[-8:])
+            if job["status"] != "cancelled" and code == 0 and export_runner.finish_partial(partial, final):
+                job["status"], job["progress"] = "done", 1.0
+                job["secs"] = int(time.time() - job.get("t0", time.time()))
+            else:
+                export_runner.discard_partial(partial)
+                if job["status"] != "cancelled":
+                    if (code != 0 and getattr(self, "_encoder", "") == "gpu" and not job.get("cpu")
+                            and not subs_failed and not self._stop
+                            and export_runner.looks_like_encoder_failure(self._log)):
+                        # La tarjeta gráfica falló (driver, tamaño raro…): se reintenta sola con el procesador
+                        # (no si el fallo es de disco lleno o de un archivo que falta: fallaría igual)
+                        job["status"], job["progress"] = "pending", 0.0
+                        if self._launch(job, cpu=True):
+                            return
+                    if job["status"] != "error":
+                        job["status"] = "error"
+                        job["error"] = ("\n".join(self._log[-8:]) if code != 0
+                                        else "No se pudo poner el nombre final al video.")
         self.changed.emit()
         self._next()
 

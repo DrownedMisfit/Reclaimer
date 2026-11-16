@@ -12,6 +12,25 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QKeySequenceEdit, QLabel, Q
 from . import help as help_ui
 
 PREFIX = "atajos/"
+# Atajos de más que vienen de fábrica, según el principal (main_window los añade con setShortcuts)
+EXTRAS_DE_FABRICA = {"Ctrl+B": ["S"], "Ctrl+0": ["Shift+Z"]}
+# Los de deshacer y rehacer no salen en la lista, pero no se pueden quitar
+RESERVADOS = {"Ctrl+Z": "Deshacer", "Ctrl+Y": "Rehacer", "Ctrl+Shift+Z": "Rehacer"}
+
+
+def extra_permitido(key: str, seq: str) -> bool:
+    """¿Se puede añadir a esa orden el atajo de más «seq» (p. ej. S para dividir)? No si se lo quitaste, ni si otra
+    orden ya lo tiene como suyo."""
+    st = QSettings("EditorIA", "EditorIA")
+    quitados = str(st.value("atajos_sin_extra/" + key, "") or "").split("|")
+    if seq in quitados:
+        return False
+    st.beginGroup(PREFIX.rstrip("/"))
+    try:
+        otros = [str(st.value(k) or "") for k in st.allKeys()]
+    finally:
+        st.endGroup()
+    return QKeySequence(seq).toString(QKeySequence.PortableText) not in otros
 
 
 def saved_shortcut(key: str) -> str | None:
@@ -59,6 +78,7 @@ class ShortcutsDialog(QDialog):
             it.setData(0, Qt.UserRole, key)
             g.addChild(it)
             ed = QKeySequenceEdit(action.shortcut())
+            self._tip_extras(ed, action)
             ed.setMaximumSequenceLength(1) if hasattr(ed, "setMaximumSequenceLength") else None
             ed.editingFinished.connect(lambda k=key: self._changed(k))
             self.tree.setItemWidget(it, 1, ed)
@@ -113,17 +133,34 @@ class ShortcutsDialog(QDialog):
         """Pone el atajo (y lo guarda). Si otra orden lo usa, pregunta y se lo quita a la otra."""
         action, _default = self.actions[key]
         if not seq.isEmpty():
-            other = next((k for k, (a, _d) in self.actions.items() if k != key and a.shortcut() == seq), None)
+            reservado = RESERVADOS.get(seq.toString(QKeySequence.PortableText))
+            if reservado:
+                if ask:
+                    QMessageBox.information(self, "Atajo reservado", f"«{seq.toString(QKeySequence.NativeText)}» "
+                                            f"es el atajo de «{reservado}»: elige otro.")
+                self.editors[key].setKeySequence(action.shortcut())
+                return False
+            other = next((k for k, (a, _d) in self.actions.items() if k != key and seq in a.shortcuts()), None)
             if other is not None:
                 if ask and QMessageBox.question(
                         self, "Atajo en uso", f"«{seq.toString(QKeySequence.NativeText)}» ya es el atajo de "
                         f"«{other.replace('/', ' → ')}».\n¿Quitárselo y ponerlo aquí?") != QMessageBox.Yes:
                     self.editors[key].setKeySequence(action.shortcut())
                     return False
-                self.actions[other][0].setShortcut(QKeySequence())
-                self.settings.setValue(PREFIX + other, "")
-                self.editors[other].setKeySequence(QKeySequence())
-        action.setShortcut(seq)
+                oa = self.actions[other][0]
+                if oa.shortcuts() and oa.shortcuts()[0] != seq:     # (era uno de más: que no vuelva al reiniciar)
+                    q = str(self.settings.value("atajos_sin_extra/" + other, "") or "")
+                    self.settings.setValue("atajos_sin_extra/" + other,
+                                           "|".join(x for x in set(q.split("|") + [seq.toString(
+                                               QKeySequence.PortableText)]) if x))
+                resto = [s for s in oa.shortcuts() if s != seq]     # (solo esa combinación; las demás se quedan)
+                oa.setShortcuts(resto)
+                self.settings.setValue(PREFIX + other, resto[0].toString(QKeySequence.PortableText) if resto else "")
+                self.editors[other].setKeySequence(resto[0] if resto else QKeySequence())
+                self._tip_extras(self.editors[other], oa)
+        extras = [s for s in action.shortcuts()[1:] if s != seq]   # (los de más que tenía, se mantienen)
+        action.setShortcuts([seq] + extras if not seq.isEmpty() else extras)
+        self._tip_extras(self.editors[key], action)
         self.settings.setValue(PREFIX + key, seq.toString(QKeySequence.PortableText))
         self.editors[key].setKeySequence(seq)
         self.msg.setText(f"✓ «{key.split('/', 1)[1].replace('&', '')}»: "
@@ -139,10 +176,20 @@ class ShortcutsDialog(QDialog):
         action, default = self.actions[key]
         self.settings.remove(PREFIX + key)
         seq = QKeySequence(default or "")
-        action.setShortcut(seq)
+        self.settings.remove("atajos_sin_extra/" + key)
+        extras = [QKeySequence(x) for x in EXTRAS_DE_FABRICA.get(default or "", [])
+                  if not any(QKeySequence(x) in a.shortcuts() for k, (a, _d) in self.actions.items() if k != key)]
+        action.setShortcuts(([seq] if not seq.isEmpty() else []) + extras)
         self.editors[key].setKeySequence(seq)
+        self._tip_extras(self.editors[key], action)
         self.msg.setText(f"↺ «{key.split('/', 1)[1].replace('&', '')}» vuelve a "
                          f"{seq.toString(QKeySequence.NativeText) or 'sin atajo'}")
+
+    @staticmethod
+    def _tip_extras(ed, action):
+        """Los atajos de más de una orden (p. ej. S para dividir) se ven al pasar el ratón."""
+        extras = [s.toString(QKeySequence.NativeText) for s in action.shortcuts()[1:]]
+        ed.setToolTip("También: " + " · ".join(extras) if extras else "")
 
     def import_resolve(self, preselect_all: bool = False):
         """⬇ Tus atajos de DaVinci Resolve: lista «Ahora / En tu Resolve» con casillas → aplicar los marcados."""
@@ -276,6 +323,7 @@ class ShortcutsDialog(QDialog):
         if QMessageBox.question(self, "Restablecer", "¿Volver a los atajos de fábrica en todas las órdenes?") \
                 != QMessageBox.Yes:
             return
-        for key in self.actions:
-            self._reset(key)
+        for _vuelta in range(2):                     # (la 2.ª: los de más, ya libres)
+            for key in self.actions:
+                self._reset(key)
         self.msg.setText("↺ Todos los atajos de fábrica.")

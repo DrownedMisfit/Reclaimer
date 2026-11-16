@@ -457,7 +457,7 @@ def guardar_movimiento(fase: dict, nombre: str) -> str:
     import json
     import os
     import re
-    limpio = re.sub(r'[\x00-\x1f\/:*?"<>|]+', " ", nombre)
+    limpio = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', " ", nombre)
     limpio = re.sub(r"\s+", " ", limpio).strip(" .")[:80] or "Movimiento"
     if limpio.lower() in RESERVADOS:
         limpio = "_" + limpio

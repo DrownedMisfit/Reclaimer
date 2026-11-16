@@ -66,12 +66,16 @@ def main():
     c1 = ctrl.add_media([ic], v1.id, 0.0)[0]
     c2 = ctrl.add_media([ii], v2.id, 2.0)[0]
     c3 = ctrl.add_media([iv], v1.id, 8.0)[0]
-    # (2026-10-10, el usuario: sin efectos automáticos al añadir — el fondo es «▦ Relleno», que pones tú)
-    assert p.clips[c1].layout is None, ("horizontal abajo: entero, sin relleno automático", p.clips[c1].layout)
+    # 📱 en vertical, un video horizontal en V1 (sin nada debajo) entra entero con arriba y abajo su imagen borrosa
+    # (▦ Relleno automático, «auto»); lo de encima (la captura) no lo lleva: taparía lo de V1
+    rel = (p.clips[c1].fx or {}).get("relleno") or {}
+    assert rel.get("auto") and p.clips[c1].layout and p.clips[c1].layout.get("fit") == "contain" and         p.clips[c1].layout.get("bg") == "none", ("horizontal abajo: entero con relleno vertical", p.clips[c1].fx,
+                                                 p.clips[c1].layout)
+    assert not (p.clips[c2].fx or {}).get("relleno"), ("la captura de encima, sin relleno", p.clips[c2].fx)
     assert p.clips[c2].layout == dict(transform.FULL, bg="none"), ("captura encima: entera, alrededor se ve lo de "
                                                                     "debajo", p.clips[c2].layout)
     assert p.clips[c3].layout is None, "un clip vertical llena la pantalla sin más"
-    print("✓ al añadir, sin efectos automáticos: horizontal entero · captura encima con lo de debajo alrededor")
+    print("✓ al añadir: horizontal en V1 entero con relleno vertical · captura encima con lo de debajo alrededor")
     t_id = ctrl.add_text(0.5, 3.0, "Gears of War 3 Beta")
     assert p.clips[t_id].text["y"] == 0.29 and not p.clips[t_id].text["box"]
     print("✓ etiqueta de contexto encima del video (como «Gears of War 3 Beta»)")

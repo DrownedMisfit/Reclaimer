@@ -269,6 +269,7 @@ class MainWindow(QMainWindow):
             self.docks["kw_folders"].setVisible(True)
         QTimer.singleShot(0, self.apply_tab_panels)            # 🗂 los paneles de la pestaña con la que se abre
         QTimer.singleShot(0, self._ajustar_paneles)            # ↔ nada cortado por la derecha en ningún panel
+        QTimer.singleShot(0, self.timeline.setFocus)           # (S, Supr, Ctrl+Z… van al editor desde el principio)
         for key, tb in (("top", self._top_bar()), ("pages", self._page_bar())):
             bar = QToolBar(key)
             bar.setObjectName("bar_" + key)
@@ -704,6 +705,7 @@ class MainWindow(QMainWindow):
             # (tras Ctrl+Z o «✓ Quitar todos los avisos», la lista y el dibujo al día)
             self.timeline.cut_issues_changed.connect(
                 lambda _n: self.cut_fix._refresh() if self.cut_fix.isVisible() and self.cut_fix.track_id else None)
+            QTimer.singleShot(0, self._ajustar_paneles)        # (un panel nuevo: tampoco se corta)
         return self.cut_fix
 
     def _sync_vh_menu(self):
@@ -998,6 +1000,7 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.setFixedHeight(int(base * k))
         self.preview.header.setFixedHeight(int(30 * k))
+        QTimer.singleShot(0, self._ajustar_paneles)            # (con otra letra, otros anchos mínimos)
 
     def open_font_size(self):
         from .font_dialog import FontSizeDialog
@@ -1290,7 +1293,7 @@ class MainWindow(QMainWindow):
         self.learner.changed.connect(self._learning_badge)
         self._learning_badge()
 
-        from .shortcuts_dialog import saved_shortcut
+        from .shortcuts_dialog import extra_permitido, saved_shortcut
         self.shortcut_actions = {}     # «Menú/Orden» → (acción, atajo de fábrica): ⌨ Personalizar atajos
 
         def act(menu, text, shortcut, slot, tip=None):
@@ -1319,6 +1322,7 @@ class MainWindow(QMainWindow):
         act(m, "Abrir proyecto…", "Ctrl+O", self.open_project)
         act(m, "Guardar", "Ctrl+S", self.save)
         act(m, "Guardar como…", "Ctrl+Shift+S", self.save_as)
+        act(m, "Cambiar el nombre del proyecto", "F2", lambda: self.preview.title_label.editar())
         act(m, "📋 Guardar como plantilla…", None, self.save_as_template)
         act(m, "Guardar nueva versión (v01, v02…)", "Ctrl+Alt+S", self.save_version)
         act(m, "💾 Guardado y copias de seguridad…", None, lambda: self.saving.open_settings())
@@ -1384,8 +1388,9 @@ class MainWindow(QMainWindow):
         act(m, "Atributos del clip…", None, self._clip_info)
         m.addSeparator()
         a_div = act(m, "Dividir en el cabezal", "Ctrl+B", self._split)      # (Ctrl+B, como en DaVinci Resolve)
-        if a_div.shortcut().toString() == "Ctrl+B":                  # (si no elegiste otro: también la S de siempre)
-            a_div.setShortcuts([QKeySequence("Ctrl+B"), QKeySequence("S")])
+        if a_div.shortcut().toString() == "Ctrl+B" and \
+                extra_permitido(next(k for k, (a, _d) in self.shortcut_actions.items() if a is a_div), "S"):
+            a_div.setShortcuts([QKeySequence("Ctrl+B"), QKeySequence("S")])   # (también la S de siempre)
         act(m, "Eliminar", "Delete", lambda: self._delete(False))
         act(m, "Eliminar y cerrar hueco", "Shift+Delete", lambda: self._delete(True))
         act(m, "⇤ Juntar: todo se pega a la izquierda (canal seleccionado o todo)", "Ctrl++", self._join_right,
@@ -1593,7 +1598,8 @@ class MainWindow(QMainWindow):
         act(m, "Acercar", "+", lambda: self.timeline.zoom(1.5))
         act(m, "Alejar", "-", lambda: self.timeline.zoom(1 / 1.5))
         a_fit = act(m, "Ajustar a la ventana", "Ctrl+0", self.timeline.fit)
-        if a_fit is not None and "Shift+Z" not in [k.toString() for k in a_fit.shortcuts()]:
+        if a_fit is not None and "Shift+Z" not in [k.toString() for k in a_fit.shortcuts()] and \
+                extra_permitido(next(k for k, (a, _d) in self.shortcut_actions.items() if a is a_fit), "Shift+Z"):
             a_fit.setShortcuts(list(a_fit.shortcuts()) + [QKeySequence("Shift+Z")])   # 🔍 Mayús+Z, como en Resolve
         m.addSeparator()
         act(m, "Añadir pista de video", None, lambda: self.ctrl.add_track(TRACK_VIDEO))
@@ -2789,6 +2795,7 @@ class MainWindow(QMainWindow):
             self.engine.user_seek(t)
             self.timeline.set_playhead(t, follow=True)
             self.timeline.flash_clips(ids)
+        QTimer.singleShot(0, self.timeline.setFocus)          # (las teclas, al editor)
 
     def _in_thumb(self, obj) -> bool:
         ed = getattr(self, "_thumb_editor", None)
@@ -2824,6 +2831,7 @@ class MainWindow(QMainWindow):
                     pass
         for k, b in self.page_buttons.items():
             b.setChecked(k == back_to)
+        QTimer.singleShot(0, self.timeline.setFocus)          # (las teclas, al editor; no al nombre del proyecto)
 
     def open_moments(self, text: str = "", at: float | None = None):
         """Abre el buscador de momentos (y busca, si se da un texto). at = dónde insertar lo elegido."""
@@ -3290,8 +3298,8 @@ class MainWindow(QMainWindow):
         if busy:
             self.statusBar().showMessage(f"Espera a que termine (está {busy}) antes de empezar de cero.", 7000)
             return False
-        if getattr(self, "_thumb_page", None) is not None and getattr(self, "_thumb_editor", None):
-            self._thumb_editor.close()            # (la miniatura se guarda en el proyecto viejo, no en el nuevo)
+        if not self.salir_de_paginas():           # (🎬 Escenas / 🖼 Miniatura: se guardan en el proyecto viejo)
+            return False
         return True
 
     def new_project(self):
@@ -3623,7 +3631,7 @@ class MainWindow(QMainWindow):
             fps = p.fps if p.fps in (24, 25, 30, 50, 60) else 60
             opts = ExportOptions(path=path, width=w, height=h, fps=float(fps), codec="h264", encoder="gpu",
                                  bitrate_mbps=target_bitrate(key, w, h), target=key)
-            self.render_queue.add(p, opts, "⚡ " + t["name"])
+            path = self.render_queue.add(p, opts, "⚡ " + t["name"])["opts"]["path"]   # (« (2)» si ya estaba en cola)
             self.render_queue.start()
             self.statusBar().showMessage(f"⚡ Exportando para {t['name']} en segundo plano → {path}", 9000)
         for key in ("youtube", "tiktok", "windows"):
@@ -4128,9 +4136,25 @@ class MainWindow(QMainWindow):
             exportando = dlg_x is not None and dlg_x.exportando()
         except RuntimeError:
             exportando = False
-        if exportando:
-            r = QMessageBox.question(self, "Exportación en curso", "Todavía se está exportando el video.\n"
-                                                                   "¿Cancelar la exportación y cerrar?")
+        # 🚀 La cola de exportación (exportando o con trabajos por hacer) entra en la misma pregunta
+        cola = getattr(self, "_render_queue", None)
+        try:
+            cola_ocupada = cola is not None and cola.busy()
+        except (AttributeError, RuntimeError):
+            cola_ocupada = False
+        if exportando or cola_ocupada:
+            partes = []
+            if exportando:
+                partes.append("Todavía se está exportando el video.")
+            if cola_ocupada:
+                n = cola.pending_count()
+                partes.append("La cola de exportación " + ("está exportando" if cola.running else "tiene trabajos")
+                              + (f" ({n} por exportar)." if n else "."))
+            r = QMessageBox.question(self, "Exportación en curso",
+                                     "\n".join(partes) + "\n\n¿Cancelar " + ("las exportaciones"
+                                     if exportando and cola_ocupada else "la exportación" if exportando
+                                     else "la cola") + " y cerrar?\n(Lo que está a medias se borra; los videos "
+                                     "que ya tenías no se tocan.)")
             if r != QMessageBox.Yes:
                 e.ignore()
                 return
@@ -4160,25 +4184,15 @@ class MainWindow(QMainWindow):
             self._mcp_back_on()
             return
         if exportando:                   # ⬆ ya respondiste todo: ahora sí se para la exportación escondida
-            try:
-                dlg_x._cerrando_app = True
-                dlg_x._oculto = False
-                dlg_x._cancelled = True
-                dlg_x.proc.kill()
-                dlg_x.proc.waitForFinished(3000)
+            try:                         # (y se borran su archivo a medias y sus temporales)
+                dlg_x.abort_for_exit(3000)
             except (AttributeError, RuntimeError):
                 pass
-        from . import export_runner      # 🧹 las imágenes de subtítulos de una exportación a medias, fuera
-        cola = getattr(self, "_render_queue", None)
-        if cola is not None and cola.proc is not None:
+        if cola is not None:             # 🚀 la cola: se para y se borra lo que estaba a medias
             try:
-                cola.stop()
-                cola.proc.waitForFinished(3000)
+                cola.abort(3000)
             except (AttributeError, RuntimeError):
                 pass
-        for obj in (dlg_x, cola):
-            if obj is not None:
-                export_runner.cleanup(getattr(obj, "_script", ""))
         self.saving.stop()               # el guardado en vivo se para antes de cerrar
         self.learner.on_close()          # último resumen; después no queda nada funcionando
         from .task_window import stop_all

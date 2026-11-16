@@ -19,23 +19,68 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from editoria import mcp_tools as T  # noqa: E402
 
 
-def _bridge_file() -> str:
+def _bridge_files() -> list[str]:
+    """Dónde puede estar el archivo del puente, por orden: la carpeta de datos de la versión «todo
+    en uno» (este archivo dentro de app\\, con Reclaimer.exe y datos\\ al lado); la de este Reclaimer; y la copia que
+    Reclaimer deja siempre en %LOCALAPPDATA%\\Reclaimer."""
+    from editoria.core.paths import PROGRAM_DIR
+    out = []
+    if not (os.environ.get("EDITORIA_DATOS") or os.environ.get("RECLAIMER_DATOS")) \
+            and (PROGRAM_DIR.parent / "Reclaimer.exe").exists():
+        out.append(os.path.join(str(PROGRAM_DIR.parent / "datos"), "puente_claude.json"))
     from editoria.core.paths import app_data_dir
-    return os.path.join(str(app_data_dir()), "puente_claude.json")
+    out.append(os.path.join(str(app_data_dir()), "puente_claude.json"))
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    out.append(os.path.join(base, "Reclaimer", "puente_claude.json"))
+    return out
+
+
+def _bridge_file() -> str:
+    """El primero que exista (o el de la carpeta de datos, si no hay ninguno)."""
+    files = _bridge_files()
+    return next((f for f in files if os.path.exists(f)), files[-2])
+
+
+def _connect():
+    """Prueba los archivos del puente EN ORDEN y se queda con el primero que conecta (uno viejo, de un Reclaimer que
+    se cerró de golpe, no tapa la copia del que está abierto). Devuelve (socket, clave) o (None, motivo)."""
+    found = incomplete = False
+    last = None
+    for path in _bridge_files():
+        try:
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            continue
+        found = True
+        try:
+            port, token = int(info["port"]), str(info["token"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            incomplete = True
+            continue
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=10), token
+        except OSError as exc:
+            last = exc
+    if not found:
+        return None, ("Reclaimer no está abierto, o tiene apagado «🤝 Dejar que Claude edite conmigo» (menú Ayuda). "
+                      "Pídele al usuario que lo abra y lo active.")
+    if incomplete and last is None:
+        return None, ("El archivo del puente de Reclaimer está incompleto. Pídele al usuario que apague y vuelva a "
+                      "encender «🤝 Dejar que Claude edite conmigo» (menú Ayuda).")
+    return None, (f"No pude hablar con Reclaimer ({last}). ¿Está abierto y con «🤝 Dejar que Claude edite conmigo» "
+                  "activado?")
 
 
 def call_bridge(tool: str, args: dict, timeout: float = 300.0) -> dict:
     """Manda una orden a Reclaimer y espera la respuesta {"ok", "text", "image"?}."""
+    conn, token = _connect()
+    if conn is None:
+        return {"ok": False, "text": token}
     try:
-        with open(_bridge_file(), encoding="utf-8") as f:
-            info = json.load(f)
-    except (OSError, ValueError):
-        return {"ok": False, "text": "Reclaimer no está abierto, o tiene apagado «🤝 Dejar que Claude edite conmigo» "
-                                     "(menú Ayuda). Pídele al usuario que lo abra y lo active."}
-    try:
-        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=10) as s:
+        with conn as s:
             s.settimeout(timeout)
-            msg = json.dumps({"token": info["token"], "tool": tool, "args": args}, ensure_ascii=False) + "\n"
+            msg = json.dumps({"token": token, "tool": tool, "args": args}, ensure_ascii=False) + "\n"
             s.sendall(msg.encode("utf-8"))
             buf = b""
             while not buf.endswith(b"\n"):

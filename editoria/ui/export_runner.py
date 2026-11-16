@@ -36,16 +36,134 @@ def make_single(project, opts, script: str, parent=None, cues=None):
     return proc
 
 
-ORPHAN_AGE = 12 * 3600      # s: carpetas de imágenes de subtítulos más viejas que esto, de exportaciones que no acabaron
+ORPHAN_AGE = 12 * 3600      # s: temporales más viejos que esto, de exportaciones que no acabaron
+
+# Lo que deja una exportación interrumpida en la carpeta temporal de Reclaimer (nombres exactos):
+ORPHAN_DIRS = r"^((editoria_export_filtro|editoria_cola_\d+|editoria_fotograma_[0-9a-f]+\.filtro" \
+              r"|editoria_escucha_[0-9a-f]+_filtro)_(subs|textos)|exportar_trozos_[0-9a-f]+)$"
+ORPHAN_FILES = r"^((editoria_export_filtro|editoria_cola_\d+)\.(txt|ass)" \
+               r"|editoria_fotograma_[0-9a-f]+\.(filtro\.txt|filtro\.ass|tmp\.mp4)" \
+               r"|editoria_escucha_[0-9a-f]+(\.mp4|_filtro\.txt|_filtro\.ass))$"
+
+
+# ---------------------------------------------------------------- archivos «.parcial» en curso
+# Cada exportación apunta su «<nombre>.parcial.mp4» en datos\temporal (parcial_<pid>_<hash>.txt). Si Reclaimer se
+# cierra de golpe, al arrancar se borran los parciales apuntados cuyo proceso ya no vive (solo esos: nunca se busca
+# por la carpeta del usuario).
+ORPHAN_PARTIAL = r"^parcial_(\d+)_[0-9a-f]{12}\.txt$"
+
+
+def _partial_record(partial: str, pid: int | None = None) -> str:
+    import hashlib
+    h = hashlib.sha1(os.path.normcase(os.path.abspath(partial)).encode("utf-8")).hexdigest()[:12]
+    return os.path.join(str(temp_dir()), f"parcial_{pid or os.getpid()}_{h}.txt")
+
+
+def track_partial(partial: str) -> None:
+    """Apunta que este proceso está escribiendo ese parcial."""
+    try:
+        with open(_partial_record(partial), "w", encoding="utf-8") as f:
+            f.write(os.path.abspath(partial))
+    except OSError:
+        pass
+
+
+def _untrack(partial: str) -> None:
+    try:
+        os.remove(_partial_record(partial))
+    except OSError:
+        pass
+
+
+def finish_partial(partial: str, final: str) -> bool:
+    """Salió bien: el parcial pasa al nombre final (y deja de estar apuntado)."""
+    from ..export.ffmpeg_export import finish_partial as _finish
+    ok = _finish(partial, final)
+    _untrack(partial)
+    return ok
+
+
+def discard_partial(partial: str) -> None:
+    """Cancelada o fallida: el parcial, fuera (y deja de estar apuntado)."""
+    from ..export.ffmpeg_export import discard_partial as _discard
+    if partial:
+        _discard(partial)
+        _untrack(partial)
+
+
+def _process_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))         # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259   # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except (OSError, AttributeError):
+        return True                          # (si no se puede saber, no se borra nada)
+
+
+def sweep_partials() -> None:
+    """Al arrancar: los parciales apuntados por un Reclaimer que ya no vive (cierre de golpe), fuera."""
+    import re
+    pat = re.compile(ORPHAN_PARTIAL)
+    try:
+        root = str(temp_dir())
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        m = pat.match(name)
+        if not m or _process_alive(int(m.group(1))):
+            continue
+        rec = os.path.join(root, name)
+        try:
+            with open(rec, encoding="utf-8") as f:
+                partial = f.read().strip()
+        except OSError:
+            continue
+        if partial.lower().endswith((".parcial.mp4", ".parcial.wav", ".parcial.mov", ".parcial.mkv")):
+            try:
+                os.remove(partial)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue                     # (abierto aún: se probará la próxima vez)
+        try:
+            os.remove(rec)
+        except OSError:
+            pass
+
+
+def looks_like_encoder_failure(lines) -> bool:
+    """¿Merece la pena reintentar con el procesador? No si el fallo es de disco (lleno, sin permiso) o de un archivo
+    que falta: con el procesador fallaría igual."""
+    text = "\n".join(str(x) for x in (lines or [])).lower()
+    return not any(bad in text for bad in ("no space left", "disk full", "not enough space", "espacio insuficiente",
+                                           "no such file", "no existe", "permission denied", "acceso denegado"))
 
 
 def sweep_orphans():
-    """Al arrancar: borra las carpetas de imágenes de subtítulos que dejó una exportación interrumpida (Reclaimer
-    cerrado de golpe, apagón…). Solo las de la ventana Exportar y de la cola, con su nombre exacto, en la carpeta
-    temporal de Reclaimer, y solo si llevan ORPHAN_AGE sin tocarse (otra ventana de Reclaimer podría estar usándolas)."""
+    """Al arrancar: borra lo que dejó una exportación interrumpida (Reclaimer cerrado de golpe, apagón…): carpetas de
+    imágenes de subtítulos y textos, trozos de la exportación en paralelo y guiones de la cola. Solo con su nombre
+    exacto, en la carpeta temporal de Reclaimer, y solo si llevan ORPHAN_AGE sin tocarse (otra ventana de Reclaimer
+    podría estar usándolos)."""
     import re
     import shutil
-    pat = re.compile(r"^(editoria_export_filtro|editoria_cola_\d+)_subs$")
+    sweep_partials()
+    pat_d, pat_f = re.compile(ORPHAN_DIRS), re.compile(ORPHAN_FILES)
     try:
         root = str(temp_dir())
         names = os.listdir(root)
@@ -54,24 +172,36 @@ def sweep_orphans():
     now = time.time()
     for name in names:
         path = os.path.join(root, name)
-        if not pat.match(name) or not os.path.isdir(path):
+        is_dir = os.path.isdir(path)
+        if not (pat_d if is_dir else pat_f).match(name):
             continue
         try:
-            newest = max([os.path.getmtime(path)] + [os.path.getmtime(os.path.join(path, f)) for f in os.listdir(path)])
+            if is_dir:
+                stamps = [os.path.getmtime(path)]
+                for base, _dirs, files in os.walk(path):
+                    stamps += [os.path.getmtime(os.path.join(base, f)) for f in files]
+                newest = max(stamps)
+            else:
+                newest = os.path.getmtime(path)
         except OSError:
             continue
         if now - newest > ORPHAN_AGE:
-            shutil.rmtree(path, ignore_errors=True)
+            if is_dir:
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 def cleanup(script: str):
-    """Borra las imágenes de subtítulos de esa exportación (su carpeta propia)."""
-    import shutil
-    from ..export.ffmpeg_export import subs_dir
+    """Borra lo que cuelga del guion de esa exportación: el guion, sus imágenes de subtítulos y de textos y el .ass."""
+    from ..export.ffmpeg_export import ass_file, cleanup_script, subs_dir, texts_dir
     if script:
         for _ in range(10):              # (Windows suelta los archivos un instante después de cerrar FFmpeg)
-            shutil.rmtree(subs_dir(script), ignore_errors=True)
-            if not os.path.exists(subs_dir(script)):
+            cleanup_script(script)
+            if not any(os.path.exists(p) for p in (subs_dir(script), texts_dir(script), ass_file(script), script)):
                 break
             time.sleep(0.1)
 

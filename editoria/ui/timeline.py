@@ -3982,8 +3982,12 @@ class TimelineWidget(QWidget):
                 menu.addAction("Cortar y propagar\tCtrl+Mayús+X", win._cut_ripple)
             menu.addSeparator()
             # --- eliminar
-            menu.addAction("Eliminar seleccionados\tSupr", lambda: self.ctrl.delete_clips(ids))
-            menu.addAction("Eliminar y propagar\tMayús+Supr", lambda: self.ctrl.delete_clips(ids, ripple=True))
+            if has("_delete"):        # lo mismo que la tecla Supr (con la 🧲 pista magnética, junta todas las pistas)
+                menu.addAction("Eliminar seleccionados\tSupr", lambda: win._delete(False))
+                menu.addAction("Eliminar y propagar\tMayús+Supr", lambda: win._delete(True))
+            else:
+                menu.addAction("Eliminar seleccionados\tSupr", lambda: self.ctrl.delete_clips(ids))
+                menu.addAction("Eliminar y propagar\tMayús+Supr", lambda: self.ctrl.delete_clips(ids, ripple=True))
             kinds = {proj.track(proj.clips[i].track_id).kind for i in self.ctrl.linked_ids(ids) if i in proj.clips}
             if TRACK_AUDIO in kinds and TRACK_VIDEO in kinds and has("_delete_part"):   # imagen + sonido juntos
                 menu.addAction("Eliminar solo el audio", lambda: win._delete_part("audio"))
