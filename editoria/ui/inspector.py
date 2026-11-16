@@ -545,7 +545,6 @@ class InspectorPanel(QWidget):
 
     def _refresh_color(self, c, visual: bool, editable: bool):
         from ..core import color as C
-        self.clip_tabs.setTabVisible(3, visual)
         if not visual:
             return
         self.color_box.setEnabled(editable)
@@ -1224,6 +1223,17 @@ class InspectorPanel(QWidget):
             if len(vis) == 1 and len(aud) == 1:
                 ids = [vis[0].id]
                 self._audio_id = aud[0].id
+        # 🎚 Al elegir OTRO clip: un audio abre su ecualizador (pestaña Audio); un video no se queda en el ecualizador
+        # (va a la pestaña general «Clip»; si estabas en Video o Color, sigues ahí)
+        if len(ids) == 1 and ids != list(getattr(self, "_ids", [])) and ids[0] in p.clips:
+            c0 = p.clips[ids[0]]
+            tr0 = p.track(c0.track_id)
+            m0 = p.media_of(c0)
+            es_audio = (tr0 is not None and tr0.kind == TRACK_AUDIO) or bool(m0 and m0.kind == "audio")
+            if es_audio:
+                self._last_tab = 2
+            elif self._last_tab == 2 and not getattr(self, "prefer_audio", False):   # (en la página Audio, se queda)
+                self._last_tab = 0
         self._ids = ids
         self._refresh()
 
@@ -1298,11 +1308,14 @@ class InspectorPanel(QWidget):
                 has_audio = bool(m and (m.kind == "audio" or m.has_audio))
                 if self._audio_id:
                     self.clip_track.setText(f"{tr.name if tr else ''}  +  🔗 {p.track(ac.track_id).name}")
+                quiero = self._last_tab              # (al ocultar la pestaña actual, Qt salta a otra y la «recuerda»)
                 self.clip_tabs.setTabVisible(1, visual)
                 self.clip_tabs.setTabVisible(2, has_audio)
+                self.clip_tabs.setTabVisible(3, visual)          # (Color; antes de volver a la pestaña deseada)
                 self.clip_tabs.widget(2).setEnabled(editable)
-                if self.clip_tabs.isTabVisible(self._last_tab):
-                    self.clip_tabs.setCurrentIndex(self._last_tab)
+                if self.clip_tabs.isTabVisible(quiero):
+                    self.clip_tabs.setCurrentIndex(quiero)
+                self._last_tab = quiero
                 if has_audio:
                     self._refresh_audio_tab(ac, m)
                 self.btn_track.setVisible(bool(m and m.kind == "video") and visual)

@@ -1058,6 +1058,7 @@ class MainWindow(QMainWindow):
                 return
         for k, b in self.page_buttons.items():
             b.setChecked(k == key)
+        self.inspector.prefer_audio = (key == "fairlight")   # 🎚 en la página Audio, el ecualizador no se va
         if key == "scenes":
             self.open_scenes()
         elif key == "media":
