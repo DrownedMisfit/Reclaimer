@@ -992,6 +992,16 @@ class MainWindow(QMainWindow):
         lay.addSpacing(10)
         lay.addWidget(self.project_title)
         lay.addStretch()
+        # 🖼 En la página Miniatura: exportar siempre a la vista (en su barra, con la ventana estrecha, se escondía)
+        self.btn_export_thumb = QPushButton("⬇ Exportar miniatura")
+        self.btn_export_thumb.setObjectName("primary")
+        self.btn_export_thumb.setToolTip("Guarda la miniatura como imagen (JPG por debajo de 2 MB, el límite de "
+                                         "YouTube, o PNG)")
+        self.btn_export_thumb.clicked.connect(
+            lambda: self._thumb_editor.export() if getattr(self, "_thumb_editor", None) is not None else None)
+        self.btn_export_thumb.setVisible(False)
+        lay.addWidget(self.btn_export_thumb)
+        lay.addSpacing(10)
         self.btn_font = QPushButton("🔠 Letra")
         self.btn_font.setObjectName("flat")
         self.btn_font.setToolTip("Hacer las letras más grandes o más pequeñas (también en Ventana → Tamaño de letra)")
@@ -2489,6 +2499,7 @@ class MainWindow(QMainWindow):
         self.central_stack.setCurrentWidget(ed)
         ed.show()
         ed.setFocus()
+        self.btn_export_thumb.setVisible(True)
         for k, b in self.page_buttons.items():
             b.setChecked(k == "thumb")
         return ed
@@ -2614,6 +2625,7 @@ class MainWindow(QMainWindow):
         """Salir de la página Miniatura: el editor vuelve tal cual (paneles, atajos)."""
         st, self._thumb_page = self._thumb_page, None
         ed = getattr(self, "_thumb_editor", None)
+        self.btn_export_thumb.setVisible(False)
         self.central_stack.setCurrentWidget(self.preview)
         if ed is not None:
             ed._gone = True
