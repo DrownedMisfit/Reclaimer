@@ -857,6 +857,24 @@ class Canvas(QGraphicsView):
             for i in range(1, n):
                 p.drawLine(QPointF(W * i / n, 0), QPointF(W * i / n, H))
                 p.drawLine(QPointF(0, H * i / n), QPointF(W, H * i / n))
+        elif self.guides == "feed":                             # 📱 lo que recorta el feed de inicio en un Short
+            from ..core import thumb_review as R
+            y0, y1 = R.feed_ventana(d)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 150))
+            p.drawRect(QRectF(0, 0, W, y0))
+            p.drawRect(QRectF(0, y1, W, H - y1))
+            p.setPen(QPen(QColor(255, 200, 60, 230), 1.6 * k, Qt.DashLine))
+            p.drawLine(QPointF(0, y0), QPointF(W, y0))
+            p.drawLine(QPointF(0, y1), QPointF(W, y1))
+            f = p.font()
+            f.setPixelSize(max(10, int(H * 0.022)))
+            p.setFont(f)
+            p.setPen(QColor(255, 220, 140))
+            if y0 > H * 0.03:
+                p.drawText(QRectF(0, 0, W, y0), Qt.AlignCenter, "El feed de Shorts recorta esto")
+                p.drawText(QRectF(0, y1, W, H - y1), Qt.AlignCenter, "El feed de Shorts recorta esto")
+            p.setBrush(Qt.NoBrush)
         elif self.guides == "youtube":                          # lo que tapan YouTube y Shorts encima de la imagen
             zones = ([(0.855, 0.86, 0.985, 0.965, "Duración")] if d.get("format") != "short" else
                      [(0.0, 0.0, 1.0, 0.07, "Barra de arriba"), (0.83, 0.42, 0.99, 0.9, "Botones"),
@@ -1708,7 +1726,8 @@ class ThumbnailEditor(QMainWindow):
         tb.addSeparator()
         self.guides_combo = QComboBox()
         for label, key in (("▦ Sin guías", ""), ("▦ Centro", "centro"), ("▦ Tercios", "tercios"),
-                           ("▦ Cuartos", "cuartos"), ("▦ Lo que tapa YouTube", "youtube")):
+                           ("▦ Cuartos", "cuartos"), ("▦ Lo que tapa YouTube", "youtube"),
+                           ("▦ Recorte del feed de Shorts (recomendado)", "feed")):
             self.guides_combo.addItem(label, key)
         self.guides_combo.setToolTip("Guías encima de la miniatura para colocar las cosas: el centro, tercios (regla "
                                      "de los tercios), cuartos, o lo que tapa YouTube (la duración en los videos; "
@@ -1725,6 +1744,8 @@ class ThumbnailEditor(QMainWindow):
         # con ≈ Licuar / ✋ Estirar, al cambiar el zoom cambia la resolución de la vista rápida: se prepara otra vez
         self.canvas.zoomChanged.connect(lambda _z: self._warm_liquify() if self.canvas.tool == "liquify" else None)
         g0 = QSettings("EditorIA", "EditorIA").value("miniatura/guias", "", type=str)
+        if not g0 and self.doc.get("format") == "short":       # (📱 vertical: de entrada, el recorte del feed)
+            g0 = "feed"
         self.guides_combo.setCurrentIndex(max(0, self.guides_combo.findData(g0)))
         spacer = QWidget()
         spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy().Expanding, spacer.sizePolicy().verticalPolicy())
@@ -4112,6 +4133,21 @@ class ThumbnailEditor(QMainWindow):
         lay.addWidget(head)
         row = QHBoxLayout()
         sizes = R.SHORTS_SIZES if self.doc["format"] == "short" else R.YT_SIZES
+        if self.doc["format"] == "short":            # 📱 primero, como sale en el feed de inicio (recortada)
+            col = QVBoxLayout()
+            pic = QLabel()
+            pic.setPixmap(QPixmap.fromImage(R.simulate_feed(self.doc, 208)))
+            pic.setToolTip("En el feed de inicio YouTube enseña el Short más ancho que 9:16: recorta arriba y abajo")
+            col.addWidget(pic, alignment=Qt.AlignTop)
+            t = QLabel(f"<b>{self._title()[:48]}</b><br><span style='color:#9aa1ad'>20 vistas</span>")
+            t.setWordWrap(True)
+            t.setFixedWidth(208)
+            col.addWidget(t)
+            cap = QLabel("Feed de inicio (recorta arriba y abajo)")
+            cap.setObjectName("dim")
+            col.addWidget(cap)
+            col.addStretch()
+            row.addLayout(col)
         for label, width in sizes:
             col = QVBoxLayout()
             im = R.simulate(self.doc, width, self._title())

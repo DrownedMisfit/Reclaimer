@@ -19,6 +19,34 @@ from . import thumbnail as T
 # Tamaños reales en pantalla (ancho en píxeles) donde la gente ve tu miniatura
 YT_SIZES = [("Inicio (escritorio)", 360), ("Móvil", 246), ("Videos sugeridos", 168)]
 SHORTS_SIZES = [("Estante de Shorts", 180), ("Shorts en móvil", 140)]
+# 📱 En el feed de inicio la tarjeta del Short es más ancha que 9:16 (~208×285): YouTube recorta arriba y abajo
+FEED_SHORTS = 0.73            # ancho / alto de esa tarjeta
+
+
+def feed_ventana(doc: dict) -> tuple[float, float]:
+    """(y0, y1) en píxeles del lienzo: la franja que se ve en el feed de Shorts (centrada; lo de fuera se recorta)."""
+    W, H = float(doc["w"]), float(doc["h"])
+    alto = min(H, W / FEED_SHORTS)
+    return (H - alto) / 2, (H + alto) / 2
+
+
+def simulate_feed(doc: dict, width: int) -> QImage:
+    """La miniatura como sale en el feed de inicio: recortada arriba y abajo, con las esquinas redondeadas."""
+    full = T.render(doc, width / doc["w"])
+    y0, y1 = feed_ventana(doc)
+    k = width / doc["w"]
+    top, alto = int(round(y0 * k)), max(1, int(round((y1 - y0) * k)))
+    recorte = full.copy(0, top, full.width(), alto)
+    out = QImage(recorte.size(), QImage.Format_ARGB32_Premultiplied)
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0, 0, out.width(), out.height()), width * 0.05, width * 0.05)
+    p.setClipPath(path)
+    p.drawImage(0, 0, recorte)
+    p.end()
+    return out
 
 
 def _lum(c: QColor) -> float:
@@ -113,6 +141,11 @@ def analyze(doc: dict) -> list[dict]:
     for lay in texts:
         name = lay["text"].replace("\n", " ")[:24]
         b = _bbox(lay)
+        if short:                                           # 📱 el feed de Shorts recorta arriba y abajo
+            y0, y1 = feed_ventana(doc)
+            if b.top() < y0 - 2 or b.bottom() > y1 + 2:
+                out.append({"level": "warn", "text": f"«{name}» se corta en el feed de Shorts (recorta arriba y "
+                            "abajo): bájalo o súbelo a la zona clara de la guía «Recorte del feed».", "fix": None})
         # 2) ¿Se lee en pequeño? (altura de las letras a tamaño de «sugeridos»)
         px = lay["size"] * lay["scale"] * 0.72 * small_w / W
         if px < 9:
