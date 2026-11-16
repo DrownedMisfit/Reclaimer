@@ -64,6 +64,30 @@ def main():
     ins.set_selection([cv.id])
     assert tabs.currentIndex() == 2, f"en la página Audio se queda en el ecualizador ({tabs.currentIndex()})"
     print("✓ en la página Audio, elegir otro clip no te saca del ecualizador")
+    ins.prefer_audio = False
+    from PySide6.QtCore import QSettings
+    QSettings("EditorIA", "EditorIA").remove("secciones/inspector/velocidad")
+    ins.set_selection([ca.id])
+    sec = ins.speed_sec
+    assert tabs.widget(2).isAncestorOf(sec), "con un audio, «Velocidad» va en la pestaña Audio (debajo del ecualizador)"
+    lay = ins._audio_lay
+    pos = [lay.itemAt(i).widget() for i in range(lay.count())]
+    antes = pos[pos.index(sec) - 1]
+    assert antes is not None and getattr(antes, "title", lambda: "")() == "Ecualizador", "justo debajo del ecualizador"
+    sec.head.setChecked(False)
+    assert not sec.body.isVisibleTo(sec)
+    sec.head.setChecked(True)                   # (clic en su cabecera: se abre, como en Resolve)
+    assert sec.body.isVisibleTo(sec)
+    mv.has_audio = False
+    ins.set_selection([cv2.id])
+    assert tabs.widget(0).isAncestorOf(sec), "un video sin sonido: «Velocidad» en la pestaña Clip"
+    print("✓ «🐢 Velocidad» plegable: debajo del ecualizador con sonido, en «Clip» sin sonido; se abre al pulsarla")
+    ins.set_selection([ca.id])                  # tecla R con un audio y el Inspector en otra pestaña
+    tabs.setCurrentIndex(0)
+    sec.head.setChecked(False)
+    ins.focus_speed()
+    assert tabs.currentIndex() == 2 and sec.body.isVisibleTo(sec), (tabs.currentIndex(), sec.body.isVisibleTo(sec))
+    print("✓ tecla R: lleva a la velocidad y la abre, aunque estuvieras en otra pestaña")
     print("TODO OK")
 
 

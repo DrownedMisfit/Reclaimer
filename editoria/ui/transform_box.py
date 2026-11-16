@@ -60,6 +60,23 @@ class TransformBox(QGroupBox):
         self.px.valueChanged.connect(lambda _v: self._pos())
         self.py.valueChanged.connect(lambda _v: self._pos())
         row("Posición", [QLabel("X"), self.px, QLabel("Y"), self.py], "Centrar", self._reset_pos)
+        # ⊕ Centrar (un clic = un solo Ctrl+Z); al moverla en el visor, además, se pega al centro y a los bordes
+        cw = QWidget()
+        ch = QHBoxLayout(cw)
+        ch.setContentsMargins(0, 0, 0, 0)
+        for text, tip, axes in (
+                ("⊕ Centrar", "Pone la capa en el centro del cuadro (en horizontal y en vertical). Al moverla en el "
+                              "visor también se pega sola al centro y a los bordes (Ctrl mientras arrastras: sin imán)",
+                 "xy"),
+                ("↔ Centro horizontal", "Centra la capa de izquierda a derecha (no cambia su altura en el cuadro)",
+                 "x"),
+                ("↕ Centro vertical", "Centra la capa de arriba abajo (no cambia su posición de izquierda a derecha)",
+                 "y")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, a=axes: self.center(a))
+            ch.addWidget(b)
+        f.addRow("Centrar", cw)
         self.rot = _spin(-360, 360, 1, " °", 1)
         self.rot.valueChanged.connect(lambda v: self._set(rot=round(v, 2)))
         row("Rotación", [self.rot], "Sin girar", lambda: self.rot.setValue(0.0))
@@ -187,12 +204,21 @@ class TransformBox(QGroupBox):
         self._apply(b, "⤧ Tamaño normal")
 
     def _reset_pos(self):
+        self.center("xy")
+
+    def center(self, axes: str = "xy"):
+        """⊕ Centra la capa en el cuadro: «xy» en los dos ejes, «x» solo de izquierda a derecha, «y» de arriba abajo."""
         c = self._clip()
         if c is None:
             return
         b = self._box_now(c)
-        b.update(x=0.5 - b["w"] / 2, y=0.5 - b["h"] / 2)
-        self._apply(b, "⤧ Centrar")
+        if "x" in axes:
+            b["x"] = round(0.5 - b["w"] / 2, 4)
+        if "y" in axes:
+            b["y"] = round(0.5 - b["h"] / 2, 4)
+        if c.layout is None:
+            b["bg"] = "none"
+        self._apply(b, {"xy": "⤧ Centrar", "x": "⤧ Centrar en horizontal", "y": "⤧ Centrar en vertical"}[axes])
 
     # ---- relleno
     def _fill_toggled(self, on: bool):

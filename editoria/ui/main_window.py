@@ -70,7 +70,7 @@ T — añadir texto en el cabezal · Ctrl+R — revisar el proyecto<br>
 Con un clip seleccionado: arrastrar en el visor = mover encuadre · rueda = zoom<br><br>
 <b>Proyecto</b><br>
 Ctrl+N nuevo · Ctrl+O abrir · Ctrl+S guardar · Ctrl+Alt+S guardar versión · Ctrl+E exportar<br>
-Ctrl+1 / Ctrl+2 / Ctrl+3 — pestaña 🎬 YouTube / 🎵 Edits / 📱 Shorts (lo de la que dejas queda guardado)<br>
+Ctrl+1 / Ctrl+2 / Ctrl+3 — pestaña 🎬 Video horizontal / 🎵 Edits / 📱 Vertical (lo de la que dejas queda guardado)<br>
 Ctrl+Mayús+R — 🎙 grabar voz en off · Ctrl+Mayús+K — 📑 capítulos para YouTube · Ctrl+Alt+G — 📸 fotograma (PNG)
 """
 
@@ -111,6 +111,8 @@ class MainWindow(QMainWindow):
         self.preview.title_label.renamed.connect(lambda n: self.ctrl.rename_project(n))
         self.workspaces.switched.connect(self.preview.set_guides_space)   # ▦ guías de cada pestaña (Edits/Shorts: 9:16)
         self.workspaces.switched.connect(lambda tab: self.apply_tab_panels(tab))   # 🗂 los paneles de esa pestaña
+        self._barra_shorts()                                              # 📱 Transcribir, Subtítulos… en Shorts
+        self.workspaces.switched.connect(self._al_cambiar_pestaña)
         self.engine = PlaybackEngine(self.ctrl, self.preview, self)
         self.inspector = InspectorPanel(self.ctrl, self.engine)
         help_ui.install(QApplication.instance())
@@ -716,10 +718,121 @@ class MainWindow(QMainWindow):
                           "words": tl.wave_words,
                           "audio_h": tl.audio_h == val}[key])
 
+    # ☰ Icono de cada panel (monocromo) para las pestañas que no caben con su nombre
+    ICONO_PANEL = {"media": "▤", "effects": "✦", "ai": "✧", "moments": "⌕", "clips": "⚷", "kw_folders": "▣",
+                   "inspector": "⚙", "voice": "✂", "transcript": "¶", "subtitles": "❞", "history": "↺",
+                   "scopes": "▥", "guide": "?", "tasks": "◈", "guided": "⌖", "material": "▦", "edit_opts": "♫",
+                   "edit_clips": "♪", "cortes": "✄"}
+
+    def _llenar_menu_paneles(self):
+        """☰ Paneles: todos, agrupados por lado; el que eliges se muestra y se pone delante."""
+        m = self._menu_paneles
+        m.clear()
+        lados = ((Qt.RightDockWidgetArea, "Derecha"), (Qt.LeftDockWidgetArea, "Izquierda"),
+                 (Qt.BottomDockWidgetArea, "Abajo"), (Qt.TopDockWidgetArea, "Arriba"))
+        for area, nombre in lados:
+            docks = [(k, d) for k, d in self.docks.items() if k != "timeline" and not d.isFloating()
+                     and self.dockWidgetArea(d) == area]
+            if not docks:
+                continue
+            m.addSection(nombre)
+            for k, d in docks:
+                a = m.addAction(f"{self.ICONO_PANEL.get(k, '•')}  {self._nombre_panel(d)}",
+                                lambda d_=d: (d_.show(), d_.raise_()))
+                a.setCheckable(True)
+                a.setChecked(d.isVisible() and not d.visibleRegion().isEmpty())
+        flot = [(k, d) for k, d in self.docks.items() if d.isFloating()]
+        if flot:
+            m.addSection("Sueltos")
+            for k, d in flot:
+                m.addAction(f"{self.ICONO_PANEL.get(k, '•')}  {self._nombre_panel(d)}",
+                            lambda d_=d: (d_.show(), d_.raise_()))
+
+    @staticmethod
+    def _nombre_panel(d) -> str:
+        return getattr(d, "nombre", "") or d.windowTitle()
+
+    def _poner_titulo(self, d, texto: str):
+        """El título del panel (lo que sale en su pestaña); el menú «Ventana» sigue con el nombre completo."""
+        if d.windowTitle() != texto:
+            d.setWindowTitle(texto)
+            d.toggleViewAction().setText(self._nombre_panel(d))
+
+    def _pestañas_que_caben(self):
+        """Las pestañas de los paneles: con su nombre si caben; si no, solo su icono (el nombre, al pasar el ratón).
+        (Qt reescribe el texto de cada pestaña con el título del panel: por eso se cambia el título, no la pestaña.)"""
+        from PySide6.QtWidgets import QTabBar
+        por_texto = {}
+        for k, d in self.docks.items():
+            por_texto[self._nombre_panel(d)] = (k, d)
+            if k in self.ICONO_PANEL:
+                por_texto[self.ICONO_PANEL[k]] = (k, d)
+        en_fila = set()                                   # (los que están en una fila de pestañas a la vista)
+        for tb in self.findChildren(QTabBar, options=Qt.FindDirectChildrenOnly):
+            if not tb.isVisible() or not tb.count():
+                continue
+            if not getattr(tb, "_vigilada", False):
+                tb._vigilada = True
+                tb.installEventFilter(self._vigia_pestañas)
+            grupo = [por_texto.get(tb.tabText(i)) for i in range(tb.count())]
+            if any(g is None for g in grupo):
+                continue
+            # (Qt deja filas viejas «visibles» fuera de la ventana: solo cuenta si de verdad está en pestaña con otros)
+            if not any(self.tabifiedDockWidgets(d) for _k, d in grupo):
+                continue
+            fm = tb.fontMetrics()
+            hace_falta = sum(fm.horizontalAdvance(self._nombre_panel(d)) + 36 for _k, d in grupo)
+            iconos = tb.width() > 0 and hace_falta > tb.width()
+            for i, (k, d) in enumerate(grupo):
+                tb.setTabToolTip(i, self._nombre_panel(d))
+                if d.isFloating() or not self.tabifiedDockWidgets(d):   # (una fila vieja aún lo nombra: no cuenta)
+                    continue
+                en_fila.add(k)
+                self._poner_titulo(d, self.ICONO_PANEL.get(k, self._nombre_panel(d)) if iconos
+                                   else self._nombre_panel(d))
+        for k, d in self.docks.items():                   # suelto o solo en su zona (sin pestañas): su nombre
+            if k not in en_fila:
+                self._poner_titulo(d, self._nombre_panel(d))
+
+    def _pestañas_pronto(self, *_a):
+        if not hasattr(self, "_t_pestañas"):
+            return
+        try:
+            self._t_pestañas.start()
+        except RuntimeError:                       # (la ventana se está cerrando)
+            pass
+
     def _dock(self, key: str, title: str, widget: QWidget, closable: bool = True) -> QDockWidget:
         d = QDockWidget(title, self)
         d.setObjectName("dock_" + key)
         d.panel = widget
+        d.nombre = title                                    # (el título puede quedarse en su icono si no cabe)
+        if not hasattr(self, "_t_pestañas"):                # (⚡ una vez: revisar las pestañas tras cada cambio)
+            from PySide6.QtCore import QObject, QEvent
+
+            class _Vigia(QObject):
+                def __init__(self, win):
+                    super().__init__(win)
+                    self.win = win
+
+                def eventFilter(self, obj, ev):
+                    if ev.type() in (QEvent.Resize, QEvent.Show, QEvent.ChildAdded, QEvent.LayoutRequest):
+                        self.win._pestañas_pronto()
+                    return False
+            self._vigia_pestañas = _Vigia(self)
+            self.installEventFilter(self._vigia_pestañas)      # (filas de pestañas nuevas al recolocar paneles)
+            self._t_pestañas = QTimer(self)
+            self._t_pestañas.setSingleShot(True)
+            self._t_pestañas.setInterval(120)
+            self._t_pestañas.timeout.connect(self._pestañas_que_caben)
+            # (Qt vuelve a poner los nombres largos al recolocar paneles sin avisar: un repaso ligero de vez en cuando)
+            self._t_pestañas_ciclo = QTimer(self)
+            self._t_pestañas_ciclo.setInterval(1500)
+            self._t_pestañas_ciclo.timeout.connect(self._pestañas_que_caben)
+            self._t_pestañas_ciclo.start()
+        d.visibilityChanged.connect(self._pestañas_pronto)
+        d.dockLocationChanged.connect(self._pestañas_pronto)
+        d.topLevelChanged.connect(self._pestañas_pronto)
         if key != "timeline":
             # Cada panel puede encogerse (con barra de desplazamiento) en vez de aplastar la línea de tiempo
             from PySide6.QtWidgets import QScrollArea
@@ -818,6 +931,21 @@ class MainWindow(QMainWindow):
         self.docks["media"].raise_()
         self.docks["inspector"].raise_()
         QTimer.singleShot(0, self._apply_dock_sizes)
+        try:
+            self.apply_tab_panels()              # (los paneles que tocan en esta pestaña, no todos)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def salir_de_paginas(self) -> bool:
+        """Antes de cambiar de pestaña o de proyecto, o de cerrar: se sale de 🎬 Escenas (pregunta si hay cambios sin
+        aplicar) y de 🖼 Miniatura (se guarda). False = el usuario canceló."""
+        if getattr(self, "_scenes_state", None) is not None:
+            pg = getattr(self, "_scenes_widget", None)
+            if pg is not None and not pg.volver("edit"):
+                return False
+        if getattr(self, "_thumb_page", None) is not None and getattr(self, "_thumb_editor", None) is not None:
+            self._thumb_editor.close()
+        return True
 
     def apply_font_scale(self):
         """Aplica Ventana → Tamaño de letra (paneles y menús / global) al momento."""
@@ -982,10 +1110,14 @@ class MainWindow(QMainWindow):
         self.btn_show_media.clicked.connect(lambda: self.show_panel(self.library))
         self.project_title = QLabel()
         self.project_title.setObjectName("dim")
-        self.btn_show_inspector = QPushButton("Inspector  ☰")
+        # ☰ Todos los paneles en un menú (las pestañas que no caben se quedan con su icono: sin deslizar)
+        from PySide6.QtWidgets import QMenu
+        self.btn_show_inspector = QPushButton("☰  Paneles")
         self.btn_show_inspector.setObjectName("flat")
-        self.btn_show_inspector.setToolTip("Mostrar el inspector")
-        self.btn_show_inspector.clicked.connect(lambda: self.show_panel(self.inspector))
+        self.btn_show_inspector.setToolTip("Ir a cualquier panel: Inspector, Limpieza, Subtítulos, Historial…")
+        self._menu_paneles = QMenu(self.btn_show_inspector)
+        self._menu_paneles.aboutToShow.connect(self._llenar_menu_paneles)
+        self.btn_show_inspector.setMenu(self._menu_paneles)
         lay.addWidget(self.btn_show_media)
         lay.addStretch()
         lay.addWidget(self.workspaces.bar)
@@ -1155,9 +1287,9 @@ class MainWindow(QMainWindow):
         act(m, "📦 Recopilar proyecto (copia con todos sus archivos)…", None, self.open_collect)
         m.addSeparator()
         # 🗂 Cambiar de pestaña de trabajo con el teclado (lo de la pestaña que dejas queda guardado)
-        act(m, "🎬 Ir a la pestaña YouTube", "Ctrl+1", lambda: self.workspaces.switch("youtube"))
+        act(m, "🎬 Ir a la pestaña Video horizontal", "Ctrl+1", lambda: self.workspaces.switch("youtube"))
         act(m, "🎵 Ir a la pestaña Edits", "Ctrl+2", lambda: self.workspaces.switch("edit"))
-        act(m, "📱 Ir a la pestaña Shorts", "Ctrl+3", lambda: self.workspaces.switch("short"))
+        act(m, "📱 Ir a la pestaña Vertical", "Ctrl+3", lambda: self.workspaces.switch("short"))
         self.menu_move = m.addMenu("↪ Mover este proyecto a")          # cambia su formato y lo lleva a otra pestaña
         self.menu_move.setToolTip("Lleva el proyecto actual a otra pestaña (cambia su formato). Ctrl+Z lo devuelve.")
         self.menu_move.aboutToShow.connect(lambda: self.workspaces.fill_move_menu(self.menu_move))
@@ -1536,7 +1668,7 @@ class MainWindow(QMainWindow):
             self._tab_move_acts[_k] = act(
                 m, f"↪ Cambiar este proyecto a {_t.replace('  ', ' ')}…", None,
                 lambda _=False, k=_k: self.change_project_tab(k),
-                "Lo lleva a esa pestaña con su formato (YouTube 16:9; Edits y Shorts 9:16) y lo QUITA de esta, que queda "
+                "Lo lleva a esa pestaña con su formato (Video horizontal 16:9; Edits y Vertical 9:16) y lo QUITA de esta, que queda "
                 "vacía (así no se carga dos veces). Ctrl+Z devuelve el formato anterior.")
         m.aboutToShow.connect(lambda: [a.setEnabled(k != self.workspaces.current)
                                        for k, a in self._tab_move_acts.items()])
@@ -1715,9 +1847,11 @@ class MainWindow(QMainWindow):
             return
         c = self.ctrl.project.clips[sel[0]]
         v, ok = QInputDialog.getDouble(self, "Cambiar velocidad", "Velocidad en % (100 = normal, 50 = cámara "
-                                       "lenta, 200 = el doble de rápido):", round(c.speed * 100, 1), 1.0, 10000.0, 1)
+                                       "lenta, 200 = el doble de rápido):", round(max(10.0, c.speed * 100), 1),
+                                       10.0, 400.0, 1)
         if ok:
-            self.ctrl.set_speed(sel, speed=v / 100)
+            ripple = getattr(getattr(self.inspector, "ripple_speed", None), "isChecked", lambda: True)()
+            self.ctrl.set_speed(sel, speed=v / 100, ripple=ripple)
 
     def _remove_attributes(self):
         from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout
@@ -2474,6 +2608,10 @@ class MainWindow(QMainWindow):
         a otra página (o ed.close()), todo queda como estaba y la miniatura se guarda con el proyecto."""
         from PySide6.QtGui import QAction, QShortcut
         from .thumbnail_editor import ThumbnailEditor
+        if getattr(self, "_scenes_state", None) is not None:      # (desde 🎬 Escenas: primero se sale de ahí)
+            pg = getattr(self, "_scenes_widget", None)
+            if pg is not None and not pg.volver("thumb"):
+                return None
         self.engine.pause()
         ed = getattr(self, "_thumb_editor", None)
         if ed is None or getattr(ed, "_gone", False):
@@ -3239,6 +3377,130 @@ class MainWindow(QMainWindow):
         elif box.clickedButton() is b_dir:
             os.startfile(str(motor_ia.DATOS_MOTOR if motor_ia.DATOS_MOTOR.is_dir() else motor_ia.ROOT))    # noqa: S606
 
+    # ------------------------------------------------------------ 📱 barra de los Shorts (encima del visor)
+    def _barra_shorts(self):
+        """En la pestaña Shorts, a la vista: 🎙 Transcribir, 💬 Subtítulos, 🔑 Palabras clave y ▦ Encuadrar (los
+        videos horizontales, enteros en el centro con arriba y abajo borroso; también solo, al añadirlos)."""
+        from PySide6.QtWidgets import QMenu, QToolButton
+        st = QSettings("EditorIA", "EditorIA")
+        self.ctrl.encuadre_auto_vertical = st.value("shorts/encuadre_auto", True, type=bool)
+        lay = self.preview.shorts_lay
+
+        def boton(texto, tip, fn):
+            b = QPushButton(texto)
+            b.setObjectName("flat")
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(fn)
+            lay.addWidget(b)
+            return b
+        boton("🎙 Transcribir", "Transcribe la narración (para subtítulos, palabras clave y quitar silencios)",
+              lambda: (self.show_panel(self.ai_panel), self.ai_panel.tabs.setCurrentIndex(0), self.voice.transcribe()))
+        boton("💬 Subtítulos", "Subtítulos grandes para Short (después de transcribir)",
+              lambda: (self.show_panel(self.subtitles), self.subtitles.btn_quick.click()))
+        boton("🔑 Palabras clave", "Crea una carpeta por cada cosa que dices (después de transcribir) para poner su "
+                                  "material justo donde lo nombras",
+              lambda: (self.show_panel(self.library), self.library._kw_auto()))
+        enc = QToolButton()
+        enc.setText("▦ Encuadrar")
+        enc.setToolTip("Los videos horizontales, enteros en el centro con la parte de arriba y la de abajo borrosas "
+                       "(su propia imagen)")
+        enc.setPopupMode(QToolButton.MenuButtonPopup)
+        enc.setFocusPolicy(Qt.NoFocus)
+        enc.clicked.connect(lambda: self._encuadrar_shorts(avisar=True))
+        m = QMenu(enc)
+        auto = m.addAction("Hacerlo solo al añadir videos y al pasar a Vertical")
+        auto.setCheckable(True)
+        auto.setChecked(self.ctrl.encuadre_auto_vertical)
+
+        def cambiar(on):
+            self.ctrl.encuadre_auto_vertical = bool(on)
+            QSettings("EditorIA", "EditorIA").setValue("shorts/encuadre_auto", bool(on))
+        auto.toggled.connect(cambiar)
+        m.addAction("▦ Encuadrar ahora todos los videos", lambda: self._encuadrar_shorts(avisar=True))
+        enc.setMenu(m)
+        lay.addWidget(enc)
+        self._btn_encuadrar = enc
+        # 💬 Subtítulos automáticos (Shorts y Edits): encendido, al añadir un video se transcribe y se ponen solos.
+        # Se recuerda al cerrar Reclaimer. En YouTube los subtítulos siguen siendo a mano.
+        self.btn_subs_auto = QPushButton("💬 Subtítulos auto")
+        self.btn_subs_auto.setObjectName("flat")
+        self.btn_subs_auto.setCheckable(True)
+        self.btn_subs_auto.setFocusPolicy(Qt.NoFocus)
+        self.btn_subs_auto.setChecked(st.value("shorts/subtitulos_auto", True, type=bool))
+        self.btn_subs_auto.setToolTip("Encendido: al añadir un video a Vertical o Edits se transcribe y se le ponen los "
+                                      "subtítulos solos. Se queda como lo dejes, aunque cierres Reclaimer.")
+        self.btn_subs_auto.toggled.connect(
+            lambda on: QSettings("EditorIA", "EditorIA").setValue("shorts/subtitulos_auto", bool(on)))
+        lay.addWidget(self.btn_subs_auto)
+        self.ctrl.clips_placed.connect(self._subtitulos_auto)
+        self._al_cambiar_pestaña(self.workspaces.current)
+
+    def _subtitulos_auto(self, ids):
+        """💬 Video (con sonido) añadido en Shorts o Edits y «Subtítulos auto» encendido: transcribir y subtítulos."""
+        p = self.ctrl.project
+        if p.format not in ("short", "edit") or not self.btn_subs_auto.isChecked():
+            return
+        con_voz = []
+        for cid in ids:
+            c = p.clips.get(cid)
+            m = p.media_of(c) if c is not None else None
+            if m is not None and c.text is None and not c.note.startswith("🎬") and \
+                    (m.kind == "video" and m.has_audio or m.kind == "audio") and \
+                    m.category not in ("Efectos", "Efectos de sonido", "Música"):
+                con_voz.append(cid)
+        if not con_voz or getattr(self.voice, "job", None) is not None:
+            return
+        ids = con_voz                               # (la voz se elige solo entre estos: nada de música o efectos)
+        st = p.subtitles
+        if st.media_id in p.transcripts:
+            return                                  # (ya hay subtítulos, encendidos o apagados por ti: no se tocan)
+        # la voz: la del video que acabas de poner (si la narración elegida no está en la línea de tiempo)
+        usados = {p.clips[c].media_id for c in p.clips}
+        if self.voice.media_id() not in usados:
+            for cid in ids:
+                c = p.clips.get(cid)
+                i = self.voice.media_combo.findData(c.media_id) if c is not None else -1
+                if i >= 0:
+                    self.voice.media_combo.setCurrentIndex(i)
+                    break
+        mid = self.voice.media_id()
+        t = p.transcripts.get(mid) if mid else None
+        if t is not None and t.get("hasta") is not None:   # (a medias: sin preguntar, solo se avisa)
+            self.statusBar().showMessage("💬 La transcripción de esa voz quedó a medias: «🎙 Transcribir» para "
+                                         "terminarla y salen los subtítulos.", 8000)
+            return
+        proyecto = p
+
+        def lanzar():                               # (al dispararse, se vuelve a mirar: mismo proyecto y sin trabajos)
+            if self.ctrl.project is proyecto and getattr(self.voice, "job", None) is None and \
+                    self.btn_subs_auto.isChecked():
+                self.subtitles.quick_short()
+        QTimer.singleShot(400, lanzar)              # (transcribe si hace falta y los pone)
+
+    def _encuadrar_shorts(self, avisar: bool = False) -> int:
+        if self.ctrl.project.height <= self.ctrl.project.width:
+            if avisar:
+                self.statusBar().showMessage("▦ Esto es para proyectos verticales (Vertical y Edits).", 5000)
+            return 0
+        try:
+            n = self.ctrl.encuadrar_shorts()
+        except Exception as exc:  # noqa: BLE001 - p. ej. un clip bloqueado
+            self.statusBar().showMessage(str(exc), 6000)
+            return 0
+        if n or avisar:
+            self.statusBar().showMessage(f"▦ {n} video{'s' if n != 1 else ''} encuadrado{'s' if n != 1 else ''} "
+                                         "con arriba y abajo borroso (Ctrl+Z para quitarlo)." if n else
+                                         "▦ No hay videos horizontales sin encuadrar.", 6000)
+        return n
+
+    def _al_cambiar_pestaña(self, tab: str):
+        # (el encuadre automático va al pasar el proyecto a Shorts y al añadir videos, no al entrar en la pestaña:
+        # si quitaste el fondo borroso de un clip, no vuelve solo)
+        self.preview.shorts_bar.setVisible(tab in ("short", "edit"))        # (Shorts y Edits)
+        if hasattr(self, "_btn_encuadrar"):
+            self._btn_encuadrar.setVisible(tab in ("short", "edit"))
+
     def abrir_motor_instalador(self, reparar: bool = False, forzar: bool = False):
         """◈ La ventana de instalar el motor (una sola: si ya está abierta, se trae delante)."""
         from . import motor_install_dialog
@@ -3342,8 +3604,20 @@ class MainWindow(QMainWindow):
     def export(self):
         """Antes de exportar se revisa el proyecto; si hay avisos importantes se muestran (audit_dialog.revision_previa)."""
         from .audit_dialog import revision_previa
+        previo = getattr(self, "_export_dlg", None)
+        try:
+            en_marcha = previo is not None and previo.exportando()
+        except RuntimeError:
+            en_marcha = False
+        if en_marcha:                                # (ya hay una exportación escondida: se enseña esa, no otra)
+            previo._oculto = False
+            previo.show()
+            previo.raise_()
+            return
         if revision_previa(self):
-            ExportDialog(self.ctrl, self).exec()
+            # (guardado en la ventana: con «🖼 Ir a Miniatura mientras exporta» el diálogo se esconde y sigue vivo)
+            self._export_dlg = ExportDialog(self.ctrl, self)
+            self._export_dlg.exec()
 
     def open_audit(self):
         from .audit_dialog import AuditDialog
@@ -3430,6 +3704,7 @@ class MainWindow(QMainWindow):
         """Si el programa se cerró de golpe la última vez, ofrece recuperar el autoguardado."""
         self.workspaces.start()          # 🗂 la pestaña donde estabas, con su proyecto
         self.preview.set_guides_space(self.workspaces.current)
+        self._al_cambiar_pestaña(self.workspaces.current)    # (📱 la barra si arrancas en Shorts o Edits)
         lock, auto = session_lock_path(), autosave_path()
         if lock.exists() and auto.exists():
             r = QMessageBox.question(
@@ -3802,6 +4077,24 @@ class MainWindow(QMainWindow):
             win.close()
             self._second_closing = False
         self.engine.pause()
+        # 🎬 Escenas con cambios sin aplicar: pregunta (Cancelar = no se cierra)
+        if getattr(self, "_scenes_state", None) is not None:
+            pg = getattr(self, "_scenes_widget", None)
+            if pg is not None and not pg.volver("edit"):
+                e.ignore()
+                return
+        # ⬆ Una exportación escondida («🖼 Ir a Miniatura mientras exporta»): se pregunta ahora y se para al final
+        dlg_x = getattr(self, "_export_dlg", None)
+        try:
+            exportando = dlg_x is not None and dlg_x.exportando()
+        except RuntimeError:
+            exportando = False
+        if exportando:
+            r = QMessageBox.question(self, "Exportación en curso", "Todavía se está exportando el video.\n"
+                                                                   "¿Cancelar la exportación y cerrar?")
+            if r != QMessageBox.Yes:
+                e.ignore()
+                return
         if self._thumb_page is not None and getattr(self, "_thumb_editor", None) is not None:
             self._thumb_editor.close()            # 🖼 sale del taller (se guarda) y los paneles vuelven a su sitio
         try:
@@ -3827,6 +4120,15 @@ class MainWindow(QMainWindow):
             e.ignore()
             self._mcp_back_on()
             return
+        if exportando:                   # ⬆ ya respondiste todo: ahora sí se para la exportación escondida
+            try:
+                dlg_x._cerrando_app = True
+                dlg_x._oculto = False
+                dlg_x._cancelled = True
+                dlg_x.proc.kill()
+                dlg_x.proc.waitForFinished(3000)
+            except (AttributeError, RuntimeError):
+                pass
         self.saving.stop()               # el guardado en vivo se para antes de cerrar
         self.learner.on_close()          # último resumen; después no queda nada funcionando
         from .task_window import stop_all

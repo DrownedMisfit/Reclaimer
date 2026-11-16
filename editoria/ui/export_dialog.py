@@ -87,13 +87,20 @@ class ExportDialog(QDialog):
         from PySide6.QtWidgets import QButtonGroup, QWidget
         self.targets = QButtonGroup(self)
         trow = QHBoxLayout()
-        for key, label in [(k, t["name"]) for k, t in TARGETS.items()] + [("custom", "⚙ Personalizado")]:
+        for key, label, apps in [(k, t["name"], t.get("apps", "")) for k, t in TARGETS.items()] +                 [("custom", "⚙ Personalizado", "tú eliges todo")]:
             b = QPushButton(label)
             b.setCheckable(True)
             b.setMinimumHeight(38)
             b.setProperty("target", key)
             self.targets.addButton(b)
-            trow.addWidget(b)
+            col = QVBoxLayout()                       # el botón y, debajo, para qué apps sirve
+            col.setSpacing(2)
+            col.addWidget(b)
+            pie = QLabel(apps)
+            pie.setObjectName("dim")
+            pie.setAlignment(Qt.AlignCenter)
+            col.addWidget(pie)
+            trow.addLayout(col)
         self.targets.buttonClicked.connect(lambda b: self._apply_target(b.property("target")))
         self.target_info = QLabel("")
         self.target_info.setWordWrap(True)
@@ -175,8 +182,16 @@ class ExportDialog(QDialog):
         self.btn_open = QPushButton("Abrir carpeta")
         self.btn_open.setVisible(False)
         self.btn_open.clicked.connect(self._reveal)
+        # 🖼 Mientras exporta: ir a hacer la miniatura (el diálogo se esconde y vuelve al terminar)
+        self.btn_mini = QPushButton("🖼 Ir a Miniatura mientras exporta")
+        self.btn_mini.setToolTip("Sigue exportando en segundo plano (el avance sale abajo, en la barra de estado) y "
+                                 "vuelve aquí al terminar")
+        self.btn_mini.setVisible(False)
+        self.btn_mini.clicked.connect(self._a_miniatura)
+        self._oculto = False
         buttons = QHBoxLayout()
         buttons.addWidget(self.btn_open)
+        buttons.addWidget(self.btn_mini)
         buttons.addStretch()
         buttons.addWidget(self.btn_close)
         buttons.addWidget(self.btn_queue)
@@ -199,9 +214,15 @@ class ExportDialog(QDialog):
                      "YouTube 1080p")
         self.preset.setCurrentText(match)
         self._apply_preset(match)
-        # El último destino que usaste (si no, YouTube)
-        last = str(st.value("exportar/destino", "youtube"))
-        self._apply_target(last if last in TARGETS or last == "custom" else "youtube")
+        # 📱 Proyecto vertical (Shorts, Edits): «▯ Vertical» elegido solo. Si no, el último destino que usaste (sin
+        # quedarse en «Vertical» con un video horizontal)
+        vertical = p.height > p.width               # (el último destino, recordado aparte para vertical y horizontal)
+        clave = "exportar/destino_vertical" if vertical else "exportar/destino_horizontal"
+        last = str(st.value(clave, "tiktok" if vertical else str(st.value("exportar/destino", "youtube"))))
+        if last not in TARGETS and last != "custom" or (last == "tiktok" and not vertical):
+            last = "tiktok" if vertical else "youtube"
+        self._clave_destino = clave
+        self._apply_target(last)
 
     def _apply_target(self, key: str):
         """Un destino: pone tamaño, 60 FPS (o los del proyecto), códec, bitrate y el nombre del archivo."""
@@ -209,6 +230,8 @@ class ExportDialog(QDialog):
         for b in self.targets.buttons():
             b.setChecked(b.property("target") == key)
         QSettings("EditorIA", "EditorIA").setValue("exportar/destino", key)
+        if getattr(self, "_clave_destino", None):
+            QSettings("EditorIA", "EditorIA").setValue(self._clave_destino, key)
         custom = key not in TARGETS
         self.advanced.setVisible(custom)
         if custom:
@@ -367,7 +390,13 @@ class ExportDialog(QDialog):
     def _run(self, opts):
         script = os.path.join(str(_temp_dir()), "editoria_export_filtro.txt")
         try:
-            project = self.ctrl.project
+            # una COPIA del proyecto tal como está al pulsar Exportar: si mientras tanto cambias de pestaña o editas
+            # (con «🖼 Ir a Miniatura»), lo que se exporta no se mezcla; el reintento con el procesador usa la misma
+            import copy
+            base = getattr(self, "_reintento_base", None) or copy.deepcopy(self.ctrl.project)
+            self._reintento_base = None
+            self._proyecto = base
+            project = base
             rng = project.marked_range() if self.only_marked.isChecked() else None
             if rng:
                 from ..core.project_tools import slice_project
@@ -394,6 +423,7 @@ class ExportDialog(QDialog):
         export_runner.start(self.proc, args, opts)
         self.btn_export.setEnabled(False)
         self.btn_close.setText("Cancelar")
+        self.btn_mini.setVisible(hasattr(self.parent(), "go_page"))
         self.status.setText(f"Exportando en {self.proc.n} trozos a la vez…" if parallel else "Exportando…")
 
     def _read(self):
@@ -412,6 +442,8 @@ class ExportDialog(QDialog):
                     left = elapsed / frac - elapsed
                     self.status.setText(f"Exportando… {fmt_time(secs, False)} de {fmt_time(self.total, False)}"
                                         f" · quedan ~{int(left)} s")
+                    if self._oculto and self.parent() is not None:      # (en Miniatura: el avance, abajo)
+                        self.parent().statusBar().showMessage(f"⬆ {frac * 100:.0f} % · " + self.status.text(), 5000)
             elif not line.startswith(("frame=", "fps=", "stream_", "bitrate=", "total_size=",
                                       "out_time=", "dup_frames=", "drop_frames=", "speed=", "progress=")):
                 self._log.append(line)
@@ -420,6 +452,7 @@ class ExportDialog(QDialog):
     def _finished(self, code, _status):
         self.btn_export.setEnabled(True)
         self.btn_close.setText("Cerrar")
+        self.btn_mini.setVisible(False)
         proc, self.proc = self.proc, None
         if proc is not None:
             proc.deleteLater()
@@ -431,7 +464,7 @@ class ExportDialog(QDialog):
             try:          # 📝 descripción completa (capítulos, créditos, tu pie, hashtags) junto al video
                 from ..core import description as DS
                 from .description_dialog import prefs
-                pr = self.ctrl.project
+                pr = getattr(self, "_proyecto", None) or self.ctrl.project     # (el que se exportó)
                 par, pie = prefs(pr, self.ctrl.path)
                 texto = DS.default_text(pr, par, pie)
                 if texto.strip():
@@ -448,6 +481,7 @@ class ExportDialog(QDialog):
             # La tarjeta gráfica falló (driver, tamaño raro…): se reintenta sola con el procesador
             from dataclasses import replace
             self._retried_cpu = True
+            self._reintento_base = getattr(self, "_proyecto", None)      # (el mismo proyecto, no el de ahora)
             self._run(replace(self._opts, encoder="cpu"))
             self.status.setText("La tarjeta gráfica no pudo; exportando con el procesador (más lento, muy seguro)…")
             return
@@ -458,8 +492,39 @@ class ExportDialog(QDialog):
             if self._opts.encoder == "gpu":
                 self.status.setText("✗ La exportación falló. Prueba con «Codificar con: Procesador». Detalles:")
         self._cancelled = False
+        if self._oculto:                          # (estabas en Miniatura: vuelve con el resultado, sin robar el foco)
+            self._oculto = False
+            self.show()
+            self.raise_()
+            win = self.parent()
+            if win is not None and hasattr(win, "statusBar"):
+                win.statusBar().showMessage("⬆ " + self.status.text().splitlines()[0], 8000)
 
     _cancelled = False
+
+    def exportando(self) -> bool:
+        return self.proc is not None
+
+    def reject(self):
+        """Esc / cerrar con la exportación en marcha: se esconde y sigue (vuelve al terminar); sin exportar, se cierra."""
+        if self.proc is not None:
+            self._oculto = True
+            self.hide()
+            win = self.parent()
+            if win is not None and hasattr(win, "statusBar"):
+                win.statusBar().showMessage("⬆ Sigue exportando; al terminar vuelve la ventana de exportar.", 8000)
+            return
+        super().reject()
+
+    def _a_miniatura(self):
+        """🖼 Esconde el diálogo (la exportación sigue: FFmpeg va aparte) y abre la página Miniatura."""
+        win = self.parent()
+        self._oculto = True
+        self.hide()
+        if win is not None and hasattr(win, "go_page"):
+            win.go_page("thumb")
+            win.statusBar().showMessage("⬆ " + self.status.text() + " — al terminar vuelve la ventana de exportar.",
+                                        8000)
 
     def _close_or_cancel(self):
         if self.proc is not None:
@@ -472,6 +537,10 @@ class ExportDialog(QDialog):
         subprocess.Popen(["explorer", "/select,", os.path.normpath(self._opts.path)])
 
     def closeEvent(self, e):
+        if self.proc is not None and not getattr(self, "_cerrando_app", False):
+            e.ignore()                           # (la X, como Esc: sigue exportando escondida; «Cancelar» la para)
+            self.reject()
+            return
         if self.proc is not None:
             self._cancelled = True
             self.proc.kill()

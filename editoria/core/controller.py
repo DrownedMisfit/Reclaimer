@@ -538,6 +538,16 @@ class ProjectController(QObject):
                     continue
                 if c.layout is None or (c.layout.get("fit") in auto and c.origin == ORIGIN_AI):
                     c.layout = self._auto_layout(p, p.media_of(c), c.track_id)
+            if p.height > p.width and self.encuadre_auto_vertical:  # 📱 al pasar a vertical: arriba y abajo borroso
+                from . import fill as FILL
+                for c in p.clips.values():
+                    if self._horizontal_sin_encuadre(p, c) and not c.locked and not p.track(c.track_id).locked:
+                        self._poner_relleno(c, FILL.DEFAULT)
+            elif p.height <= p.width:               # (el relleno que puso el vertical, fuera: en 16:9 alarga el render)
+                for c in p.clips.values():
+                    if ((c.fx or {}).get("relleno") or {}).get("auto") and not c.locked and                             not p.track(c.track_id).locked:
+                        fx = {k: v for k, v in c.fx.items() if k != "relleno"}
+                        c.fx = fx or None
             st = p.subtitles
             if fmt in ("short", "edit") and st.preset == "YouTube clásico":
                 from .subtitles import SHORTS
@@ -736,6 +746,12 @@ class ProjectController(QObject):
                 if m is not None and m.kind == KIND_AUDIO and m.category in ("Efectos", "Efectos de sonido") and \
                         c.volume == 1.0:
                     c.volume = 0.5
+            if self.encuadre_auto_vertical and p.height > p.width:    # 📱 vertical (Vertical/Edits): fondo borroso
+                from . import fill as FILL
+                for cid in hechos or []:
+                    c = p.clips.get(cid)
+                    if c is not None and self._horizontal_sin_encuadre(p, c):
+                        self._poner_relleno(c, FILL.DEFAULT)
             return hechos
 
         n = len(media_ids)
@@ -2445,6 +2461,49 @@ class ProjectController(QObject):
             return n
 
         return self._edit("Eliminar todos los huecos de la pista", fn)
+
+    def quitar_encuadre(self, clip_ids: list[str]):
+        """🗑 Quita los fotogramas clave de zoom y de posición (el encuadre automático de los Shorts pone decenas)."""
+        def fn(p: Project):
+            for cid in clip_ids:
+                c = p.clips.get(cid)
+                if c is None:
+                    continue
+                self._check_clip(p, c)
+                c.zoom_kf, c.layout_kf = [], []          # (listas nuevas: no compartidas entre clips)
+        return self._edit("Quitar los fotogramas clave de zoom y posición", fn)
+
+    def quitar_sonido(self, clip_ids: list[str]) -> int:
+        """🔇 Quita el sonido de esos videos: borra su audio vinculado (la imagen se queda) y deja el video a volumen 0
+        (un video sin vínculo con sonido dentro suena por sí mismo). Devuelve cuántos videos."""
+        def fn(p: Project):
+            hechos = 0
+            borrar = set()
+            videos = []
+            tenia = set()                                # (los videos a los que se les quitó su audio)
+            for cid in clip_ids:
+                c = p.clips.get(cid)
+                if c is None or p.track(c.track_id).kind != TRACK_VIDEO or c.text is not None:
+                    continue
+                self._check_clip(p, c)
+                videos.append(c)
+                for o in self.partners(p, c):
+                    if p.track(o.track_id).kind == TRACK_AUDIO:
+                        self._check_clip(p, o)
+                        borrar.add(o.id)
+                        tenia.add(c.id)
+            for oid in borrar:
+                del p.clips[oid]
+            for c in videos:
+                m = p.media_of(c)
+                if c.id in tenia or (m is not None and m.has_audio):
+                    c.volume = 0.0                       # 🔇 ni en la vista previa ni al exportar
+                    c.vol_kf = []
+                    hechos += 1
+                if c.link and not self.partners(p, c):   # (sin pareja ya: el vínculo fuera)
+                    c.link = ""
+            return hechos
+        return self._edit("Quitar el sonido del video", fn)
 
     def set_clip_props(self, clip_ids: list[str], text: str, **props):
         def fn(p: Project):
@@ -4164,13 +4223,18 @@ class ProjectController(QObject):
                 fx = dict(c.fx or {})
                 if params:
                     fx["relleno"] = {k: round(float(v), 3) for k, v in params.items()}
+                    fx.pop("relleno_no", None)
                     lay = dict(c.layout or transform.FULL)
                     if lay.get("fit") in ("blurfill", "mirrorfill"):
                         lay["fit"] = "contain"
                     lay["bg"] = "none"
                     c.layout = lay
-                else:
+                elif "relleno" in fx:
                     fx.pop("relleno", None)
+                    fx["relleno_no"] = 1               # (lo quitaste tú: el encuadre automático no lo vuelve a poner)
+                if params and c.layout and c.layout.get("follow"):    # (relleno visible: «sigue la acción» fuera)
+                    c.layout = {k: v for k, v in c.layout.items() if k != "follow"}
+                    c.layout["fit"] = "contain"
                 c.fx = fx or None
         return self._edit(text, fn)
 
@@ -4187,9 +4251,68 @@ class ProjectController(QObject):
                 lay.update(fit="cover", follow=[dict(k) for k in kf])
                 lay.pop("bg", None)
                 c.layout = lay
+                if (c.fx or {}).get("relleno"):          # (llena la pantalla: un relleno detrás no se vería)
+                    c.fx = {k: v for k, v in c.fx.items() if k != "relleno"} or None
             elif c.layout and "follow" in c.layout:
                 c.layout = {k: v for k, v in c.layout.items() if k != "follow"}
         return self._edit(text, fn)
+
+    # ------------------------------------------------- 📱 Shorts: encajar videos horizontales con fondo borroso
+    encuadre_auto_vertical = True    # (lo pone la ventana desde «▦ Encuadrar» → «solo al añadir videos»)
+
+    @staticmethod
+    def _horizontal_sin_encuadre(p: Project, c) -> bool:
+        """Un video o imagen horizontal en una pista de video, sin relleno ni «sigue la acción» ni animación propia."""
+        if c.text is not None or p.track(c.track_id) is None or p.track(c.track_id).kind != TRACK_VIDEO:
+            return False
+        m = p.media_of(c)
+        if m is None or m.kind not in (KIND_VIDEO, KIND_IMAGE) or not m.width or not m.height or m.width <= m.height:
+            return False
+        from . import generators
+        if generators.is_generated(m) or m.id in (p.compounds or {}):
+            return False                                   # (colores, degradados, capas de ajuste, compuestos)
+        if (c.fx or {}).get("relleno") or (c.fx or {}).get("relleno_no") or c.layout_kf:
+            return False
+        lay = c.layout
+        if lay:                                            # colocado a mano (caja, recorte, giro, «cubrir»): se respeta
+            caja = tuple(round(float(lay.get(k, d)), 3) for k, d in (("x", 0), ("y", 0), ("w", 1), ("h", 1)))
+            if caja != (0.0, 0.0, 1.0, 1.0) or lay.get("follow") or lay.get("rot") or lay.get("crop") or \
+                    lay.get("fit") == "cover":
+                return False
+        if m.kind == KIND_IMAGE:                           # una imagen solo en la pista de video de más abajo
+            primera = max((i for i, t in enumerate(p.tracks) if t.kind == TRACK_VIDEO), default=None)
+            if primera is None or p.track_index(c.track_id) != primera:
+                return False
+        return True
+
+    @staticmethod
+    def _poner_relleno(c, params: dict):
+        from . import transform
+        fx = dict(c.fx or {})
+        fx["relleno"] = {**{k: round(float(v), 3) for k, v in params.items()}, "auto": 1}   # (auto: lo puso Shorts)
+        lay = dict(c.layout or transform.FULL)
+        if lay.get("fit") in ("blurfill", "mirrorfill"):
+            lay["fit"] = "contain"
+        lay["bg"] = "none"
+        c.layout = lay
+        c.fx = fx
+
+    def encuadrar_shorts(self, clip_ids: list[str] | None = None) -> int:
+        """▦ En un proyecto vertical, los videos horizontales se ven enteros en el centro con la parte de arriba y la
+        de abajo con su propia imagen borrosa (como tus Shorts). Sin ids: todos los que aún no lo tengan."""
+        from . import fill as FILL
+        p = self.project
+        ids = [cid for cid in (clip_ids if clip_ids is not None else list(p.clips))
+               if cid in p.clips and self._horizontal_sin_encuadre(p, p.clips[cid])
+               and not p.clips[cid].locked and not p.track(p.clips[cid].track_id).locked]
+        if not ids:
+            return 0
+
+        def fn(p: Project):
+            for cid in ids:
+                self._poner_relleno(p.clips[cid], FILL.DEFAULT)
+        self._edit("▦ Encuadrar para Shorts (fondo borroso)", fn)
+        return len(ids)
 
     def set_layout(self, clip_ids: list[str], layout: dict | None, text: str = "Disposición en pantalla"):
         def fn(p: Project):

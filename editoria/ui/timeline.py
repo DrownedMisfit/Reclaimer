@@ -1233,7 +1233,6 @@ class TimelineWidget(QWidget):
                   and proj.track(proj.clips[i].track_id).kind == kind}
         if len(pistas) != 1:
             return None
-        n = len(proj.tracks)
         if kind == TRACK_VIDEO:
             first = next((i for i, t in enumerate(proj.tracks) if t.kind == TRACK_VIDEO), None)
             if first is None:
@@ -2810,11 +2809,14 @@ class TimelineWidget(QWidget):
             p.fillRect(r, QBrush(QColor(217, 164, 0, 60), Qt.BDiagPattern))
         self._paint_curve(p, c, r)
         self._paint_fades(p, c, r, bar_h)
-        # Fotogramas clave del zoom: rombos abajo
-        if len(c.zoom_kf) >= 2 and r.width() > 12:
+        # Fotogramas clave del zoom: rombos abajo. Solo en el clip SELECCIONADO y nunca pegados (el encuadre automático
+        # de los Shorts pone decenas: juntos parecían una pista de audio naranja encima del video)
+        ver_kf = c.id in self.selected and not (dim or ghost)
+        if ver_kf and len(c.zoom_kf) >= 2 and r.width() > 12:
             p.setPen(QPen(QColor("black"), 1))
             p.setBrush(QColor("#ffd166"))
             yk = r.bottom() - 6
+            ultimo = -1e9
             for k in c.zoom_kf:
                 if kind == KIND_IMAGE:
                     local = k["t"]
@@ -2825,14 +2827,16 @@ class TimelineWidget(QWidget):
                 else:
                     local = (k["t"] - c.source_in) / c.speed
                 xk = r.left() + local * self.pps
-                if r.left() - 1 <= xk <= r.right() + 1:
+                if r.left() - 1 <= xk <= r.right() + 1 and xk - ultimo >= 14:
+                    ultimo = xk
                     p.drawPolygon(QPolygonF([QPointF(xk, yk - 5), QPointF(xk + 5, yk),
                                              QPointF(xk, yk + 5), QPointF(xk - 5, yk)]))
-        # 🎞 Claves de posición y tamaño: rombos azules (encima de los del zoom)
-        if c.layout_kf and r.width() > 12:
+        # 🎞 Claves de posición y tamaño: rombos azules (encima de los del zoom; igual: solo seleccionado, separados)
+        if ver_kf and c.layout_kf and r.width() > 12:
             p.setPen(QPen(QColor("black"), 1))
             p.setBrush(QColor("#5ad1ff"))
             yk = r.bottom() - 17
+            ultimo = -1e9
             for k in c.layout_kf:
                 if kind == KIND_IMAGE:
                     local = k["t"]
@@ -2843,7 +2847,8 @@ class TimelineWidget(QWidget):
                 else:
                     local = (k["t"] - c.source_in) / c.speed
                 xk = r.left() + local * self.pps
-                if r.left() - 1 <= xk <= r.right() + 1:
+                if r.left() - 1 <= xk <= r.right() + 1 and xk - ultimo >= 14:
+                    ultimo = xk
                     p.drawPolygon(QPolygonF([QPointF(xk, yk - 5), QPointF(xk + 5, yk),
                                              QPointF(xk, yk + 5), QPointF(xk - 5, yk)]))
         p.restore()
@@ -4034,6 +4039,9 @@ class TimelineWidget(QWidget):
                     sa = menu.addAction("✂ Eliminar silencios (y juntar lo de detrás)…	Ctrl+Mayús+Supr", win.open_silence)
                     sa.setToolTip("Quita los silencios de este audio y pega lo de detrás (como el ripple de Resolve). "
                                   "La IA reconoce tu voz: no se come el principio ni el final de las palabras.")
+                pa = menu.addAction("🎭 PNGTuber con esta voz…", lambda c_id=clip.id: __import__(
+                    "editoria.ui.pngtuber_dialog", fromlist=["abrir"]).abrir(win, c_id))
+                pa.setToolTip("Tu avatar PNG abre y cierra la boca con esta voz y parpadea (se exporta así)")
             menu.addSeparator()
             cm = menu.addMenu("Color de clip")
             for name, col in self.CLIP_LABELS:
@@ -4055,6 +4063,22 @@ class TimelineWidget(QWidget):
                        and proj.media_of(c) is not None and proj.media_of(c).has_audio]
             if can_sep:
                 menu.addAction("Separar el audio a una pista de audio", lambda: self.ctrl.separate_audio(can_sep))
+            con_sonido = [c.id for c in sel_c if proj.track(c.track_id).kind == TRACK_VIDEO and c.text is None and (
+                any(proj.track(o.track_id).kind == TRACK_AUDIO for o in self.ctrl.partners(proj, c)) or
+                (not c.link and c.volume > 0 and proj.media_of(c) is not None and proj.media_of(c).has_audio))]
+            if con_sonido:
+                a = menu.addAction("🔇 Quitar el sonido de este video" if len(con_sonido) == 1 else
+                                   f"🔇 Quitar el sonido de estos {len(con_sonido)} videos",
+                                   lambda: self.ctrl.quitar_sonido(con_sonido))
+                a.setToolTip("Borra su audio de la pista verde y deja el video en silencio; la imagen se queda "
+                             "(Ctrl+Z lo devuelve)")
+            con_kf = [c.id for c in sel_c if (c.zoom_kf or c.layout_kf) and not c.note.startswith("🎬")
+                      and not (c.fx or {}).get("anim")]           # (en escenas y animaciones, rombos = su animación)
+            if con_kf:
+                a = menu.addAction("🗑 Quitar los rombos (zoom y posición)",
+                                   lambda: self.ctrl.quitar_encuadre(con_kf))
+                a.setToolTip("Los fotogramas clave de zoom y posición (rombos amarillos y azules; el encuadre "
+                             "automático pone muchos). «Sigue la acción» tiene su propia opción")
             menu.addSeparator()
             # --- buscar / información
             menu.addAction("Buscar en el panel multimedia\tAlt+F", win._find_in_media)

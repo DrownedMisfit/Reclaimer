@@ -2,4 +2,4 @@
 
 APP_NAME = "Reclaimer"
 SUPPORT_URL = "https://ko-fi.com/pigmeofurtivoyt"   # página de donaciones (Ko-fi); vacía = no se muestra «♥ Apoyar Reclaimer»
-__version__ = "0.1.0"
+__version__ = "0.1.1"

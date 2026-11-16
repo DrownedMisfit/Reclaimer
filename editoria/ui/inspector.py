@@ -347,7 +347,17 @@ class InspectorPanel(QWidget):
         tl.setContentsMargins(0, 6, 0, 0)
         tl.addWidget(info)
         tl.addWidget(props)
-        tl.addWidget(self.speed_box)
+        # 🐢 Velocidad: sección plegable como en Resolve (clic en su cabecera = se abre). Con sonido va debajo del
+        # ecualizador (pestaña Audio); sin sonido, aquí
+        from .tabs import Section
+        self.speed_box.setTitle("")
+        self.speed_box.setFlat(True)
+        self.speed_sec = Section("🐢  Velocidad", self.speed_box, False, "secciones/inspector/velocidad")
+        self.speed_sec.head.setToolTip("Velocidad del clip (tecla R): porcentaje, marcha atrás, congelar imagen y "
+                                       "cámara lenta suave")
+        self._tl_clip = tl
+        tl.addWidget(self.speed_sec)
+        self._vel_en = tl
         tl.addWidget(self._build_enhance_box())
         tl.addWidget(self.effects_box)
         tl.addWidget(note_box)
@@ -666,8 +676,22 @@ class InspectorPanel(QWidget):
         self.monitor_status = _dim()
         bl.addWidget(self.monitor_status)
         lay.addWidget(box)
+        self._audio_lay = lay                       # (🐢 Velocidad se coloca aquí, debajo del ecualizador)
         lay.addStretch()
         return w
+
+    def _colocar_velocidad(self, con_sonido: bool):
+        """🐢 Con sonido: debajo del ecualizador (pestaña Audio); sin sonido: en la pestaña Clip."""
+        destino = self._audio_lay if con_sonido else self._tl_clip
+        if getattr(self, "_vel_en", None) is destino:
+            return
+        if getattr(self, "_vel_en", None) is not None:
+            self._vel_en.removeWidget(self.speed_sec)
+        if con_sonido:
+            destino.insertWidget(destino.count() - 1, self.speed_sec)     # (antes del estirable del final)
+        else:
+            destino.insertWidget(2, self.speed_sec)                       # (tras la información del clip)
+        self._vel_en = destino
 
     def set_monitor(self, monitor):
         self.monitor = monitor
@@ -1352,15 +1376,21 @@ class InspectorPanel(QWidget):
             _l, w, h = RESOLUTIONS[idx]
             cur = self.ctrl.project.format
             fmt = (cur if cur in ("short", "edit") else "short") if h > w else "youtube"
-            if fmt != cur:
-                self.ctrl.set_project_format(fmt)
-            self.ctrl.set_settings(width=w, height=h)
+            pila = self.ctrl.undo_stack
+            pila.beginMacro("Resolución del proyecto")      # (formato y tamaño: un solo Ctrl+Z)
+            try:
+                if fmt != cur:
+                    self.ctrl.set_project_format(fmt)
+                self.ctrl.set_settings(width=w, height=h)
+            finally:
+                pila.endMacro()
 
     def _refresh_speed(self, c, m, editable: bool):
         can = bool(m and m.kind != KIND_IMAGE)
-        self.speed_box.setVisible(can)
+        self.speed_sec.setVisible(can)
         if not can:
             return
+        self._colocar_velocidad(bool(m.kind == "audio" or m.has_audio))
         self.speed_box.setEnabled(editable)
         frozen = c.speed <= 0
         self.speed.setValue(100 if frozen else int(round(c.speed * 100)))
@@ -1581,9 +1611,15 @@ class InspectorPanel(QWidget):
         self.ctrl.set_speed(ids, speed=speed, reverse=reverse, ripple=self.ripple_speed.isChecked())
 
     def focus_speed(self):
-        """Tecla R: lleva a la velocidad del clip seleccionado."""
-        self.clip_tabs.setCurrentIndex(0)
-        if self.speed_box.isVisible():
+        """Tecla R: lleva a la velocidad del clip seleccionado (abre su sección)."""
+        if self.speed_sec.isHidden():                    # (oculta a propósito = imagen; en otra pestaña no cuenta)
+            self.ctrl.message.emit("🐢 La velocidad es para videos y audios (no para imágenes).")
+            return
+        self.clip_tabs.setCurrentIndex(2 if getattr(self, "_vel_en", None) is getattr(self, "_audio_lay", 0) else 0)
+        self.speed_sec.head.blockSignals(True)            # (se abre ahora, sin quedar recordada como abierta)
+        self.speed_sec.set_open(True, save=False)
+        self.speed_sec.head.blockSignals(False)
+        if self.speed_sec.isVisible():
             self.speed.setFocus()
             self.speed.selectAll()
 

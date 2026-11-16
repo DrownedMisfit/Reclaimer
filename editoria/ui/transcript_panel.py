@@ -60,6 +60,10 @@ class _WordView(QTextBrowser):
         if e.type() == QEvent.ShortcutOverride and self.clip_keys and self.clip_keys(e, True):
             e.accept()
             return True
+        if e.type() == QEvent.ShortcutOverride and e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and \
+                self.textCursor().hasSelection():
+            e.accept()                     # (Supr con palabras elegidas: las corta aquí, no borra clips)
+            return True
         return super().event(e)
 
     def mouseDoubleClickEvent(self, e):

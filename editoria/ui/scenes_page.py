@@ -605,6 +605,18 @@ class ScenesPage(QWidget):
         self.b_aplicar = QPushButton("✓ Aplicar")
         self.b_aplicar.setToolTip("Pone la escena en la línea de tiempo (un paso de Ctrl+Z). Si ya estaba, la cambia.")
         self.b_aplicar.clicked.connect(self.aplicar)
+        # 📤 A qué pestaña va la escena (de entrada, la pestaña en la que estás)
+        self.destino = QComboBox()
+        for etiqueta, clave in (("🎬 Video horizontal", "youtube"), ("🎵 Edits", "edit"), ("📱 Vertical", "short")):
+            self.destino.addItem(etiqueta, clave)
+        self.destino.setToolTip("A qué pestaña va la escena al aplicarla: Video horizontal, Edits o Vertical (se lleva "
+                                "sus personajes y sonidos y se pone en el mismo tiempo)")
+        self.destino.setFocusPolicy(Qt.NoFocus)
+        b_png = QPushButton("🎭 PNGTuber")
+        b_png.setToolTip("Tu avatar PNG que abre y cierra la boca cuando hablas y parpadea (se exporta así)")
+        b_png.clicked.connect(lambda: __import__("editoria.ui.pngtuber_dialog", fromlist=["abrir"]).abrir(self.win))
+        b_png.setFocusPolicy(Qt.NoFocus)
+        self._b_png = b_png
         b_quitar = QPushButton("🗑")
         b_quitar.setToolTip("Quitar esta escena de la línea de tiempo y del proyecto.")
         b_quitar.clicked.connect(self.quitar)
@@ -616,10 +628,10 @@ class ScenesPage(QWidget):
         arriba = QHBoxLayout()
         for w in (QLabel("🎬"), self.sel_escena, self.nombre, b_lib, QLabel("Empieza"), self.desde, QLabel("Dura"),
                   self.dura, b_io,
-                  QLabel("Fondo"), self.fondo):
+                  QLabel("Fondo"), self.fondo, self._b_png):
             arriba.addWidget(w)
         arriba.addStretch(1)
-        for w in (self.marca, self.b_play, self.b_aplicar, b_quitar, b_volver):
+        for w in (self.marca, self.b_play, QLabel("Enviar a"), self.destino, self.b_aplicar, b_quitar, b_volver):
             arriba.addWidget(w)
         for b in (self.b_play, self.b_aplicar, b_quitar, b_volver, b_io, b_lib):
             b.setFocusPolicy(Qt.NoFocus)                 # (Espacio = reproducir, no «pulsar el último botón»)
@@ -1224,9 +1236,25 @@ class ScenesPage(QWidget):
 
     # ================================================================ material: personajes
     def _tab_personajes(self) -> QWidget:
+        """Personajes, como el buscador de 🖼 Miniatura: 🗂 Local (Medios y tu PC), ✂ PNG y 🌐 Internet."""
+        from PySide6.QtWidgets import QTabWidget
+        cont = QWidget()
+        cv = QVBoxLayout(cont)
+        cv.setContentsMargins(0, 0, 0, 0)
+        self.sub_img = QTabWidget()
+        self.sub_img.setDocumentMode(True)
+        cv.addWidget(self.sub_img)
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(4, 4, 4, 4)
+        self.sub_img.addTab(w, "🗂 Local")
+        self._busq = {}
+        self.sub_img.addTab(self._tab_busqueda("png"), "✂ PNG")
+        web = self._tab_busqueda("web")
+        self.sub_img.addTab(web, "🌐 Internet")
+        self.sub_img.setTabToolTip(0, "Tus imágenes de Medios y las de tu PC")
+        self.sub_img.setTabToolTip(1, "Google Imágenes, solo PNG con fondo transparente (personajes ya recortados)")
+        self.sub_img.setTabToolTip(2, "Google Imágenes, cualquier imagen")
         self.lista_img = QListWidget()
         self.lista_img.setViewMode(QListWidget.IconMode)
         self.lista_img.setIconSize(QPixmap(72, 72).size())
@@ -1242,11 +1270,16 @@ class ScenesPage(QWidget):
                      "el «＋» de su fila). También puedes arrastrarla al visor, donde quieras que esté.")
         self.lista_img.setDragEnabled(True)
         self.lista_img.setDragDropMode(QListWidget.DragOnly)
-        b.clicked.connect(lambda: self._añadir_actor(self.lista_img.currentItem().data(Qt.UserRole))
-                          if self.lista_img.currentItem() else None)
+        b.clicked.connect(self._boton_añadir_img)
+        b_arch = QPushButton("📁 Desde mi PC…")
+        b_arch.setToolTip("Añadir una imagen de tu PC (PNG con fondo transparente, JPG…): va a Medios y a la escena.")
+        b_arch.clicked.connect(lambda: self._desde_archivo("imagen"))
         v.addWidget(QLabel("En Medios"))
         v.addWidget(self.lista_img, 1)
-        v.addWidget(b)
+        fila_b = QHBoxLayout()
+        fila_b.addWidget(b, 1)
+        fila_b.addWidget(b_arch)
+        v.addLayout(fila_b)
         self._llenar_imagenes()
         if _hay("editoria.ai.character_search"):
             fila = QHBoxLayout()
@@ -1279,12 +1312,112 @@ class ScenesPage(QWidget):
             b2.setToolTip("La guarda en «Escenas/Personajes» (junto al programa), la añade a Medios y a la escena.")
             b2.clicked.connect(lambda: self._bajar_personaje(self.res_img.currentItem())
                                if self.res_img.currentItem() else None)
-            v.addWidget(QLabel("🌐 En internet"))
-            v.addLayout(fila)
-            v.addWidget(self.res_img, 2)
-            v.addWidget(self.estado_img)
-            v.addWidget(b2)
+            wv = web.layout()                              # (en tu copia: también las wikis del juego, en 🌐)
+            wv.addWidget(QLabel("🌐 En la wiki del juego"))
+            wv.addLayout(fila)
+            wv.addWidget(self.res_img, 2)
+            wv.addWidget(self.estado_img)
+            wv.addWidget(b2)
+        return cont
+
+    # ---------------------------------------------------------------- ✂ PNG / 🌐 Internet (como en 🖼 Miniatura)
+    _BUSQ_URL = {"png": "https://www.google.com/search?tbm=isch&tbs=ic:trans,ift:png&q={q}",
+                 "web": "https://www.google.com/search?tbm=isch&q={q}"}
+
+    def _tab_busqueda(self, modo: str) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(4, 6, 4, 4)
+        fila = QHBoxLayout()
+        q = QLineEdit()
+        q.setPlaceholderText("🔎 Master Chief, Elite, tanque…" if modo == "png" else "🔎 Lo que quieras buscar…")
+        q.setClearButtonEnabled(True)
+        q.returnPressed.connect(lambda m=modo: self._buscar_web(m))
+        b = QPushButton("Buscar")
+        b.setObjectName("primary")
+        b.clicked.connect(lambda _c=False, m=modo: self._buscar_web(m))
+        fila.addWidget(q, 1)
+        fila.addWidget(b)
+        v.addLayout(fila)
+        estado = QLabel("Clic derecho en una imagen → «Usar en la escena»")
+        estado.setObjectName("hint")
+        estado.setWordWrap(True)
+        estado.setToolTip("Se baja la imagen grande (de su página); si tiene un fondo liso (blanco, negro), en ✂ PNG se "
+                          "le quita. Va a Medios y a la escena.")
+        v.addWidget(estado)
+        caja = QVBoxLayout()
+        v.addLayout(caja, 1)
+        self._busq[modo] = {"q": q, "estado": estado, "caja": caja, "vista": None, "job": None}
         return w
+
+    def _buscar_web(self, modo: str):
+        import urllib.parse
+        from PySide6.QtCore import QUrl
+        d = self._busq[modo]
+        texto = d["q"].text().strip()
+        if not texto:
+            return
+        vista = getattr(self, "_vista_web", None)
+        if vista is None:                                  # (UN navegador, creado la primera vez que buscas)
+            from .thumbnail_editor import _PngView
+            vista = self._vista_web = _PngView(self)
+            vista.texto_usar = "🎬 Usar en la escena"
+            vista.use_image.connect(lambda url, fb: self._usar_web(self._modo_web, url, fb))
+        self._modo_web = modo
+        for dd in self._busq.values():                     # (se pasa a la pestaña desde la que buscas)
+            dd["vista"] = None
+        d["vista"] = vista
+        d["caja"].addWidget(vista, 1)
+        if modo == "png" and "png" not in texto.lower():
+            texto += " png"
+        d["vista"].load(QUrl(self._BUSQ_URL[modo].format(q=urllib.parse.quote_plus(texto))))
+
+    def _usar_web(self, modo: str, url: str, fallback: str = ""):
+        """Clic derecho → «Usar en la escena»: se baja (en ✂ PNG, sin su fondo liso), va a Medios y a la escena."""
+        from ..ai import thumb_elements as E
+        from .jobs import BackgroundJob
+        d = self._busq[modo]
+        if not url:
+            return
+        if d["job"] is not None and d["job"].isRunning():
+            d["estado"].setText("⏳ Espera a que termine de bajar la anterior…")
+            return
+        keep = modo == "web"
+
+        def work(_p, _c):
+            try:
+                return E.fetch(url, keep_bg=keep)
+            except Exception:  # noqa: BLE001 - la web original no deja bajarla: la pequeña de Google
+                if not fallback:
+                    raise
+                return E.fetch(fallback, keep_bg=keep)
+
+        def listo(e):
+            try:
+                ids = self.ctrl.import_now([e["path"]], quiet=True)
+            except Exception as exc:  # noqa: BLE001
+                d["estado"].setText(f"✗ No se pudo añadir: {exc}")
+                return
+            self._llenar_imagenes()
+            mid = next((i for i in ids if i in self.ctrl.project.media), None)
+            if mid:
+                self._añadir_actor(mid)
+                d["estado"].setText(f"✓ Añadida a la escena y a Medios · {e.get('badge', '')}")
+            else:
+                d["estado"].setText("✗ No se pudo usar esa imagen. Prueba con otra.")
+
+        def fallo(msg):
+            if d["vista"] is not None and url.startswith("http"):
+                d["estado"].setText("⬇ La página no la deja bajar directo; probando con el navegador…")
+                d["vista"].download(url, lambda path: self._usar_web(modo, path) if path else
+                                    d["estado"].setText("✗ Esa página no deja bajar la imagen. Prueba con otra."))
+                return
+            d["estado"].setText("✗ No se pudo usar esa imagen. Prueba con otra.")
+        d["estado"].setText("⬇ Bajando la imagen…")
+        d["job"] = BackgroundJob(work, self)
+        d["job"].done.connect(listo)
+        d["job"].failed.connect(fallo)
+        d["job"].start()
 
     def _ajuste(self, clave: str, defecto):
         from PySide6.QtCore import QSettings
@@ -1306,6 +1439,54 @@ class ScenesPage(QWidget):
             it.setToolTip(m.name + ("\nRecorte con fondo transparente" if alfa else "\nSin transparencia (se verá su "
                                                                                        "fondo rectangular)"))
             self.lista_img.addItem(it)
+
+    def _boton_añadir_img(self):
+        """➕ La imagen elegida; sin ninguna elegida, lo dice; con la lista vacía, a elegir una de tu PC."""
+        it = self.lista_img.currentItem()
+        if it is not None:
+            self._añadir_actor(it.data(Qt.UserRole))
+        elif self.lista_img.count():
+            self.win.statusBar().showMessage("Elige primero una imagen de la lista (o haz doble clic en ella).", 6000)
+            self.lista_img.setFocus()
+        else:
+            self._desde_archivo("imagen")
+
+    def _boton_añadir_snd(self):
+        it = self.lista_snd.currentItem()
+        if it is not None:
+            self._añadir_sonido(it.data(Qt.UserRole))
+        else:
+            self.win.statusBar().showMessage("Elige primero un sonido de la lista (o haz doble clic en él).", 6000)
+            self.lista_snd.setFocus()
+
+    def _desde_archivo(self, tipo: str):
+        """📁 Una imagen (personaje) o un sonido de tu PC: va a Medios y a la escena."""
+        from PySide6.QtWidgets import QFileDialog
+        if tipo == "imagen":
+            rutas, _f = QFileDialog.getOpenFileNames(self, "Añadir imagen a la escena", "",
+                                                     "Imágenes (*.png *.webp *.jpg *.jpeg *.gif *.bmp)")
+        else:
+            rutas, _f = QFileDialog.getOpenFileNames(self, "Añadir sonido a la escena", "",
+                                                     "Sonidos (*.mp3 *.wav *.ogg *.m4a *.flac *.aac)")
+        if not rutas:
+            return
+        if tipo == "sonido":
+            for r in rutas:
+                self._añadir_sonido(r)
+            self.reload()
+            return
+        try:
+            ids = self.ctrl.import_now(rutas, quiet=True)
+        except Exception as exc:  # noqa: BLE001
+            self.win.statusBar().showMessage(f"No se pudo añadir: {exc}", 8000)
+            return
+        self._llenar_imagenes()
+        p = self.ctrl.project
+        imgs = [i for i in ids if i in p.media and p.media[i].kind == KIND_IMAGE]
+        for i in imgs:
+            self._añadir_actor(i)
+        if not imgs:
+            self.win.statusBar().showMessage("Eso no es una imagen que se pueda usar.", 6000)
 
     def _añadir_actor(self, media_id: str | None, caja: dict | None = None):
         if not media_id:
@@ -1408,10 +1589,15 @@ class ScenesPage(QWidget):
         self.lista_snd.setDragEnabled(True)
         self.lista_snd.setDragDropMode(QListWidget.DragOnly)
         self.lista_snd.currentItemChanged.connect(lambda *_a: self._textos_añadir())
-        b.clicked.connect(lambda: self._añadir_sonido(self.lista_snd.currentItem().data(Qt.UserRole))
-                          if self.lista_snd.currentItem() else None)
+        b.clicked.connect(self._boton_añadir_snd)
+        b_arch_s = QPushButton("📁 Desde mi PC…")
+        b_arch_s.setToolTip("Añadir un sonido de tu PC (MP3, WAV, OGG…) en la línea roja de la escena.")
+        b_arch_s.clicked.connect(lambda: self._desde_archivo("sonido"))
         v.addWidget(self.lista_snd, 1)
-        v.addWidget(b)
+        fila_s = QHBoxLayout()
+        fila_s.addWidget(b, 1)
+        fila_s.addWidget(b_arch_s)
+        v.addLayout(fila_s)
         if _hay("editoria.ui.sounds_internet"):
             b2 = QPushButton("🌐 Buscar en internet…")
             b2.setToolTip("Busca un sonido concreto («AR de Halo 1», «disparo de tanque de Gears of War 2»), lo "
@@ -1991,7 +2177,20 @@ class ScenesPage(QWidget):
         self.tl.refrescar()
 
     # ================================================================ aplicar / quitar / volver
+    def showEvent(self, e):
+        super().showEvent(e)
+        ws = getattr(self.win, "workspaces", None)      # 📤 «Enviar a»: de entrada, la pestaña en la que estás
+        if ws is not None and hasattr(self, "destino") and getattr(self, "_destino_de", None) != ws.current:
+            self._destino_de = ws.current               # (solo al cambiar de pestaña: no pierde lo que elegiste)
+            i = self.destino.findData(ws.current)
+            if i >= 0:
+                self.destino.setCurrentIndex(i)
+
     def aplicar(self) -> bool:
+        ws = getattr(self.win, "workspaces", None)
+        destino = self.destino.currentData() if hasattr(self, "destino") else None
+        if ws is not None and destino and destino != ws.current:
+            return self._aplicar_en(destino)
         if scenes.es_comparativa(self.escena) and not self.comp_editor.listo():
             self.win.statusBar().showMessage("Elige las dos tomas de la comparativa (A y B).", 6000)
             return False
@@ -2012,6 +2211,89 @@ class ScenesPage(QWidget):
         self.win.statusBar().showMessage(f"🎬 «{self.escena.get('nombre')}» puesta en la línea de tiempo "
                                          f"({len(res)} clips). Ctrl+Z en el editor la quita.", 8000)
         return True
+
+    def _aplicar_en(self, destino: str) -> bool:
+        """📤 La escena va a OTRA pestaña (Video horizontal, Edits o Vertical): se lleva sus personajes y sonidos (los
+        medios que use), se cambia a esa pestaña y se pone ahí en el mismo tiempo (un paso de Ctrl+Z allí)."""
+        if scenes.es_comparativa(self.escena) and not self.comp_editor.listo():
+            self.win.statusBar().showMessage("Elige las dos tomas de la comparativa (A y B).", 6000)
+            return False
+        if not self._tiene_contenido():
+            self.win.statusBar().showMessage("La escena está vacía: añade algún personaje o sonido.", 6000)
+            return False
+        self.parar()
+        import copy
+        esc = copy.deepcopy(self.escena)
+        p = self.ctrl.project
+        usados: dict[str, str] = {}                        # id del medio → su archivo
+
+        def recoger(x):
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    if k == "media_id" and isinstance(v, str) and v in p.media:
+                        usados[v] = p.media[v].path
+                    else:
+                        recoger(v)
+            elif isinstance(x, list):
+                for v in x:
+                    recoger(v)
+        recoger(esc)
+        llevar = [p.media[mid] for mid in usados]
+        ws = self.win.workspaces
+        ocupado = ws._busy() if hasattr(ws, "_busy") else ""
+        if ocupado:                                        # (antes de salir: si no se puede, no se pierde nada)
+            self.win.statusBar().showMessage(f"Espera a que termine (está {ocupado}) para enviar la escena.", 7000)
+            return False
+        borrador = copy.deepcopy(self.escena)
+        horizontal_antes = p.width >= p.height
+        self.sucia = False                                 # (lo de aquí no se pierde: va a la otra pestaña)
+        self.win.go_page("edit")
+        if not ws.switch(destino):                         # (canceló al guardar: vuelve a Escenas con su borrador)
+            self.win.go_page("scenes")
+            pg = getattr(self.win, "_scenes_widget", None)
+            if pg is not None:
+                pg._cargar(borrador, True)
+            self.win.statusBar().showMessage("No se cambió de pestaña: la escena sigue aquí, sin aplicar.", 7000)
+            return False
+        c = self.ctrl
+        c.adopt_media(llevar)
+        por_ruta = {os.path.normcase(os.path.abspath(m.path)): m.id for m in c.project.media.values()}
+        nuevo = {mid: por_ruta.get(os.path.normcase(os.path.abspath(ruta))) for mid, ruta in usados.items()}
+
+        def cambiar(x):
+            if isinstance(x, dict):
+                for k, v in list(x.items()):
+                    if k == "media_id" and v in nuevo and nuevo[v]:
+                        x[k] = nuevo[v]
+                    else:
+                        cambiar(v)
+            elif isinstance(x, list):
+                for v in x:
+                    cambiar(v)
+        cambiar(esc)
+        res = c.apply_scene(esc)
+        nombre = self.destino.currentText()
+        if not res:                                        # (no se pudo poner aquí: la escena sigue, sin perderse)
+            self.win.go_page("scenes")
+            pg = getattr(self.win, "_scenes_widget", None)
+            if pg is not None:
+                pg._cargar(esc, True)
+            self.win.statusBar().showMessage(f"No se pudo poner la escena en {nombre}: sigue abierta aquí, sin "
+                                             "aplicar (¿algún personaje que ya no existe o una pista bloqueada?).",
+                                             9000)
+            return False
+        if res:
+            try:
+                self.win.engine.user_seek(float(esc["a"]))
+                self.win.timeline.flash_clips(list(res))
+            except Exception:  # noqa: BLE001 - resaltar es un extra
+                pass
+            aviso = ""
+            if horizontal_antes != (c.project.width >= c.project.height):
+                aviso = " Ojo: se hizo en otro formato, revisa dónde quedan los personajes (🎬 Editar la escena)."
+            self.win.statusBar().showMessage(f"🎬 «{esc.get('nombre')}» puesta en {nombre} ({len(res)} clips). "
+                                             f"Ctrl+Z la quita.{aviso}", 10000)
+        return bool(res)
 
     def quitar(self):
         self.parar()
@@ -2035,6 +2317,11 @@ class ScenesPage(QWidget):
         if r == QMessageBox.Cancel:
             return False
         if r == QMessageBox.Yes:
+            ws = getattr(self.win, "workspaces", None)    # (al salir se aplica AQUÍ, no en otra pestaña a mitad de
+            if ws is not None and hasattr(self, "destino"):   # un cambio de pestaña o de proyecto)
+                i = self.destino.findData(ws.current)
+                if i >= 0:
+                    self.destino.setCurrentIndex(i)
             return self.aplicar()
         return True
 

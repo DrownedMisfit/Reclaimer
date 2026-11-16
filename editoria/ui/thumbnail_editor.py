@@ -14,6 +14,7 @@ import copy
 import json
 import math
 import os
+import re
 import time
 
 import cv2
@@ -81,16 +82,41 @@ class _ColorHistory(QWidget):
                 w.deleteLater()
         colores = self.editor.color_history(self.key)
         for c in colores:
-            b = QPushButton()
-            b.setFixedSize(18, 18)
-            b.setFocusPolicy(Qt.NoFocus)
-            b.setToolTip(f"Usar este color ({c})")
-            b.setStyleSheet(f"QPushButton {{ background:{c}; border:1px solid #666; border-radius:3px; padding:0; "
-                            "min-height:0; min-width:0; } QPushButton:hover { border:1px solid white; }")
-            b.clicked.connect(lambda _=False, col=c: self.usar(col))
+            b = _Muestra(c, lambda col=c: self.usar(col))       # (dibujada a mano: el tema no la aplasta)
             self.fila.addWidget(b)
         self.fila.addStretch()
         self.setVisible(bool(colores))
+
+
+class _Muestra(QWidget):
+    """Un cuadro de color de 24 px para pulsar (antes un botón que el tema dejaba como una rayita)."""
+
+    def __init__(self, color: str, al_pulsar):
+        super().__init__()
+        self.color, self.al_pulsar, self._encima = color, al_pulsar, False
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"Usar este color ({color})")
+
+    def enterEvent(self, e):
+        self._encima = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._encima = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.al_pulsar()
+
+    def paintEvent(self, _e):
+        from PySide6.QtGui import QPainter, QPen, QColor
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor(self.color))
+        p.setPen(QPen(QColor("white" if self._encima else "#777"), 2 if self._encima else 1))
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 4, 4)
 
 
 class _SliderNum(QWidget):
@@ -948,6 +974,15 @@ class Canvas(QGraphicsView):
             return
         if e.button() == Qt.LeftButton and e.modifiers() & Qt.ControlModifier and self._word_press(pt):
             return
+        if e.button() == Qt.LeftButton and not e.modifiers() and not self.tool and self.active_words():
+            # ✍ escribiendo el texto (tras doble clic): pulsar y arrastrar dentro elige las palabras hasta donde llegues
+            lay_w = self.editor.layer(self.sel)
+            p_w = self.word_at(lay_w, pt) if lay_w is not None and not lay_w.get("locked") else None
+            if p_w is not None:
+                self.set_words({p_w}, lay_w, panel=False)
+                self.editor._marcar_en_cuadro(lay_w, p_w, p_w)
+                self._drag = {"mode": "words_rango", "lay": lay_w, "a": p_w, "p0": pt, "movido": False}
+                return
         if e.button() == Qt.LeftButton:          # un clic normal deja de elegir palabras
             self.set_words(set())
         lay = self.editor.layer(self.sel)
@@ -1096,6 +1131,16 @@ class Canvas(QGraphicsView):
             if palabra is not None and palabra not in self.active_words(d["lay"]):
                 self.set_words(self.active_words(d["lay"]) | {palabra}, d["lay"])
             return
+        if d["mode"] == "words_rango":                   # ✍ arrastrando dentro del texto: de donde pulsaste a aquí
+            palabra = self.word_at(d["lay"], pt)
+            if (pt - d["p0"]).manhattanLength() > 3:
+                d["movido"] = True
+            if palabra is not None:
+                a, b = sorted((d["a"], palabra))
+                if set(range(a, b + 1)) != self.active_words(d["lay"]):
+                    self.set_words(set(range(a, b + 1)), d["lay"], panel=False)
+                    self.editor._marcar_en_cuadro(d["lay"], a, b)
+            return
         lay = d["lay"]
         doc = self.doc
         self._guides = []
@@ -1199,7 +1244,11 @@ class Canvas(QGraphicsView):
             return
         if self._drag is not None:
             d = self._drag
-            era_palabras = d.get("mode") == "words"
+            era_palabras = d.get("mode") in ("words", "words_rango")
+            if d.get("mode") == "words_rango":
+                if not d.get("movido"):                 # un clic sin arrastrar: deja de elegir (como siempre)
+                    self.set_words(set())
+                self.editor._fill_props()               # (la barra, con lo elegido al soltar)
             self._drag = None
             if d.get("word") is not None and (d["lay"]["x"], d["lay"]["y"]) == (d["x0"], d["y0"]):
                 self.set_words({d["word"]}, d["lay"])     # Ctrl + clic sin mover: esa palabra
@@ -1282,6 +1331,9 @@ class Canvas(QGraphicsView):
             super().keyPressEvent(e)
 
 
+_PERFIL_PNG = None     # el perfil del navegador de búsqueda de imágenes (se crea la primera vez que se busca)
+
+
 class _PngView(QWidget):
     """Google Imágenes (solo PNG con fondo transparente) dentro del taller. Clic derecho en una imagen →
     «Usar en la miniatura». El perfil se guarda en los datos de Reclaimer (cookies de Google: se acepta una vez)."""
@@ -1294,10 +1346,13 @@ class _PngView(QWidget):
         from ..core.paths import app_data_dir
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        self._profile = QWebEngineProfile("png", self)
-        root = os.path.join(str(app_data_dir()), "navegador_png")
-        self._profile.setPersistentStoragePath(root)
-        self._profile.setCachePath(os.path.join(root, "cache"))
+        global _PERFIL_PNG
+        if _PERFIL_PNG is None:            # (UN perfil para todos: Miniatura y 🎬 Escenas comparten su carpeta)
+            _PERFIL_PNG = QWebEngineProfile("png", QApplication.instance())
+            root = os.path.join(str(app_data_dir()), "navegador_png")
+            _PERFIL_PNG.setPersistentStoragePath(root)
+            _PERFIL_PNG.setCachePath(os.path.join(root, "cache"))
+        self._profile = _PERFIL_PNG
         self._profile.downloadRequested.connect(self._on_download)
         self._dl_cb = None
         self.bg = False                     # (modo Fondo: el menú dice «Usar de fondo»)
@@ -1319,7 +1374,8 @@ class _PngView(QWidget):
         req = self.view.lastContextMenuRequest()
         url = req.mediaUrl().toString() if req is not None else ""
         m = QMenu(self)
-        a = QAction("🖼 Usar de fondo" if self.bg else "🖼 Usar en la miniatura", m)
+        a = QAction(getattr(self, "texto_usar", "") or ("🖼 Usar de fondo" if self.bg else "🖼 Usar en la miniatura"),
+                    m)                                      # (🎬 Escenas lo usa también: «Usar en la escena»)
         a.setEnabled(bool(url))
         a.triggered.connect(lambda: self._use(url, pos))
         m.addAction(a)
@@ -1341,6 +1397,11 @@ class _PngView(QWidget):
         QTimer.singleShot(30000, lambda: self._dl_token == tok and self._dl_done(""))   # (si nunca llega)
 
     def _on_download(self, req):
+        try:
+            if req.page() is not None and req.page() is not self.view.page():
+                return                      # (es de otro navegador que comparte el perfil)
+        except (AttributeError, RuntimeError):
+            pass
         if self._dl_cb is None:
             req.cancel()
             return
@@ -3278,6 +3339,16 @@ class ThumbnailEditor(QMainWindow):
         ed.setTextCursor(cur)
         ed.blockSignals(False)
 
+    def _marcar_en_cuadro(self, lay: dict, a: int, b: int):
+        """Las palabras a…b elegidas en el lienzo también quedan marcadas en el cuadro de texto."""
+        ed = getattr(self, "_text_edit", None)
+        try:
+            spans = T.word_spans(lay.get("text", ""))
+            if ed is not None and spans and 0 <= a < len(spans) and 0 <= b < len(spans):
+                self._select_in_box(ed, spans[a][0], spans[b][1])
+        except RuntimeError:
+            pass
+
     def _box_selection(self, ed, lay: dict):
         """Lo que marcas en el cuadro de texto queda elegido en el lienzo."""
         if self._loading or self.canvas.sel != lay.get("id"):
@@ -4122,7 +4193,11 @@ class ThumbnailEditor(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Exportar miniatura", start, "JPG (*.jpg);;PNG (*.png)")
         if not path:
             return
-        n = T.export(self.doc, path)
+        try:
+            n = T.export(self.doc, path)
+        except (OSError, ValueError) as exc:          # (carpeta sin permiso, disco lleno…): aviso, no error
+            QMessageBox.warning(self, "No se pudo guardar la miniatura", f"{exc}\n\nPrueba en otra carpeta.")
+            return
         self.statusBar().showMessage(f"✓ Miniatura guardada ({n / 1024:.0f} KB): {path}", 10000)
 
     # ----------------------------------------------------------- propiedades
@@ -4162,7 +4237,27 @@ class ThumbnailEditor(QMainWindow):
         self._common_props(lay)
         if not zona:
             self._effect_props(lay)
+        self._plegar_secciones()
         self._loading = False
+
+    # Abiertas la primera vez (luego se recuerda lo que dejes abierto o cerrado)
+    _ABIERTAS = ("Texto", "Imagen: ajustes", "Forma", "🌫 Zona borrosa", "🖼 Hueco para una imagen")
+
+    def _plegar_secciones(self):
+        """Cada grupo del panel, detrás de su título (Posición, Efectos, Licuar…): clic = abrir o cerrar, como en
+        Resolve. Lo que dejas abierto sigue abierto al elegir otra cosa (se recuerda), y el panel no se hace eterno."""
+        from .tabs import Section
+        for i in range(self.props_lay.count()):
+            w = self.props_lay.itemAt(i).widget()
+            if not isinstance(w, QGroupBox) or not w.title():
+                continue
+            titulo = w.title()
+            limpio = re.sub(r"[^\wáéíóúñü ]+", "", titulo, flags=re.I).strip() or titulo
+            self.props_lay.removeWidget(w)
+            w.setTitle("")
+            w.setFlat(True)
+            sec = Section(titulo, w, titulo in self._ABIERTAS, f"secciones/miniatura/{limpio}")
+            self.props_lay.insertWidget(i, sec)
 
     def _set(self, lay: dict, label: str, **kv):
         if self._loading:

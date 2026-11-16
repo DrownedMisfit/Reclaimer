@@ -125,7 +125,98 @@ class TextBar(QFrame):
         row.addWidget(self.btn_mi_estilo)
         self.btn_quitar = self._boton("↺", "Lo elegido vuelve al estilo del resto del texto", self.clear_words)
         row.addWidget(self.btn_quitar)
+        # ✍ La palabra elegida está mal escrita: «¿quisiste decir…?» con las sugerencias (como en los cuadros de texto)
+        self.btn_orto = self._boton("✍", "Esta palabra parece mal escrita: elige la correcta")
+        self.btn_orto.setStyleSheet("QPushButton { color: #ff8a80; font-weight: 600; }")
+        self._menu_orto = QMenu(self.btn_orto)
+        self.btn_orto.setMenu(self._menu_orto)
+        self.btn_orto.setVisible(False)
+        row.addWidget(self.btn_orto)
         self.hide()
+
+    # ------------------------------------------------------------ ✍ ortografía de la palabra elegida
+    def _ortografia(self, lay: dict):
+        """Con UNA palabra elegida y mal escrita, el botón «✍ ¿correcta?» con las sugerencias."""
+        from ..core import spelling as SP
+        from .spellcheck import current_lang
+        self.btn_orto.setVisible(False)
+        palabras = sorted(self.canvas.active_words(lay))
+        lang = current_lang()
+        if len(palabras) != 1 or lang == "off":
+            return
+        if not SP.ready(lang):                     # (el diccionario se carga en segundo plano: se vuelve a mirar)
+            SP.preload(lang)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(400, self._resinc)
+            return
+        texto = lay.get("text", "")
+        spans = T.word_spans(texto)
+        if palabras[0] >= len(spans):
+            return
+        a0, b0 = spans[palabras[0]][0], spans[palabras[0]][1]
+        m = SP.WORD_RE.search(texto[a0:b0])
+        if m is None:
+            return
+        a, b = a0 + m.start(), a0 + m.end()
+        palabra = m.group()
+        # (en MAYÚSCULAS el diccionario la da por buena —siglas—; en las miniaturas casi todo va así: se mira en
+        # minúsculas y las sugerencias se devuelven en mayúsculas)
+        mira = palabra.lower() if palabra.isupper() and len(palabra) > 1 else palabra
+        if SP.is_ok(mira, lang):
+            return
+        # (buscar sugerencias puede tardar: se hace al abrir el menú, no cada vez que eliges una palabra)
+        self._orto_dato = (palabra, a, b, lay["id"], lang)
+        self.btn_orto.setText(f"✍ ¿«{palabra}»?")
+        self.btn_orto.setVisible(True)
+        try:
+            self._menu_orto.aboutToShow.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._menu_orto.aboutToShow.connect(self._llenar_menu_orto)
+
+    def _llenar_menu_orto(self):
+        """Las sugerencias de la palabra mal escrita (al abrir el menú del botón ✍)."""
+        from PySide6.QtWidgets import QApplication
+        from ..core import spelling as SP
+        dato = getattr(self, "_orto_dato", None)
+        if dato is None:
+            return
+        palabra, a, b, lid, lang = dato
+        mayus = palabra.isupper() and len(palabra) > 1
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            sug = SP.suggest(palabra.lower() if mayus else palabra, lang)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if mayus:
+            sug = list(dict.fromkeys(s.upper() for s in sug))
+        menu = self._menu_orto
+        menu.clear()
+        t = menu.addAction(f"«{palabra}»: ¿quisiste decir…?")
+        t.setEnabled(False)
+        for s in sug:
+            menu.addAction(s, lambda s=s: self._corregir(lid, a, b, s))
+        if not sug:
+            n = menu.addAction("(sin sugerencias)")
+            n.setEnabled(False)
+        menu.addSeparator()
+        menu.addAction(f"📖 Añadir «{palabra}» al diccionario", lambda w=palabra: (SP.add_word(w), self._resinc()))
+        menu.addAction("Ignorar (mientras Reclaimer esté abierto)", lambda w=palabra: (SP.ignore(w), self._resinc()))
+
+    def _resinc(self):
+        try:
+            self._sig = None
+            self.update_pos()
+        except RuntimeError:
+            pass
+
+    def _corregir(self, lid: str, a: int, b: int, nueva: str):
+        lay = self.editor.layer(lid)
+        if lay is None:
+            return
+        texto = lay.get("text", "")
+        self.editor._set_text(lay, texto[:a] + nueva + texto[b:])     # (cada estilo sigue a su palabra; Ctrl+Z)
+        self._resinc()
 
     # ------------------------------------------------------------ piezas
     def _boton(self, texto: str, tip: str, slot=None, checkable: bool = False) -> QPushButton:
@@ -304,12 +395,16 @@ class TextBar(QFrame):
         v = self._vista(lay)
         return (lay["id"], v.get("color"), v.get("font"), v.get("size"), v.get("weight"),
                 v.get("italic"), lay.get("align"), repr(v.get("outline")), repr(v.get("shadow")),
-                repr(v.get("glow")), tuple(sorted(self.canvas.active_words(lay))))
+                repr(v.get("glow")), tuple(sorted(self.canvas.active_words(lay))), lay.get("text", ""))
 
     def _sincronizar(self, lay: dict):
         """Pone la barra como está el texto elegido (botones marcados, colores, fuente)."""
         al = lay.get("align", "center")
         self.btn_quitar.setVisible(bool(self.canvas.active_words(lay)))
+        try:
+            self._ortografia(lay)
+        except Exception:  # noqa: BLE001 - la ortografía nunca estropea la barra
+            self.btn_orto.setVisible(False)
         lay = self._vista(lay)
         self._pinta(self.btn_color, lay.get("color", "#FFFFFF"))
         self.btn_fuente.setText(f"{lay['font']} ▾")

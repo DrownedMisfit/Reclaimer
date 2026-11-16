@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QMenu, QMessageBox, QTabBar
 
 from ..core.paths import app_data_dir
 
-TABS = [("youtube", "🎬  YouTube"), ("edit", "🎵  Edits"), ("short", "📱  Shorts")]
+TABS = [("youtube", "🎬  Video horizontal"), ("edit", "🎵  Edits"), ("short", "📱  Vertical")]
 KEYS = [k for k, _ in TABS]
 
 
@@ -124,9 +124,11 @@ class Workspaces(QObject):
             try:
                 if path and os.path.exists(path):
                     c.load(path, keep_undo=keep)
+                    self._formato_de_pestaña(fmt)          # (📱 en Shorts/Edits, siempre vertical)
                     return
                 if os.path.exists(ws_file(fmt)):
                     c.load_workspace(ws_file(fmt), keep_undo=keep)
+                    self._formato_de_pestaña(fmt)
                     return
             except (OSError, ValueError) as exc:
                 self.win.statusBar().showMessage(f"⚠ No se pudo abrir el proyecto de esta pestaña: {exc}", 9000)
@@ -172,7 +174,11 @@ class Workspaces(QObject):
             self.win.engine.pause()
         except Exception:  # noqa: BLE001
             pass
-        if getattr(self.win, "_thumb_page", None) is not None and getattr(self.win, "_thumb_editor", None):
+        if hasattr(self.win, "salir_de_paginas"):
+            if not self.win.salir_de_paginas():      # (🎬 Escenas pregunta si hay cambios; 🖼 Miniatura se guarda)
+                self._set_bar(self.current)
+                return False
+        elif getattr(self.win, "_thumb_page", None) is not None and getattr(self.win, "_thumb_editor", None):
             self.win._thumb_editor.close()        # 🖼 la miniatura se guarda en ESTE proyecto antes de cambiar
         if not self.store():
             return False
@@ -260,7 +266,10 @@ class Workspaces(QObject):
             self.win.engine.pause()
         except Exception:  # noqa: BLE001
             pass
-        if getattr(self.win, "_thumb_page", None) is not None and getattr(self.win, "_thumb_editor", None):
+        if hasattr(self.win, "salir_de_paginas"):
+            if not self.win.salir_de_paginas():
+                return False
+        elif getattr(self.win, "_thumb_page", None) is not None and getattr(self.win, "_thumb_editor", None):
             self.win._thumb_editor.close()
         c = self.ctrl
         src, dst = self.current, fmt
@@ -378,6 +387,8 @@ class Workspaces(QObject):
 
     def new_here(self):
         """Ctrl+N: proyecto nuevo en esta pestaña."""
+        if hasattr(self.win, "salir_de_paginas") and not self.win.salir_de_paginas():
+            return False
         c = self.ctrl
         if c.path and c.dirty and not self.win._confirm_discard():
             return False
@@ -428,10 +439,17 @@ class Workspaces(QObject):
 
     def open_into(self, path: str) -> bool:
         """Abrir un .eia: va a la pestaña de su tipo (la actual queda guardada)."""
+        if hasattr(self.win, "salir_de_paginas") and not self.win.salir_de_paginas():
+            return False
         try:
             with open(path, encoding="utf-8") as f:
-                fmt = json.load(f).get("format", "youtube")
-        except (OSError, ValueError) as exc:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("Este archivo no es un proyecto de Reclaimer.")
+            # (el tipo va en «project_type»; «format» solo dice que es un proyecto de Reclaimer)
+            fmt = d.get("project_type") or ("short" if int(d.get("height", 0) or 0) > int(d.get("width", 0) or 0)
+                                            else "youtube")
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
             QMessageBox.warning(self.win, "No se pudo abrir", str(exc))
             return False
         fmt = fmt if fmt in KEYS else "youtube"
@@ -466,5 +484,20 @@ class Workspaces(QObject):
             QMessageBox.warning(self.win, "No se pudo abrir", str(exc))
             return False
         self.settings.setValue(self._key(fmt), path)
+        self._formato_de_pestaña(fmt)
         self.switched.emit(fmt)
         return True
+
+    def _formato_de_pestaña(self, fmt: str):
+        """📱 En Shorts y Edits el proyecto es SIEMPRE vertical (9:16): si abres o recuperas uno de YouTube aquí, se pasa
+        a vertical (con el fondo borroso automático en Shorts). Un paso de Ctrl+Z lo devuelve."""
+        p = self.ctrl.project
+        if fmt in ("short", "edit") and (p.format != fmt or p.height <= p.width):
+            self.ctrl.set_project_format(fmt)
+            nombre = "Vertical" if fmt == "short" else "Edits"
+            try:
+                self.win.statusBar().showMessage(f"📱 Proyecto pasado a vertical (9:16) por estar en {nombre} "
+                                                 "(aquí siempre es vertical; para horizontal: «↪ Mover a Video "
+                                                 "horizontal»).", 9000)
+            except (AttributeError, RuntimeError):
+                pass

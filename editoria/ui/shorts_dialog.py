@@ -60,7 +60,7 @@ class ShortsDialog(QDialog):
         self.btn_all = QPushButton("✓ Crear todos")
         self.btn_all.setToolTip("Crea un Short por cada propuesta (los que ya creaste no se repiten).")
         self.btn_all.clicked.connect(self._create_all)
-        self.btn_open = QPushButton("Abrir en la pestaña Shorts")
+        self.btn_open = QPushButton("Abrir en la pestaña Vertical")
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self._open_last)
         btn_close = QPushButton("Cerrar")
@@ -160,7 +160,7 @@ class ShortsDialog(QDialog):
                 nuevos += 1
         if nuevos:
             self.status.setText(f"Creados {nuevos} Shorts en {self._folder()}. "
-                                f"Puedes abrir el último en la pestaña Shorts.")
+                                f"Puedes abrir el último en la pestaña Vertical.")
         self.btn_all.setEnabled(False)
 
     def _open_last(self):

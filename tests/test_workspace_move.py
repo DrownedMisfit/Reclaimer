@@ -96,7 +96,7 @@ def main():
     assert ctrl.project.format == "short" and ctrl.project.width == 1080 and ctrl.project.height == 1920
     assert len(ctrl.project.clips) == n and ctrl.project.name == "Mover prueba"
     assert ws.stacks.get("short") is ctrl.undo_stack and "youtube" not in ws.stacks
-    assert "Shorts" in win.statusBar().currentMessage(), win.statusBar().currentMessage()
+    assert "Vertical" in win.statusBar().currentMessage(), win.statusBar().currentMessage()
     print("✓ mover a Shorts: la pestaña cambia a Shorts, el proyecto es vertical 1080×1920 con su clip y su nombre")
 
     # ---- 2. Ctrl+Z devuelve el formato; Ctrl+Y lo vuelve a poner
@@ -144,9 +144,9 @@ def main():
     assert len(menus) == 1, [m.title() for m in menus]
     menus[0].aboutToShow.emit()
     acts = [a for a in menus[0].actions() if not a.isSeparator()]
-    assert [a.text() for a in acts] == ["🎬 YouTube", "🎵 Edits", "📱 Shorts"], [a.text() for a in acts]
+    assert [a.text() for a in acts] == ["🎬 Video horizontal", "🎵 Edits", "📱 Vertical"], [a.text() for a in acts]
     assert [a.isEnabled() for a in acts] == [True, True, False], [a.isEnabled() for a in acts]
-    print("✓ Archivo → «↪ Mover este proyecto a»: las tres pestañas; la actual (Shorts) deshabilitada")
+    print("✓ Archivo → «↪ Mover este proyecto a»: las tres pestañas; la actual (Vertical) deshabilitada")
 
     # ---- 6. clic derecho en la barra de pestañas (menú de ayuda sustituido)
     assert ws.bar.contextMenuPolicy() == Qt.CustomContextMenu
@@ -157,7 +157,7 @@ def main():
         ws._bar_menu(QPoint(5, 5))
     finally:
         help_ui.exec_menu = real_exec
-    assert shown and shown[-1] == ["↪ Mover este proyecto a «YouTube»", "↪ Mover este proyecto a «Edits»"], shown
+    assert shown and shown[-1] == ["↪ Mover este proyecto a «Video horizontal»", "↪ Mover este proyecto a «Edits»"], shown
     print("✓ clic derecho en la barra: «↪ Mover este proyecto a» para las otras dos pestañas")
 
     # ---- 7. menú 🔄 Reinicio → «↪ Cambiar este proyecto a…»: pregunta, lo lleva y deja la de origen vacía

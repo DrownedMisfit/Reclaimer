@@ -96,7 +96,7 @@ PRESETS = {
     "YouTube 1080p": (1920, 1080, 24),
     "YouTube 1440p": (2560, 1440, 40),
     "YouTube 4K": (3840, 2160, 80),
-    "YouTube Shorts (vertical)": (1080, 1920, 24),
+    "Vertical 9:16 (Shorts, TikTok, Reels)": (1080, 1920, 24),
 }
 
 # Destinos de un clic (botones de la ventana Exportar). Lo que recomiendan YouTube y TikTok para subir:
@@ -104,15 +104,15 @@ PRESETS = {
 # «faststart». bitrate = Mbps por tamaño (1080p, 1440p, 4K) a 60 FPS. Por encima del mínimo que piden: los edits
 # (grano, destellos, mucho movimiento) se veían con bloques; la plataforma vuelve a comprimir y parte de algo mejor.
 TARGETS = {
-    "youtube": {"name": "▶ YouTube", "suffix": "YouTube", "codec": "h264", "audio": 384,
+    "youtube": {"name": "▶ YouTube", "apps": "videos de YouTube", "suffix": "YouTube", "codec": "h264", "audio": 384,
                 "br": {1080: 24, 1440: 40, 2160: 80},
                 "info": "H.264 High · {w}×{h} · {fps} FPS · {br} Mbps · audio AAC 320–384 kbps · color BT.709 — "
                         "lo que recomienda YouTube para subir (Shorts incluidos)."},
-    "tiktok": {"name": "♪ TikTok", "suffix": "TikTok", "codec": "h264", "audio": 256, "vertical": True,
+    "tiktok": {"name": "▯ Vertical", "apps": "TikTok · Shorts · Reels", "suffix": "Vertical", "codec": "h264", "audio": 256, "vertical": True,
                "br": {1080: 20, 1440: 20, 2160: 20},
                "info": "H.264 High · {w}×{h} · {fps} FPS · {br} Mbps · audio AAC 256 kbps — vertical 9:16, "
                        "listo para TikTok, Reels o Shorts."},
-    "windows": {"name": "⧉ Para ver en Windows", "suffix": "", "codec": "h264", "audio": 256,
+    "windows": {"name": "⧉ Para ver en Windows", "apps": "Fotos, móvil, cualquier programa", "suffix": "", "codec": "h264", "audio": 256,
                 "br": {1080: 16, 1440: 25, 2160: 50},
                 "info": "H.264 · {w}×{h} · {fps} FPS · {br} Mbps · audio AAC — se abre con doble clic en "
                         "Windows (Fotos / Reproductor multimedia), en el móvil y en cualquier programa."},

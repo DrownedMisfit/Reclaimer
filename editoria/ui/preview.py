@@ -132,6 +132,7 @@ class TrackLayer:
         scene.addItem(self.fill)
         self.fill.hide()
         self._fill_p = None
+        self._fill_ok = False        # la capa está colocada (con el tamaño de lienzo de AHORA) y a la vista
         self._W = self._H = 1.0
         self._image_path: str | None = None
         self._pix = QPixmap()
@@ -198,7 +199,9 @@ class TrackLayer:
         """▦ Relleno en el visor (como al exportar): llena la pantalla (× zoom), desenfocado y oscurecido."""
         r = self._fill_p
         src = self._bg_src
-        if not r or src is None or src.isNull():
+        # (capa oculta o apartada: un fotograma que llega tarde, de una precarga o de otro proyecto, no vuelve a
+        # enseñar su relleno, que además tendría el tamaño de lienzo de antes: un 16:9 asomando en un Short)
+        if not r or not self._fill_ok or src is None or src.isNull():
             self.fill.hide()
             return
         W, H = self._W, self._H
@@ -207,7 +210,11 @@ class TrackLayer:
         big = src.scaled(max(1, int(src.width() * s)), max(1, int(src.height() * s)), Qt.IgnoreAspectRatio,
                          Qt.SmoothTransformation)
         big = big.copy((big.width() - qw) // 2, (big.height() - qh) // 2, qw, qh)
-        sig = 0.3 + 2.6 * r["desenfoque"]
+        # El mismo desenfoque que al exportar (core/fill.py: boxblur de radio 1–10, dos pasadas, a 1/4 de tamaño):
+        # antes el visor lo enseñaba tres veces menos borroso que el archivo exportado
+        rad = max(1, int(round(1 + 9 * r["desenfoque"])))
+        rad = min(rad, max(1, min(qw, qh) // 2 - 1))
+        sig = (2 * ((2 * rad + 1) ** 2 - 1) / 12) ** 0.5 if r["desenfoque"] > 0.01 else 0.3
         pix = QPixmap.fromImage(_soft_blur(big, sig, max(0.05, 1.0 - 0.75 * r["oscurecer"])))
         self.fill.setPixmap(pix)
         self.fill.setScale(W / max(1, pix.width()))
@@ -404,6 +411,7 @@ class TrackLayer:
             self.leak.hide()
 
     def hide(self):
+        self._fill_ok = False
         self.box.hide()
         self.fill.hide()
         for it in (getattr(self, "_shadow", None), getattr(self, "_outline", None)):
@@ -502,6 +510,7 @@ class TrackLayer:
             src_w, src_h = int(bw) or 16, int(bh) or 9
         fit = box.get("fit", "contain")
         self._W, self._H = float(W), float(H)
+        self._fill_ok = True
         # ⟳ giro y ↔ ↕ voltear de la capa (Inspector → Transformar)
         self._rot = transform.rot_of(box)
         r0 = QRectF(0, 0, bw, bh)
@@ -897,6 +906,48 @@ class CompositionItem(QGraphicsItem):
                        "Arrastra aquí desde Medios · fuera de los huecos = fondo")
 
 
+class _OutsideMask(QGraphicsItem):
+    """Fuera del cuadro del proyecto no se ve NADA del video (como al exportar): tapa con el fondo del visor lo que se
+    salga del lienzo (▦ relleno, clips más grandes o movidos, sombras, textos…). Va encima de las pistas y debajo de
+    las guías y las asas, así el encuadre y sus asas siguen a la vista."""
+
+    E = 1.0e6                                    # (hasta dónde tapa: más que cualquier zoom del visor)
+
+    def __init__(self):
+        super().__init__()
+        self.W, self.H = 1920, 1080
+        self.setZValue(4500)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        self.setAcceptHoverEvents(False)
+
+    def set_size(self, W, H):
+        if (W, H) == (self.W, self.H):
+            return
+        self.prepareGeometryChange()
+        self.W, self.H = W, H
+        self.update()
+
+    def boundingRect(self):
+        e = self.E
+        return QRectF(-e, -e, self.W + 2 * e, self.H + 2 * e)
+
+    def shape(self):
+        from PySide6.QtGui import QPainterPath
+        return QPainterPath()                    # (no tapa los clics: solo se pinta)
+
+    def paint(self, p: QPainter, _opt, w=None):
+        view = w.parentWidget() if w is not None else None
+        brush = view.backgroundBrush() if isinstance(view, QGraphicsView) else QBrush(QColor("#111316"))
+        e, W, H = self.E, float(self.W), float(self.H)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, False)
+        p.setPen(Qt.NoPen)
+        for r in (QRectF(-e, -e, W + 2 * e, e), QRectF(-e, H, W + 2 * e, e),     # arriba · abajo
+                  QRectF(-e, 0, e, H), QRectF(W, 0, e, H)):                     # izquierda · derecha
+            p.fillRect(r, brush)
+        p.restore()
+
+
 class Canvas(QGraphicsView):
     """
     El "lienzo" del video, con el tamaño y formato del proyecto (16:9, vertical...).
@@ -930,6 +981,8 @@ class Canvas(QGraphicsView):
         self.W, self.H = 1920, 1080
         self.frame = self.scene().addRect(QRectF(0, 0, self.W, self.H), QPen(Qt.NoPen), QBrush(Qt.black))
         self.frame.setZValue(-1000)
+        self.outside = _OutsideMask()         # lo que se sale del lienzo no se ve (como al exportar)
+        self.scene().addItem(self.outside)
         self.layers: dict[str, TrackLayer] = {}
         self.subs = SubtitleItem()
         self.scene().addItem(self.subs)
@@ -963,6 +1016,8 @@ class Canvas(QGraphicsView):
         self._tf_drag: dict | None = None
         self.tf_overlay = _TransformOverlay()
         self.scene().addItem(self.tf_overlay)
+        self.snap_guides = _SnapGuides()      # 🧲 imán al mover una capa: centro y bordes del cuadro
+        self.scene().addItem(self.snap_guides)
         self._tf_wheel = QTimer(self)          # la rueda: un solo paso de deshacer al parar de girar
         self._tf_wheel.setSingleShot(True)
         self._tf_wheel.setInterval(450)
@@ -981,7 +1036,10 @@ class Canvas(QGraphicsView):
     def remove_layer(self, track_id: str):
         layer = self.layers.pop(track_id, None)
         if layer:
-            self.scene().removeItem(layer.box)
+            layer.hide()
+            for it in (layer.box, layer.fill, getattr(layer, "_shadow", None), getattr(layer, "_outline", None)):
+                if it is not None and it.scene() is self.scene():
+                    self.scene().removeItem(it)        # (▦ el relleno y la sombra no son hijos de la caja)
 
     def set_canvas_size(self, W: int, H: int):
         if self._sized and (W, H) == (self.W, self.H):
@@ -989,6 +1047,7 @@ class Canvas(QGraphicsView):
         self._sized = True
         self.W, self.H = W, H
         self.frame.setRect(QRectF(0, 0, W, H))
+        self.outside.set_size(W, H)
         self.scene().setSceneRect(QRectF(0, 0, W, H))
         self.subs.set_size(W, H)
         self.titles.set_size(W, H)
@@ -1222,6 +1281,48 @@ class Canvas(QGraphicsView):
         b.pop("flip", None)
         return b
 
+    def _tf_content_rel(self) -> tuple[float, float, float, float]:
+        """🧲 Dónde está lo que SE VE del clip seleccionado dentro de su caja (fracciones 0–1 de la caja): con «encajar»,
+        un video horizontal en una caja vertical solo ocupa la franja del medio, y el imán usa esos bordes."""
+        cid = (self._tf or {}).get("clip")
+        if cid and self.pick_clip_cb is not None:
+            for tid, layer in self.layers.items():
+                if not layer.box.isVisible() or self.pick_clip_cb(tid) != cid:
+                    continue
+                r, cr = layer.box.rect(), getattr(layer, "content_rect", None)
+                if cr is None or r.width() <= 1 or r.height() <= 1:
+                    break
+                v = cr.intersected(QRectF(0, 0, r.width(), r.height()))
+                if v.width() > 1 and v.height() > 1:
+                    return (v.left() / r.width(), v.top() / r.height(), v.width() / r.width(),
+                            v.height() / r.height())
+                break
+        return (0.0, 0.0, 1.0, 1.0)
+
+    def _snap_move(self, box: dict, rel, off: bool = False) -> tuple[dict, list]:
+        """🧲 Imán al mover (como en Resolve): el centro de lo que se ve se pega al centro del cuadro, y sus bordes a los
+        bordes del cuadro, si quedan a menos de ~8 px de pantalla. Devuelve (caja, líneas guía en px del proyecto)."""
+        if off:
+            return box, []
+        rel = rel or (0.0, 0.0, 1.0, 1.0)
+        k = max(1e-6, self.transform().m11())             # px de pantalla por px del proyecto
+        out, lines = dict(box), []
+        for ax, size, r0, rs, full, kind in (("x", "w", rel[0], rel[2], self.W, "v"),
+                                              ("y", "h", rel[1], rel[3], self.H, "h")):
+            thr = 8.0 / (k * max(1, full))
+            a = out[ax] + r0 * out[size]                  # borde de lo que se ve (izquierda / arriba)
+            z = a + rs * out[size]                        # borde contrario
+            cands = [(t - v, t) for v, t in (((a + z) / 2, 0.5), (a, 0.0), (z, 1.0))]
+            delta, _t = min(cands, key=lambda c: abs(c[0]))
+            if abs(delta) > thr:
+                continue
+            out[ax] += delta
+            a, z = a + delta, z + delta
+            for v, t in (((a + z) / 2, 0.5), (a, 0.0), (z, 1.0)):
+                if abs(v - t) < 1e-6:
+                    lines.append((kind, t * full))
+        return out, lines
+
     def _tf_set(self, box: dict):
         """Caja nueva (con límites razonables): se ve al momento; se guarda al soltar."""
         w = min(4.0, max(0.05, box["w"]))
@@ -1318,7 +1419,8 @@ class Canvas(QGraphicsView):
                 box = self._stretch_box() if hit[0] == "stretch" or (
                     hit[0] == "size" and e.modifiers() & Qt.ShiftModifier) else dict(self._tf["box"])
                 self._tf_drag = {"mode": hit[0], "corner": hit[1], "from": sp, "box": box,
-                                 "free": hit[0] == "size" and bool(e.modifiers() & Qt.ShiftModifier)}
+                                 "free": hit[0] == "size" and bool(e.modifiers() & Qt.ShiftModifier),
+                                 "rel": self._tf_content_rel() if hit[0] == "move" else None}
                 return
         if self.framing_enabled and e.button() == Qt.LeftButton:
             self._drag_from = self.mapToScene(e.position().toPoint())
@@ -1374,8 +1476,11 @@ class Canvas(QGraphicsView):
         if self._tf_drag is not None:
             d, b = self._tf_drag, self._tf_drag["box"]
             dx, dy = (sp.x() - d["from"].x()) / self.W, (sp.y() - d["from"].y()) / self.H
-            if d["mode"] == "move":
-                self._tf_set(dict(b, x=b["x"] + dx, y=b["y"] + dy))
+            if d["mode"] == "move":          # 🧲 se pega al centro y a los bordes del cuadro (Ctrl: sin imán)
+                nb, lines = self._snap_move(dict(b, x=b["x"] + dx, y=b["y"] + dy), d.get("rel"),
+                                            bool(e.modifiers() & Qt.ControlModifier))
+                self.snap_guides.set_lines(lines, self.W, self.H, self.W / max(1, self.viewport().width()))
+                self._tf_set(nb)
             elif d["mode"] == "stretch":     # ↔ ↕ media arista: solo ancho o solo alto (la arista contraria, quieta)
                 px, py = sp.x() / self.W, sp.y() / self.H
                 e_ = d["corner"]
@@ -1470,6 +1575,7 @@ class Canvas(QGraphicsView):
         if self._tf_drag is not None:
             moved = self._tf_drag["box"] != self._tf["box"]
             self._tf_drag = None
+            self.snap_guides.set_lines([], self.W, self.H, self.snap_guides.k)
             if moved:
                 self._tf_commit()
             return
@@ -1662,6 +1768,39 @@ class _TransformOverlay(QGraphicsItem):
         painter.setPen(QPen(QColor("#e8e8ea"), 1.2 * self.k))
         painter.drawLine(QPointF(c.x() - 3 * s, c.y()), QPointF(c.x() + 3 * s, c.y()))
         painter.drawLine(QPointF(c.x(), c.y() - 3 * s), QPointF(c.x(), c.y() + 3 * s))
+
+
+class _SnapGuides(QGraphicsItem):
+    """🧲 Líneas guía (como en Resolve) mientras la capa que mueves se pega al centro o a un borde del cuadro."""
+
+    def __init__(self):
+        super().__init__()
+        self.W, self.H = 1920, 1080
+        self.lines: list = []                     # [("v", x) | ("h", y)] en píxeles del proyecto
+        self.k = 1.0
+        self.setZValue(4960)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+
+    def set_lines(self, lines: list, W: int, H: int, k: float):
+        if (lines, W, H, k) == (self.lines, self.W, self.H, self.k):
+            return
+        self.prepareGeometryChange()
+        self.lines, self.W, self.H, self.k = list(lines), W, H, k
+        self.update()
+
+    def boundingRect(self):
+        m = 4 * self.k
+        return QRectF(-m, -m, self.W + 2 * m, self.H + 2 * m)
+
+    def paint(self, painter, _opt, _w=None):
+        if not self.lines or (_w is not None and _w.property("clean_view")):
+            return
+        painter.setPen(QPen(QColor("#ff3b6b"), 1.4 * self.k))
+        for kind, v in self.lines:
+            if kind == "v":
+                painter.drawLine(QPointF(v, 0), QPointF(v, self.H))
+            else:
+                painter.drawLine(QPointF(0, v), QPointF(self.W, v))
 
 
 class _RegionOverlay(QGraphicsItem):
@@ -2185,6 +2324,13 @@ class PreviewPanel(QWidget):
             hl.addWidget(b)
             self.quick[key] = b
         hl.addStretch()
+        # 📱 Barra de los Shorts (la llena la ventana; solo se ve en la pestaña Shorts)
+        self.shorts_bar = QWidget()
+        self.shorts_lay = QHBoxLayout(self.shorts_bar)
+        self.shorts_lay.setContentsMargins(0, 0, 8, 0)
+        self.shorts_lay.setSpacing(4)
+        self.shorts_bar.setVisible(False)
+        hl.addWidget(self.shorts_bar)
         from PySide6.QtWidgets import QComboBox
         from ..core.proxies import LEVELS
         self.quality = QComboBox()
@@ -2251,6 +2397,11 @@ class PreviewPanel(QWidget):
         hl.addWidget(self.zoom_label)
         hl.addSpacing(18)
         hl.addWidget(self.time_label)
+        self.total_label = QLabel("/ 00:00:00:00")      # ⏱ la duración total del video, al lado del tiempo
+        self.total_label.setObjectName("dim")
+        self.total_label.setToolTip("Duración total del video")
+        hl.addSpacing(6)
+        hl.addWidget(self.total_label)
 
         def btn(text, tip):
             b = QPushButton(text)
@@ -2316,6 +2467,7 @@ class PreviewPanel(QWidget):
     def set_time(self, t: float, total: float):
         self.time_label.setText(fmt_tc(t, self.fps))
         self.duration_label.setText(fmt_tc(total, self.fps))
+        self.total_label.setText("/ " + fmt_tc(total, self.fps))
 
 
 class _Lane:
