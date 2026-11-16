@@ -7,6 +7,8 @@ Editor de video gratuito para Windows con un asistente de IA que <b>propone</b> 
 Videos de YouTube, Shorts y edits musicales. Todo funciona en tu PC: sin cuentas, sin nube, sin marcas de agua.
 </p>
 
+<p align="center"><a href="https://github.com/DrownedMisfit/Reclaimer/releases/latest/download/Reclaimer_instalador.exe"><img src="https://img.shields.io/badge/%E2%AC%87%20Descargar-Windows%2010%20%2F%2011-orange?style=for-the-badge" alt="Descargar para Windows"></a><br><sub>Instalador con todo incluido · gratis · <a href="#-descargar-e-instalar-windows-10--11">cómo instalarlo</a></sub></p>
+
 <p align="center"><a href="https://ko-fi.com/pigmeofurtivoyt"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Apóyame en Ko-fi"></a><br><sub>Es gratis. Si te sirve, puedes invitarme un café ☕</sub></p>
 
 ---
@@ -32,16 +34,35 @@ Videos de YouTube, Shorts y edits musicales. Todo funciona en tu PC: sin cuentas
 
 Todo lo que hace la IA se puede deshacer con Ctrl+Z.
 
-## Instalación (Windows 10 / 11)
+## ⬇ Descargar e instalar (Windows 10 / 11)
 
-1. Descarga este repositorio (botón verde **Code → Download ZIP**) y descomprímelo (clic derecho → Extraer todo).
-2. Doble clic en **`INSTALAR.bat`**: instala lo que falte (si no tienes **Python 3.12** o **FFmpeg**, te pregunta y
-   los instala con winget), comprueba que todo funciona y crea el acceso directo «Reclaimer» en el escritorio.
-   Solo la primera vez; tarda unos minutos.
-3. Abre Reclaimer con el acceso directo (o con **`INICIAR.bat`**).
+<p align="center"><a href="https://github.com/DrownedMisfit/Reclaimer/releases/latest/download/Reclaimer_instalador.exe"><b>⬇ Descargar Reclaimer (instalador, 1,7 GB)</b></a></p>
 
-Opcional: **`motor_ia/INSTALAR_MOTOR_IA.bat`** instala el motor de IA avanzada (separar voz y música, recortar
-personajes, etc.). Ocupa varios GB y funciona mejor con una tarjeta gráfica.
+1. Abre el archivo que se descargó (**Reclaimer_instalador.exe**).
+2. Si Windows dice **«Windows protegió su PC»**, pulsa **«Más información» → «Ejecutar de todas formas»**.
+   Sale con casi todos los programas gratuitos que no pagan un certificado; el código completo está aquí, a la vista.
+3. **Siguiente → Instalar.** No pide contraseña de administrador y **trae todo lo necesario** (no hay que instalar
+   Python, FFmpeg ni nada más).
+4. Abre **Reclaimer** desde el escritorio o el menú Inicio. La primera vez te enseña qué trae y qué es opcional.
+
+- **Sin instalar (portátil):** descarga
+  [Reclaimer_todo_en_uno.zip](https://github.com/DrownedMisfit/Reclaimer/releases/latest/download/Reclaimer_todo_en_uno.zip),
+  descomprímelo (clic derecho → Extraer todo) y abre **Reclaimer.exe**. Sirve también desde un disco USB.
+- **Desinstalar:** Configuración → Aplicaciones → Reclaimer. Tus proyectos y videos no se borran.
+- **Necesitas:** Windows 10 u 11 de 64 bits y unos 4 GB libres (8 GB de RAM recomendados).
+- **Motor de IA (opcional):** separar voz y música, recortar personajes y transcribir con la tarjeta gráfica.
+  Se instala desde el propio programa, con su barra de progreso (Ayuda → ◈ Motor de IA). Descarga entre 3 y 6 GB.
+- Todas las versiones: [página de descargas](https://github.com/DrownedMisfit/Reclaimer/releases).
+
+<details>
+<summary>Para programadores: instalar desde el código</summary>
+
+1. Descarga este repositorio (botón verde **Code → Download ZIP**) y descomprímelo.
+2. Doble clic en **`INSTALAR.bat`**: instala lo que falte (Python 3.12 y FFmpeg con winget, si no los tienes),
+   comprueba que todo funciona y crea el acceso directo «Reclaimer» en el escritorio.
+3. Abre Reclaimer con el acceso directo (o con **`INICIAR.bat`**). El motor de IA:
+   **`motor_ia/INSTALAR_MOTOR_IA.bat`**.
+</details>
 
 El manual completo está en **[MANUAL.md](MANUAL.md)**.
 
@@ -59,6 +80,7 @@ Incluye o descarga material de terceros con sus propias licencias:
 | PySide6 (Qt) | LGPL v3 |
 | faster-whisper | MIT |
 | Modelo IS-Net para recortar (se descarga al usarlo) | Apache 2.0 |
-| FFmpeg (se instala aparte) | LGPL / GPL |
+| FFmpeg (incluido en el instalador y el zip; su código fuente está en la misma página de descargas) | GPL v3 |
+| Python 3.12 (incluido en el instalador y el zip) | PSF License |
 | Narración del proyecto de ejemplo (voz sintética Kokoro) | Apache 2.0 (modelo); la grabación es de este proyecto |
 | Clips del proyecto de ejemplo (se descargan de Pexels al crearlo, no van en el repositorio) | Licencia de Pexels |
