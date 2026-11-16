@@ -440,8 +440,12 @@ class VoicePanel(QWidget):
         has_sug = bool(mid) and any(s.media_id == mid for s in p.suggestions)
         if not busy and has_sug != getattr(self, "_had_sug", None):
             self._had_sug = has_sug
-            if hasattr(self, "tabs"):
-                self.tabs.setCurrentIndex(2 if has_sug else 0)
+            if hasattr(self, "tabs"):               # (por nombre: «Transcribir» se fue a la pestaña IA)
+                quiero = "Sugerencias" if has_sug else "Limpiar"
+                for i in range(self.tabs.count()):
+                    if self.tabs.tabText(i) == quiero:
+                        self.tabs.setCurrentIndex(i)
+                        break
 
     def _add_narration_to_timeline(self):
         mid = self.media_id()
@@ -584,6 +588,8 @@ class VoicePanel(QWidget):
 
     def _on_transcribed(self, result):
         mid, tr, items, opts = result
+        if mid not in self.ctrl.project.media:     # (el proyecto se reinició mientras tanto: no se mete en el nuevo)
+            return
         self.ctrl.set_transcript(mid, tr)
         if self.ctrl.project.subtitles.media_id not in self.ctrl.project.transcripts:
             self.ctrl.set_subtitle_style("Texto de los subtítulos", media_id=mid)

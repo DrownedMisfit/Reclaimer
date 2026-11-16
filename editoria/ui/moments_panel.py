@@ -570,6 +570,33 @@ class MomentsPanel(QWidget):
     def marks_enabled(self) -> bool:
         return self._web() or bool(self.local_query)
 
+    def limpiar(self):
+        """Otro proyecto: los resultados de antes (de medios que ya no están) se quitan."""
+        job = getattr(self, "job", None)
+        if job is not None:
+            try:
+                job.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            self.job = None
+        self.grid.clear()
+        self.results, self.web_results = [], []
+        self.web_all = {}
+        self.web_bar.hide()
+        self.local_query = ""
+        self.ask_card.hide()
+        self._ask_id = None
+        try:
+            self.frame.clear()
+            self.info.clear()
+            self.query.clear()
+            self.status.setText("")
+            self.player.pause()                  # (stop() a veces se bloquea para siempre en Windows)
+            from PySide6.QtCore import QUrl as _QU
+            self.player.setSource(_QU())
+        except Exception:  # noqa: BLE001
+            pass
+
     def _source_changed(self, _i=0):
         web = self._web()
         self.web_bar.setVisible(web and bool(self.web_all))

@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ajustes  # noqa: E402,F401
 
 import numpy as np  # noqa: E402
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -404,6 +404,17 @@ def main():
         if c.red() > 190 and c.green() < 120 and c.blue() < 120:
             reds += 1
     check(reds > 0, f"la línea roja se dibuja en el corte de 1.5 s (píxel x={x}, y={y})")
+    # solo el corte elegido lleva línea en la pista (los demás, su triángulo arriba: no estorban al cortar a mano)
+    otro = next(i for i in tl.cut_issues if abs(i["t"] - 9.2) < 0.01)
+    check(tl._es_elegido(otro) is False, "el corte de 9.2 s no está elegido")
+    check(tl.cut_issue_at(QPointF(tl.x_for(9.2), y)) is None,
+          "en la pista, un corte NO elegido no se puede pinchar (el clic va a la pista)")
+    check(tl.cut_issue_at(QPointF(tl.x_for(9.2), tl.RULER_H - 6)) is not None, "su triángulo de la regla sí")
+    claves = [i["key"] for i in tl.cut_issues]
+    c3.approve_cuts(claves)
+    check(tl.refresh_cut_issues() == 0, "«Quitar todos los avisos» los quita todos")
+    c3.undo_stack.undo()
+    check(tl.refresh_cut_issues() == 2, "y un Ctrl+Z los devuelve todos")
 
     # clic en la línea roja: lleva el cabezal al corte y abre el ajuste
     win3.engine.user_seek(0.0)

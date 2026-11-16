@@ -136,6 +136,8 @@ class DiagnosticsDialog(QDialog):
         """Que el programa no siga usando lo borrado."""
         ctrl = self.win.ctrl
         if key == "proxies" and hasattr(self.win, "proxies"):
+            from ..core import proxies as _PX
+            _PX.forget_cache()                   # (que no crea que siguen ahí)
             self.win.proxies.ensure()            # se vuelven a crear si estás usando «Media / Un cuarto»
             self.win.engine.refresh_sources()
         elif key == "huellas_clips":

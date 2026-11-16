@@ -12,14 +12,13 @@ import re
 import subprocess
 
 from . import media as media_tools
-from .paths import PROGRAM_DIR
 
 COPY = {"aac": ".m4a", "mp3": ".mp3"}      # códecs que se copian sin tocar
 
 
 def out_dir() -> str:
-    from .paths import app_data_dir
-    base = app_data_dir() if os.environ.get("EDITORIA_DATOS") else PROGRAM_DIR   # (las pruebas: su carpeta)
+    from .paths import app_data_dir, user_dir
+    base = app_data_dir() if os.environ.get("EDITORIA_DATOS") else user_dir()   # (las pruebas: su carpeta)
     d = base / "Audio extraído"
     d.mkdir(parents=True, exist_ok=True)
     return str(d)

@@ -7,6 +7,10 @@ ventana al empezar y los devuelve al terminar (pase lo que pase en la prueba).
 from __future__ import annotations
 
 import atexit
+import os
+
+# 🎙 Las pruebas transcriben con el procesador (y sus modelos falsos); solo test_transcribir_tarjeta usa la tarjeta
+os.environ.setdefault("EDITORIA_TARJETA_MOTOR", "0")
 
 from PySide6.QtCore import QSettings
 

@@ -79,6 +79,14 @@ class ShortcutsDialog(QDialog):
                          "eliges los que quieres.")
         b_res.clicked.connect(self.import_resolve)
         row.addWidget(b_res)
+        b_exp = QPushButton("⬆ Exportar…")
+        b_exp.setToolTip("Guarda tus atajos en un archivo (para otro PC o para compartirlos)")
+        b_exp.clicked.connect(lambda: self.export_file())
+        b_imp = QPushButton("⬇ Importar…")
+        b_imp.setToolTip("Pone los atajos de un archivo exportado desde Reclaimer")
+        b_imp.clicked.connect(lambda: self.import_file())
+        row.addWidget(b_exp)
+        row.addWidget(b_imp)
         close = QPushButton("Cerrar")
         close.setObjectName("primary")
         close.clicked.connect(self.accept)
@@ -189,6 +197,79 @@ class ShortcutsDialog(QDialog):
                 if self.set_shortcut(key, QKeySequence(res), ask=False):
                     n += 1
         self.msg.setText(f"⬇ {n} atajos traídos de tu DaVinci Resolve. «↺ Restablecer todos» vuelve a los de fábrica.")
+        return n
+
+    def export_file(self, path: str | None = None) -> str | None:
+        """⬆ Tus atajos (todos, como están ahora) en un archivo .json."""
+        import json
+        if path is None:
+            from PySide6.QtWidgets import QFileDialog
+            path, _f = QFileDialog.getSaveFileName(self, "Exportar atajos", "Atajos de Reclaimer.json",
+                                                   "Atajos de Reclaimer (*.json)")
+            if not path:
+                return None
+        data = {"programa": "Reclaimer", "tipo": "atajos", "version": 1,
+                "atajos": {k: a.shortcut().toString(QKeySequence.PortableText) for k, (a, _d) in self.actions.items()}}
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+        except OSError as exc:
+            self.msg.setText(f"No pude guardarlo: {exc}")
+            return None
+        self.msg.setText(f"⬆ {len(data['atajos'])} atajos guardados en «{path}».")
+        return path
+
+    def import_file(self, path: str | None = None) -> int:
+        """⬇ Pone los atajos de un archivo exportado (las órdenes que no existen aquí se saltan). Devuelve cuántos."""
+        import json
+        if path is None:
+            from PySide6.QtWidgets import QFileDialog
+            path, _f = QFileDialog.getOpenFileName(self, "Importar atajos", "", "Atajos de Reclaimer (*.json)")
+            if not path:
+                return 0
+        import os as _os
+        try:
+            if _os.path.getsize(path) > 1_000_000:
+                raise ValueError("el archivo es demasiado grande para ser de atajos")
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            atajos = data["atajos"] if isinstance(data, dict) and data.get("tipo") == "atajos" else None
+            if not isinstance(atajos, dict):
+                raise ValueError("no es un archivo de atajos de Reclaimer")
+        except (OSError, ValueError, KeyError, RecursionError) as exc:
+            self.msg.setText(f"No pude leerlo: {exc}")
+            return 0
+        validos: dict = {}
+        malos = 0
+        for k, txt in atajos.items():
+            if k not in self.actions:
+                continue
+            if not isinstance(txt, str) or len(txt) > 64:
+                malos += 1
+                continue
+            seq = QKeySequence(txt, QKeySequence.PortableText)
+            if txt.strip() and (seq.isEmpty() or seq.count() > 1
+                                or seq.toString(QKeySequence.PortableText).lower() != txt.strip().lower()):
+                malos += 1                               # (no es un atajo de verdad: el actual se queda)
+                continue
+            validos[k] = seq
+        antes = {k: a.shortcut() for k, (a, _d) in self.actions.items()}
+        n = 0
+        for k, seq in validos.items():
+            if seq != self.actions[k][0].shortcut() and self.set_shortcut(k, seq, ask=False):
+                n += 1
+        sin = [k for k, a in antes.items() if not a.isEmpty() and self.actions[k][0].shortcut().isEmpty()
+               and k not in validos]
+        saltados = sum(1 for k in atajos if k not in self.actions)
+        txt_msg = f"⬇ {n} atajo(s) cambiados"
+        if saltados:
+            txt_msg += f" ({saltados} de órdenes que no hay aquí)"
+        if malos:
+            txt_msg += f"; {malos} no válidos se ignoraron"
+        if sin:
+            txt_msg += (". Se quedaron sin atajo (lo usa otra orden del archivo): "
+                        + ", ".join(k.split("/", 1)[-1].replace("&", "") for k in sin[:5]))
+        self.msg.setText(txt_msg + ".")
         return n
 
     def _reset_all(self):

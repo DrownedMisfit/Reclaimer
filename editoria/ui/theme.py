@@ -32,6 +32,18 @@ ACCENT = "#e8742f"     # naranja de Resolve (lo activo, el botón principal)
 ACCENT_HI = "#f4884a"
 RED = "#e5413c"        # cabezal
 
+# 🎨 Tema «gris» (de entrada desde el 14/11; ver ui/tema.py): grises más claros y bordes más marcados, para ver dónde
+# empieza y termina cada cosa. Lo que tiene color (naranja, rojo, azul de los clips) no cambia.
+from . import tema as _tema  # noqa: E402
+if _tema.es_gris():
+    _P = _tema.paleta()
+    BG, BG_DEEP, HEADER = _P["BG"], _P["BG_DEEP"], _P["HEADER"]
+    RAISED, RAISED_HI, FIELD = _P["RAISED"], _P["RAISED_HI"], _P["FIELD"]
+    BORDER, BORDER_HI = _P["BORDER"], _P["BORDER_HI"]
+    TEXT, TEXT_DIM, TEXT_FAINT = _P["TEXT"], _P["TEXT_DIM"], _P["TEXT_FAINT"]
+_PALETA = {BG, BG_DEEP, HEADER, RAISED, RAISED_HI, FIELD, BORDER, BORDER_HI, TEXT, TEXT_DIM, TEXT_FAINT, ACCENT,
+           ACCENT_HI, RED}
+
 _UI = (Path(__file__).resolve().parent.parent / "assets" / "ui").as_posix()
 
 STYLE = f"""
@@ -151,6 +163,30 @@ QSlider::sub-page:horizontal {{ background: rgba(232,116,47,0.85); border-radius
 QSlider::handle:horizontal {{ background: #e9eaee; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
 QSlider::handle:horizontal:hover {{ background: white; }}
 """
+if _tema.es_gris():                            # (los grises sueltos de la hoja, también más claros)
+    STYLE = _tema.aclarar_texto(STYLE, _PALETA)
+    # botones pulsados y deshabilitados que se distingan del normal (en gris quedaban casi iguales)
+    STYLE += (f"\nQPushButton:pressed {{ background: {BG_DEEP}; }}"
+              f"\nQPushButton:disabled {{ background: {BG}; border-color: {BORDER}; color: {TEXT_FAINT}; }}\n")
+
+
+def _hook_estilos():
+    """En los temas grises, las hojas de estilo propias de cada panel (fondos y textos fijos) también pasan por el
+    tema: sin esto, el panel de Texto, los avisos atenuados, los tiradores… quedaban oscuros o casi invisibles."""
+    from PySide6.QtWidgets import QWidget
+    if getattr(QWidget, "_reclaimer_tema", False):
+        return
+    orig = QWidget.setStyleSheet
+
+    def setStyleSheet(self, css):
+        if css:
+            css = _tema.aclarar_texto(css, _PALETA)
+        return orig(self, css)
+    try:
+        QWidget.setStyleSheet = setStyleSheet
+        QWidget._reclaimer_tema = True
+    except (TypeError, AttributeError):        # (si Qt no lo deja, solo la hoja general va en gris)
+        pass
 
 
 def glyph_icon(ch: str, px: int = 20, color: str = TEXT_FAINT, on: str = "#ffffff") -> QIcon:
@@ -198,8 +234,11 @@ def apply_fonts(app: QApplication) -> tuple[float, float]:
     f = QFont()
     f.setFamilies(FONT_FAMILIES)
     f.setPointSizeF(9 * ui)
-    app.setFont(f)
-    app.setStyleSheet(scaled_style(ui))
+    if app.font() != f:
+        app.setFont(f)
+    ss = scaled_style(ui)
+    if app.styleSheet() != ss:               # (⚡ la misma: no se repasan otra vez todos los widgets, ~250 ms al abrir)
+        app.setStyleSheet(ss)
     return ui, tl
 
 
@@ -317,8 +356,10 @@ def apply_dark_theme(app: QApplication) -> None:
         QPalette.PlaceholderText: "#5f626a", QPalette.Mid: BORDER, QPalette.Dark: BG_DEEP,
     }
     for role, color in roles.items():
-        pal.setColor(role, QColor(color))
-    pal.setColor(QPalette.Disabled, QPalette.Text, QColor("#5b5e66"))
-    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#5b5e66"))
+        pal.setColor(role, QColor(_tema.aclarar(color) if _tema.es_gris() and color not in _PALETA else color))
+    pal.setColor(QPalette.Disabled, QPalette.Text, _tema.qc("#5b5e66"))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, _tema.qc("#5b5e66"))
     app.setPalette(pal)
+    if _tema.es_gris():
+        _hook_estilos()
     apply_fonts(app)

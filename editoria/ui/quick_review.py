@@ -626,10 +626,11 @@ class QuickReview(QWidget):
             return
         if it.kind == "cut":
             if self._valid(it):
-                if getattr(self.win, "cut_fix", None) is None:     # (antes fallaba si el panel aún no se había abierto)
+                panel = self.win.cut_fix_panel() if hasattr(self.win, "cut_fix_panel") else None
+                if panel is None:                                    # (sin ventana principal: suelto, como antes)
                     from .cut_fix import CutFixPanel
-                    self.win.cut_fix = CutFixPanel(self.win)
-                self.win.cut_fix.show_issue(it.track_id, it.t)
+                    panel = self.win.cut_fix = getattr(self.win, "cut_fix", None) or CutFixPanel(self.win)
+                panel.show_issue(it.track_id, it.t)
                 self.raise_()
                 self.activateWindow()
                 self.setFocus()

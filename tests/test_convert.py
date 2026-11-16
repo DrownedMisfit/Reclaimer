@@ -100,8 +100,13 @@ def main():
         assert all(dlg.list.item(i).text().startswith("✓") for i in range(dlg.list.count()))
         print("✓ ventana Convertir: arrastrar, elegir carpeta y convertir en segundo plano")
         assert "&Convertir" in [a_.text() for a_ in win.menuBar().actions()]
-        assert "IA ✨" in [a_.text() for a_ in win.menuBar().actions()], "13/11: menú «IA ✨» a la vista"
-        print("✓ menú «Convertir» junto a Ayuda (y el menú «IA ✨» a la vista)")
+        assert "IA ✨" not in [a_.text() for a_ in win.menuBar().actions()], "14/11: la IA, solo en su pestaña"
+        mas = win.ai_panel.btn_more.menu()
+        assert mas is not None and any("edit musical" in a_.text() for a_ in mas.actions())
+        assert any(a_.shortcut().toString() == "Ctrl+M" for a_ in win.actions()), "los atajos de la IA siguen"
+        assert "IA" not in [b_.text() for b_ in win.findChildren(type(win.btn_titles))
+                            if b_.parent() is not None and b_.parent().objectName() == "pagebar"]
+        print("✓ menú «Convertir» junto a Ayuda; la IA solo en su pestaña («✨ Más» con todo y sus atajos)")
         ed = EditDialog(win.ctrl, win)
         ed.use_song_file(mkv)
         t0 = time.time()

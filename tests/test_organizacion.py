@@ -49,14 +49,12 @@ def main():
     pump(app, 0.3)
 
     menus = {a.text().replace("&", ""): a.menu() for a in win.menuBar().actions() if a.menu() is not None}
-    assert "IA ✨" in menus, list(menus)
-    ia = [a.text() for a in menus["IA ✨"].actions()]
+    assert "IA ✨" not in menus, "14/11: la IA, solo en su pestaña"
+    ia = [a.text() for a in win.ai_panel.btn_more.menu().actions()]
     voz = [a.text() for a in menus["Voz"].actions()]
     assert "🎬 Proponer B-roll" in ia and "✨ Primera versión automática…" in ia and "🎵 Crear edit musical…" in ia
     assert not any("B-roll" in t or "edit musical" in t for t in voz), voz
-    titulos = list(menus)
-    assert titulos.index("Voz") + 1 == titulos.index("IA ✨"), titulos
-    print("✓ menú «IA ✨» a la vista, después de «Voz»; «Voz» solo con lo de la voz")
+    print("✓ lo de la IA en la pestaña «IA ✨» → «✨ Más»; «Voz» solo con lo de la voz")
 
     for b in (win.btn_broll, win.btn_scenes, win.btn_thumb, win.btn_export, win.btn_more):
         assert b.isVisible(), b.text()

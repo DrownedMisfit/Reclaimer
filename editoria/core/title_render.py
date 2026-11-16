@@ -10,6 +10,7 @@ Opciones de cada texto (clip.text):
   shadow · shadow_color · shadow_x, shadow_y (% del tamaño) · shadow_blur · shadow_opacity
   box · box_color · box_outline_color · box_outline_width · box_width, box_height (margen, % del tamaño)
   box_radius (esquinas, % del alto de la caja) · box_cx, box_cy (desplazamiento) · box_opacity
+  fade (segundos de fundido al entrar y al salir; 0,15 de entrada)
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ FACTORY = {
     "box_width": 22.0, "box_height": 10.0, "box_radius": 0.0, "box_cx": 0.0, "box_cy": 0.0, "box_opacity": 0.6,
     # mientras se ve el texto, lo que hay debajo (los videos/imágenes) se desenfoca (0 = no, 1 = mucho)
     "blur_under": 0.0,
+    "fade": 0.15,           # segundos de fundido al aparecer y al irse (visor y exportación)
 }
 BLUR_UNDER_DEFAULT = 0.5      # los textos que añades tú lo traen activado
 STYLE_KEYS = [k for k in FACTORY if k != "content"]

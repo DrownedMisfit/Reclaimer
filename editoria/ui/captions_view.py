@@ -82,7 +82,7 @@ class CaptionView(QWidget):
                               "el video: pestaña «Subtítulos» → «⚡ Subtítulos para Short». Doble clic = corregir.")
         else:
             self.cues = []
-            self.info.setText("Sin transcripción: transcríbela en «Limpieza».")
+            self.info.setText("Sin transcripción: transcríbela en la pestaña «IA ✨» → «🎙 Transcribir».")
         self._starts = [c.start for c in self.cues]
         self.list.setUpdatesEnabled(False)
         self.list.clear()

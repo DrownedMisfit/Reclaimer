@@ -78,6 +78,9 @@ def previous(p: Project, c: Clip) -> Clip | None:
 
 def pairs(p: Project, track_id: str) -> list[tuple[Clip, Clip, dict]]:
     """Transiciones válidas de una pista: [(izquierda, derecha, {"type", "dur"})]."""
+    ex = p.memo() if hasattr(p, "memo") else None
+    if ex is not None and ("pairs", track_id) in ex:
+        return ex[("pairs", track_id)]               # (⚡ al reproducir: una vez por cambio del proyecto)
     out = []
     clips = p.clips_on(track_id)
     for left, right in zip(clips, clips[1:]):
@@ -88,7 +91,41 @@ def pairs(p: Project, track_id: str) -> list[tuple[Clip, Clip, dict]]:
             continue
         d = clamp_dur(t.get("dur", 0.5), left, right)
         out.append((left, right, {"type": t["type"], "dur": d, "ai": bool(t.get("ai"))}))
+    if ex is not None:
+        ex[("pairs", track_id)] = out
     return out
+
+
+# ⏱ Duración automática: lo típico de cada tipo (un latigazo es rápido; un fundido a negro, pausado)…
+BASE_DUR = {"fade": 0.5, "fadeblack": 0.7, "fadewhite": 0.3, "dissolve": 0.5, "hblur": 0.25, "zoomin": 0.35,
+            "slideleft": 0.4, "slideright": 0.4, "wipeleft": 0.45, "smoothleft": 0.5, "circleopen": 0.6,
+            "radial": 0.6, "pixelize": 0.4, "hlwind": 0.5, "squeezeh": 0.4}
+
+
+def auto_on() -> bool:
+    """¿«⏱ Auto» en la duración de las transiciones? (panel Efectos; de entrada, sí)."""
+    from PySide6.QtCore import QSettings
+    return str(QSettings("EditorIA", "EditorIA").value("transiciones/auto", "true")).lower() == "true"
+
+
+def auto_dur(ttype: str, left: Clip, right: Clip, beats: list[float] | None = None) -> float:
+    """…y si suena música con ritmo conocido en ese corte, lo más cercano a eso que dure ¼, ½, 1 o 2 golpes (sin
+    alejarse más de la mitad o el doble de lo típico). Siempre dentro de lo que permiten los dos clips."""
+    import bisect
+    base = BASE_DUR.get(ttype, 0.5)
+    d = base
+    cut = right.start
+    if beats and len(beats) >= 4:
+        k = bisect.bisect_left(beats, cut)
+        cerca = beats[max(0, k - 3):k + 3]
+        if len(cerca) >= 3 and cerca[0] - 1.0 <= cut <= cerca[-1] + 1.0:     # (el corte cae dentro de la canción)
+            gaps = sorted(b - a for a, b in zip(cerca, cerca[1:]) if b - a > 0.15)
+            if gaps:
+                g = gaps[len(gaps) // 2]
+                cand = [g * m for m in (0.25, 0.5, 1.0, 2.0) if 0.5 * base <= g * m <= 2.0 * base]
+                if cand:                          # (a ritmo, pero nunca la mitad o el doble de lo típico)
+                    d = min(cand, key=lambda x: (abs(x - base), -x))
+    return round(clamp_dur(d, left, right), 3)
 
 
 def clamp_dur(d: float, left: Clip, right: Clip) -> float:
@@ -107,7 +144,7 @@ def handles(p: Project, c: Clip) -> tuple[float, float]:
 
 def preview_fx(p: Project, c: Clip) -> dict | None:
     """Aproximación para el visor (que muestra un clip por pista): un fundido a negro (o destello)
-    a cada lado del corte. El resultado exacto se ve con «▶ Ver la transición» o al exportar."""
+    a cada lado del corte, mientras se prepara la de verdad (ui/zone_preview.py la pone encima)."""
     fx = dict(c.fx or {})
     changed = False
     t_in = None

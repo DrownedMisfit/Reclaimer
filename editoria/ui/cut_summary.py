@@ -156,7 +156,7 @@ class CutSummary(QWidget):
                     secs += b - a
         self.tree.blockSignals(False)
         if not tr:
-            self.info.setText("Todavía no hay transcripción. Ve a «Limpieza» → «Transcribir y analizar».")
+            self.info.setText("Todavía no hay transcripción. Ve a la pestaña «IA ✨» → «🎙 Transcribir».")
         elif not sugs:
             self.info.setText("No hay nada pendiente que quitar.")
         else:

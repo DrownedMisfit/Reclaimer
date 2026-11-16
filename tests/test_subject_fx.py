@@ -103,6 +103,9 @@ def main():
     assert gi == ci - 1 and p.clips[g].fx.get("glow") and not (p.clips[cid].fx or {}).get("glow")
     assert occupied in p.clips
     print("✓ resplandor solo en la copia del personaje; con la pista de encima ocupada se crea otra justo encima")
+    tc = ctrl.subject_layer(cid, sm, "censura")
+    assert p.clips[tc].fx.get("blur") == 1.0 and p.clips[tc].fx.get("subject_mask")         and not (p.clips[cid].fx or {}).get("blur")
+    print("✓ 🙈 tapar al que se mueve: desenfoque máximo solo en la copia recortada (la IA lo sigue)")
 
     dlg = SubjectCutDialog(ctrl, cid, 1.0, win, fx_mode=True)
     assert dlg.fxonly.isChecked() and dlg.preset.isEnabled() and dlg.preset.count() == len(ctrl.SUBJECT_FX)

@@ -267,6 +267,33 @@ class SubtitleStyle:
     emphasis: list[int] = field(default_factory=list)  # índices de palabras resaltadas
 
 
+class _Lectura:
+    def __init__(self, project, rev):
+        self.p, self.rev = project, rev
+
+    def __enter__(self):
+        d = self.p.__dict__
+        prev = d.get("_lect")
+        self._prev = prev
+        if prev is not None and (self.rev is None or prev[0] == self.rev):
+            return self.p                        # (anidado o misma versión: lo ya ordenado vale)
+        guardado = d.get("_lect_rev")
+        if self.rev is not None and guardado is not None and guardado[0] == self.rev:
+            d["_lect"] = guardado
+        else:
+            d["_lect"] = [self.rev, None, {}]        # [versión, clips por pista, otros (duración, transiciones…)]
+        return self.p
+
+    def __exit__(self, *exc):
+        d = self.p.__dict__
+        cur = d.get("_lect")
+        if self._prev is None:
+            if cur is not None and self.rev is not None:
+                d["_lect_rev"] = cur                 # (para la próxima lectura con la misma versión)
+            d.pop("_lect", None)
+        return False
+
+
 @dataclass
 class Project:
     name: str = "Proyecto sin título"
@@ -302,6 +329,8 @@ class Project:
     kw_choices: dict = field(default_factory=dict)
     # ✓ Revisión guiada: avisos y clips de la IA que diste por buenos («O» = está bien así), por su clave
     review_ok: list[str] = field(default_factory=list)
+    # 🎬 Escenas animadas (core/scenes.py): {id: escena}; sus clips llevan la nota «🎬 <id>» (van al deshacer también)
+    scenes: dict = field(default_factory=dict)
 
     def marked_range(self) -> tuple[float, float] | None:
         """(entrada, salida) si hay un tramo marcado válido. Falta una marca = desde el inicio / hasta el final."""
@@ -348,9 +377,11 @@ class Project:
             "cut_ok": list(self.cut_ok),
             "kw_choices": dict(self.kw_choices),
             "review_ok": list(self.review_ok),
+            "scenes": json.loads(json.dumps(self.scenes)),
         }
 
     def apply_timeline_state(self, s: dict) -> None:
+        self.__dict__.pop("_lect_rev", None)       # (clips nuevos: lo memorizado en lectura() ya no vale)
         self.name = s.get("name", self.name)
         self.width = int(s.get("width", self.width))
         self.height = int(s.get("height", self.height))
@@ -369,6 +400,7 @@ class Project:
         self.cut_ok = [str(k) for k in (s.get("cut_ok") or [])]
         self.kw_choices = {str(k): str(v) for k, v in (s.get("kw_choices") or {}).items()}
         self.review_ok = [str(k) for k in (s.get("review_ok") or [])]
+        self.scenes = json.loads(json.dumps(s.get("scenes") or {}))
 
     # ---- guardar / abrir ----
     def to_dict(self) -> dict:
@@ -422,7 +454,18 @@ class Project:
         return cambiados
 
     # ---- consultas ----
+    def memo(self) -> dict | None:
+        """⚡ Dentro de lectura(): un diccionario para guardar lo calculado (se tira al cambiar el proyecto)."""
+        m = self.__dict__.get("_lect")
+        return m[2] if m is not None and len(m) > 2 else None
+
     def duration(self) -> float:
+        ex = self.memo()
+        if ex is not None:
+            d = ex.get("dur")
+            if d is None:
+                d = ex["dur"] = max((c.end for c in self.clips.values()), default=0.0)
+            return d
         return max((c.end for c in self.clips.values()), default=0.0)
 
     def track(self, track_id: str) -> Track | None:
@@ -435,13 +478,32 @@ class Project:
         return -1
 
     def clips_on(self, track_id: str) -> list[Clip]:
+        memo = self.__dict__.get("_lect")
+        if memo is not None:                     # ⚡ dentro de lectura(): ordenado una vez (ver lectura)
+            por = memo[1]
+            if por is None:
+                por = {}
+                for c in self.clips.values():
+                    por.setdefault(c.track_id, []).append(c)
+                for v in por.values():
+                    v.sort(key=lambda c: c.start)
+                memo[1] = por
+            return list(por.get(track_id, ()))
         return sorted((c for c in self.clips.values() if c.track_id == track_id), key=lambda c: c.start)
 
     def clip_at(self, track_id: str, t: float) -> Clip | None:
         for c in self.clips_on(track_id):
-            if c.start <= t < c.end:
+            if c.start > t:
+                break                            # (ordenados por inicio: los demás empiezan después)
+            if t < c.end:
                 return c
         return None
+
+    def lectura(self, rev=None):
+        """⚡ Para pintar la línea de tiempo o hacer sonar el visor (SOLO leer): clips_on/clip_at ordenan los clips una
+        vez y no en cada llamada (con 3000 clips eran ~13 ordenaciones por fotograma). rev = versión del proyecto
+        (ProjectController.rev): con la misma versión se reutiliza entre llamadas; sin rev, solo dentro del bloque."""
+        return _Lectura(self, rev)
 
     def audible(self, tr: "Track") -> bool:
         """¿Se oye esta pista? Silenciada (M) no; y si hay pistas de audio en solo (S), solo esas."""

@@ -2547,6 +2547,187 @@ class _VideoLane:
             s.park()
 
 
+class _OwnVideoLane:
+    """🎞 Pista de video con el motor propio (core/live_video.py): los mismos métodos que _VideoLane. Cada archivo se
+    decodifica en su hilo y su imagen se pone en el mismo QGraphicsVideoItem de siempre (efectos, color, fondo
+    desenfocado y relleno siguen igual). Sin sonido: el audio va por la mezcla en directo."""
+
+    def __init__(self, parent: QObject, layer):
+        from PySide6.QtCore import QTimer as _QT
+        self.engine = parent
+        self.layer = layer
+        n = len(layer.videos)
+        self.src: dict = {}
+        self.size_for: dict = {}          # ruta → tamaño al que se decodifica (cada plano el suyo)
+        self._want_active: int | None = None   # slot que pasa a verse en cuanto tenga su fotograma
+        self._pend_t: dict = {}           # slot → desde cuándo espera (tope)
+        self.paths: list = [None] * n
+        self.active = 0
+        self._used = [0.0] * n
+        self._n = 0
+        self._shown: list = [None] * n
+        self.size = (960, 540)
+        self._pend: dict = {}             # slot → segundo pedido cuyo fotograma aún no llegó
+        self._timer = _QT()
+        self._timer.setInterval(8)
+        self._timer.timeout.connect(self._retry)
+
+    def _slot_for(self, path: str, avoid: int | None = None) -> int:
+        for i, p in enumerate(self.paths):
+            if p == path:
+                return i
+        free = [i for i in range(len(self.paths)) if i != avoid]
+        return min(free, key=lambda i: self._used[i])
+
+    def _source(self, i: int, path: str):
+        if self.paths[i] != path:
+            old = self.src.pop(i, None)
+            if old is not None:
+                old.close()
+            from ..core.live_video import FrameSource
+            self.src[i] = FrameSource(path)
+            self.paths[i] = path
+            self._shown[i] = None
+        return self.src[i]
+
+    def failed(self, path: str) -> bool:
+        return any(s.error for i, s in self.src.items() if self.paths[i] == path)
+
+    def set_target(self, max_w: float, src_w: int, src_h: int, path: str | None = None):
+        """Decodifica al tamaño con el que se ve (nunca más que el archivo; par para el escalado). Por plano: la
+        precarga del siguiente usa SU tamaño (si no, al llegar el corte se perdería lo preparado)."""
+        if src_w <= 0 or src_h <= 0:
+            return
+        w = int(min(src_w, max(160.0, max_w)))
+        w -= w % 2
+        h = max(2, int(round(w * src_h / src_w)))
+        h -= h % 2
+        prev = self.size_for.get(path, self.size) if path else self.size
+        if abs(w - prev[0]) > 0.1 * prev[0] or abs(h - prev[1]) > 0.1 * prev[1]:
+            prev = (w, h)
+        if path:
+            self.size_for[path] = prev
+        else:
+            self.size = prev
+
+    def _push(self, i: int, pos: float) -> bool:
+        s = self.src.get(i)
+        if s is None:
+            return True
+        fr = s.frame_at(pos)
+        if fr is None:
+            return False
+        pts, w, h, data = fr
+        key = (self.paths[i], round(pts * 1000), w)
+        if key != self._shown[i]:
+            from PySide6.QtMultimedia import QVideoFrame
+            img = QImage(data, w, h, w * 4, QImage.Format_RGBA8888)
+            self.layer.videos[i].videoSink().setVideoFrame(QVideoFrame(img.copy()))
+            self._shown[i] = key
+        return abs(pts - pos) <= 1.0 / max(1.0, s.fps)
+
+    def _activate(self, i: int):
+        if i != self.active:
+            self.active = i
+            self._shown[i] = None             # (se vuelve a poner: el fondo desenfocado y el relleno lo recogen)
+            self.layer.set_active(i)
+
+    def _retry(self):
+        import time as _t
+        for i, pos in list(self._pend.items()):
+            s = self.src.get(i)
+            if s is not None and s.error:     # (falló: la pista vuelve a los reproductores de siempre)
+                del self._pend[i]
+                if i in (self.active, self._want_active):
+                    self._pend.clear()
+                    self._timer.stop()
+                    QTimer.singleShot(0, self.engine._sync)
+                    return
+                continue                      # (un plano precargado roto: nada; se verá al llegar)
+            if self._push(i, pos):
+                del self._pend[i]
+                self._pend_t.pop(i, None)
+                if self._want_active == i:
+                    self._activate(i)
+                    self._want_active = None
+                    self._push(i, pos)
+            elif _t.monotonic() - self._pend_t.setdefault(i, _t.monotonic()) > 3.0:
+                del self._pend[i]             # (tope: no esperar para siempre)
+                self._pend_t.pop(i, None)
+                if self._want_active == i:
+                    self._want_active = None
+        if not self._pend:
+            self._timer.stop()
+
+    def drive(self, path: str, pos: float, playing: bool, volume: float, rate: float = 1.0,
+              fps: float | None = None):
+        i = self._slot_for(path, avoid=None if self.paths[self.active] == path else self.active)
+        self._n += 1
+        self._used[i] = self._n
+        s = self._source(i, path)
+        s.want(pos, playing and rate > 0, self.size_for.get(path, self.size))
+        listo = self._push(i, pos)
+        if i != self.active:
+            old = self.src.get(self.active)
+            if listo or self._shown[i] is None and old is None:
+                if old is not None:
+                    old.want(old._want_t, False)
+                    old.trim(3)               # (el plano anterior: solo lo justo en memoria)
+                self._activate(i)
+                self._push(i, pos)
+                self._want_active = None
+            else:
+                self._want_active = i         # (se verá en cuanto llegue su fotograma: nada de imagen vieja)
+        if not listo:
+            self._pend[i] = pos           # (aún decodificando: se pone en cuanto llegue)
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._pend.pop(i, None)
+
+    def preload(self, path: str, pos: float, fps: float | None = None):
+        """El siguiente plano, decodificado de antemano (y ya puesto en su video oculto): el corte es inmediato."""
+        if self.paths[self.active] == path:
+            if self.layer.box.isVisible():
+                return
+            i = self.active
+        else:
+            i = self._slot_for(path, avoid=self.active)
+            self._used[i] = self._n + 0.5
+        s = self._source(i, path)
+        if s.error:
+            return                            # (roto: no se reintenta cada 8 ms)
+        s.want(pos, False, self.size_for.get(path, self.size))
+        if not self._push(i, pos):
+            self._pend[i] = pos
+            if not self._timer.isActive():
+                self._timer.start()
+
+    def idle(self):
+        for s in self.src.values():
+            s.want(s._want_t, False)
+            s.trim(3)                     # (la pista no se ve: casi nada en memoria)
+
+    def park(self, wait: float = 0.0):
+        self._timer.stop()
+        self._pend.clear()
+        self._want_active = None
+        for s in self.src.values():
+            s.close(wait)
+        self.src.clear()
+        self.paths = [None] * len(self.paths)
+        self._shown = [None] * len(self._shown)
+
+    def dispose(self):
+        self.park()
+
+
+def scrub_activo() -> bool:
+    """🔊 ¿Suena el audio al arrastrar el cabezal? (Reproducción → «Oír al arrastrar el cabezal»; sí por defecto)."""
+    from PySide6.QtCore import QSettings as _QS
+    return str(_QS("EditorIA", "EditorIA").value("reproduccion/oir_al_arrastrar", "true")).lower() == "true"
+
+
 class PlaybackEngine(QObject):
     time_changed = Signal(float)
     playing_changed = Signal(bool)
@@ -2580,6 +2761,26 @@ class PlaybackEngine(QObject):
         self._cut_timer.setSingleShot(True)
         self._cut_timer.setTimerType(Qt.PreciseTimer)
         self._cut_timer.timeout.connect(self._on_cut)
+
+        # 🎧 audio en directo (EQ, volumen, curvas, ducking mientras suena); si no hay tarjeta, los reproductores
+        self.live = None
+        self._live_ids: set[str] = set()
+        self._live_check = 0
+        from PySide6.QtCore import QSettings as _QS
+        self._own_video = str(_QS("EditorIA", "EditorIA").value("video/motor_propio", "false")).lower() == "true"
+        if self._own_video:
+            self._timer.setInterval(15)               # (🎞 hasta 60 fotogramas por segundo en el visor)
+        from PySide6.QtWidgets import QApplication as _QA0
+        if _QA0.instance() is not None:
+            _QA0.instance().aboutToQuit.connect(self.shutdown_video)
+        if str(_QS("EditorIA", "EditorIA").value("audio/en_directo", "true")).lower() == "true":
+            self.live = self._crear_live()
+        self.zones = None
+        try:                                          # ⧉ transiciones reales en el visor (renderizadas en segundo plano)
+            from .zone_preview import ZonePreview
+            self.zones = ZonePreview(self)
+        except Exception:  # noqa: BLE001 - sin esto, el visor sigue como siempre (fundidos)
+            self.zones = None
 
         preview.btn_play.clicked.connect(self.toggle)
         preview.btn_start.clicked.connect(lambda: self.user_seek(0))
@@ -2626,6 +2827,11 @@ class PlaybackEngine(QObject):
             self._t0, self.rate = self.time, new
             self._clock.restart()
             self.preview.set_rate(self.rate, True)
+            if self.live is not None:
+                if self._live_on():
+                    self.live.start(self.time)
+                else:
+                    self.live.stop()
             self._sync()
         else:
             self.play(rate=new)
@@ -2650,7 +2856,11 @@ class PlaybackEngine(QObject):
         elif rate < 0 and self.time <= 0.05:
             self.time = total
         self.playing = True
+        if self._live_on():
+            self.live.wait_ready(self.time)      # (hasta 0,3 s: que no empiece mudo)
         self._t0 = self.time
+        if self._live_on():
+            self.live.start(self.time)
         self._clock.restart()
         self._timer.start()
         self.preview.set_playing(True)
@@ -2677,6 +2887,8 @@ class PlaybackEngine(QObject):
             return
         self.playing = False
         self._timer.stop()
+        if self.live is not None:
+            self.live.stop()
         self.rate = 1.0
         self.preview.set_playing(False)
         self.preview.set_rate(1.0, False)
@@ -2688,6 +2900,10 @@ class PlaybackEngine(QObject):
         if self.playing:
             self._t0 = self.time
             self._clock.restart()
+            if self._live_on():
+                self.live.start(self.time)        # (salto mientras suena: la mezcla sigue desde ahí)
+        elif self.live is not None:
+            self.live.prepare(self.time)
         self._sync()
         self.time_changed.emit(self.time)
 
@@ -2697,11 +2913,53 @@ class PlaybackEngine(QObject):
         self._ranges = []
         self.seek(t)
 
+    SCRUB_MS = 90           # 🔊 lo que suena en cada posición al arrastrar el cabezal
+    SCRUB_CADA_MS = 70      # (como mucho un trocito cada 70 ms: no se amontonan)
+
+    def scrub(self, t: float):
+        """🔊 Al ARRASTRAR la barra roja (en pausa) suena un trocito corto de lo que hay ahí, como en Resolve o
+        Premiere: así se oyen los cortes sin darle a play. Con la mezcla en directo (la de siempre al reproducir)."""
+        if self.playing or not self._live_on() or not scrub_activo():
+            return
+        import time as _time
+        ahora = _time.monotonic()
+        if ahora - getattr(self, "_scrub_ult", 0.0) < self.SCRUB_CADA_MS / 1000.0:
+            self._scrub_pend = t                      # (el último que llegó suena en el siguiente hueco)
+            if not getattr(self, "_scrub_armado", False):
+                self._scrub_armado = True
+                QTimer.singleShot(self.SCRUB_CADA_MS, self._scrub_pendiente)
+            return
+        self._scrub_ult = ahora
+        live = self.live
+        if not live.mixer.ready_at(t):                # (aún no decodificado: se pide y suena en el siguiente)
+            live.prepare(t)
+            return
+        live.start(t)
+        if getattr(self, "_scrub_fin", None) is None:
+            self._scrub_fin = QTimer(self)
+            self._scrub_fin.setSingleShot(True)
+            self._scrub_fin.timeout.connect(self._scrub_parar)
+        self._scrub_fin.start(self.SCRUB_MS)
+
+    def _scrub_pendiente(self):
+        self._scrub_armado = False
+        t, self._scrub_pend = getattr(self, "_scrub_pend", None), None
+        if t is not None:
+            self.scrub(t)
+
+    def _scrub_parar(self):
+        if not self.playing and self.live is not None:
+            self.live.stop()
+
     def step(self, frames: int):
         self.pause()
         self.seek(self.time + frames / max(1.0, self.ctrl.project.fps))
 
     def _tick(self):
+        with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):    # ⚡ duración y clips, una vez
+            self._tick_todo()
+
+    def _tick_todo(self):
         t = self._t0 + self._clock.elapsed() / 1000.0 * self.rate
         total = self.ctrl.project.duration()
         if self.loop and self._stop_at is None:      # bucle: el tramo marcado (o todo el video)
@@ -2731,6 +2989,11 @@ class PlaybackEngine(QObject):
         else:
             self.time = t
             self._sync()
+            self._live_check += 1
+            if self._live_check % 30 == 0 and self._live_on():        # (cada ~1 s)
+                oido = self.live.position()
+                if oido is not None and abs(oido - t) > 0.05:
+                    self.live.start(t)
         self.time_changed.emit(self.time)
         self._arm_cut()
 
@@ -2753,6 +3016,8 @@ class PlaybackEngine(QObject):
 
     def refresh_sources(self):
         """Se crearon copias ligeras (proxies): el visor pasa a usarlas."""
+        from ..core import proxies as _PX
+        _PX.forget_cache()
         self._sync()
 
     def _recycle(self):
@@ -2769,6 +3034,9 @@ class PlaybackEngine(QObject):
                 lane.park()
                 spare_a.append(lane)
         vvalid = {t.id for t in self.ctrl.project.tracks if t.kind == TRACK_VIDEO}
+        va = self.__dict__.get("_vaudio") or {}
+        for tid in [t for t in va if t not in vvalid]:     # (🎞 su pista ya no existe: su audio auxiliar, fuera)
+            va.pop(tid).park()
         for tid in list(canvas.layers):
             if tid not in vvalid:
                 layer = canvas.layers.pop(tid)
@@ -2810,10 +3078,166 @@ class PlaybackEngine(QObject):
             self._speech = audio_fx.speech_intervals(p)   # para bajar la música cuando hablas
             self._cues = styled_cues(p) if p.subtitles.enabled else []
             self._cue_starts = [c.start for c in self._cues]
+        self._live_plan()
         self._sync()
+
+    # -------------------------------------------------------- 🎧 audio en directo
+    def _own_video_on(self) -> bool:
+        return getattr(self, "_own_video", False)
+
+    def _new_vlane(self, layer):
+        """🎞 Pista de video: con el motor propio (beta) o con los reproductores de Qt de siempre."""
+        if self._own_video_on():
+            return _OwnVideoLane(self, layer)
+        return self._qt_vlane(layer)
+
+    def _qt_vlane(self, layer):
+        """La pista con reproductores de Qt de esa capa: la de antes si la hay (se vuelve a conectar al visor)."""
+        guardadas = self.__dict__.setdefault("_qt_lanes", {})
+        lane = guardadas.pop(id(layer), None)
+        if lane is not None:
+            for s, v in zip(lane.slots, layer.videos):
+                s.player.setVideoOutput(v)
+            return lane
+        return _VideoLane(self, layer)
+
+    def _guardar_qt(self, lane):
+        for s in lane.slots:
+            s.idle()
+            s.player.setVideoOutput(None)
+        self.__dict__.setdefault("_qt_lanes", {})[id(lane.layer)] = lane
+
+    def shutdown_video(self):
+        """Al cerrar: los hilos del motor de video, parados (sin dejar a FFmpeg a medias)."""
+        if self.__dict__.get("zones") is not None:
+            self.zones.shutdown()
+        for lane in list(self._vlanes.values()) + [ln for _l, ln in (self.__dict__.get("_spare_video") or [])]:
+            if isinstance(lane, _OwnVideoLane):
+                lane.park(0.5)
+        for ln in list(self.__dict__.get("_vaudio", {}).values()):
+            ln.park()
+
+    def set_own_video(self, on: bool):
+        """Reproducción → «🎞 Video con motor propio». Se aplica al momento (las pistas se rehacen)."""
+        from PySide6.QtCore import QSettings as _QS
+        _QS("EditorIA", "EditorIA").setValue("video/motor_propio", "true" if on else "false")
+        if bool(on) == self._own_video_on():
+            return
+        self._own_video = bool(on)
+        for tid, lane in list(self._vlanes.items()):
+            if isinstance(lane, _VideoLane):
+                self._guardar_qt(lane)            # (sus reproductores dejan de pintar en el visor; se reutilizan)
+            else:
+                lane.park()
+        self._vlanes.clear()
+        for k, (layer, lane) in enumerate(self.__dict__.get("_spare_video") or []):
+            if lane is not None:
+                if isinstance(lane, _VideoLane):
+                    self._guardar_qt(lane)
+                else:
+                    lane.park()
+                self._spare_video[k] = (layer, None)
+        for ln in self.__dict__.get("_vaudio", {}).values():
+            ln.idle()
+        self._timer.setInterval(15 if self._own_video else 30)
+        self._sync()
+
+    def _crear_live(self):
+        """Abre la mezcla en directo (None si no hay tarjeta o falla: el visor usa sus reproductores)."""
+        try:
+            from .live_audio import LiveAudio
+            live = LiveAudio(self)
+        except Exception:  # noqa: BLE001
+            return None
+        if not live.ok:
+            live.close()
+            return None
+        from PySide6.QtWidgets import QApplication as _QA
+        if _QA.instance() is not None:
+            _QA.instance().aboutToQuit.connect(live.close)
+        import atexit
+        atexit.register(live.close)                  # (también si se sale sin el bucle de Qt: pruebas, cierres raros)
+        return live
+
+    @property
+    def mute_all(self) -> bool:
+        return getattr(self, "_mute_all", False)
+
+    @mute_all.setter
+    def mute_all(self, on: bool):
+        """🎙 Grabando la voz en off: el proyecto no suena (tampoco la mezcla en directo)."""
+        self._mute_all = bool(on)
+        live = getattr(self, "live", None)
+        if live is not None:
+            live.mixer.plan.mute = self._mute_all
+
+    def set_live_audio(self, on: bool):
+        """Reproducción → «🎧 Audio en directo». Apagado: suenan los reproductores de siempre (sin EQ al reproducir)."""
+        from PySide6.QtCore import QSettings as _QS
+        _QS("EditorIA", "EditorIA").setValue("audio/en_directo", "true" if on else "false")
+        if not on and self.live is not None:
+            self.live.stop()
+            self._live_off = True
+        else:
+            self._live_off = False
+            if on and self.live is None:
+                self.live = self._crear_live()
+                if self.live is None:
+                    self.ctrl.message.emit("🎧 No pude abrir la salida de audio: suenan los reproductores de siempre "
+                                           "(el ecualizador se oye al exportar o con «Escuchar con EQ»).")
+            self._live_plan()
+            if self.playing and self._live_on():
+                self.live.start(self.time)
+        self._sync()
+
+    def _live_on(self) -> bool:
+        return self.live is not None and not getattr(self, "_live_off", False) and self.rate == 1.0
+
+    def _live_plan(self):
+        """Qué clips suenan desde la mezcla en directo (velocidad normal, sin reversa) y con qué ajustes."""
+        if self.live is None:
+            self._live_ids = set()
+            return
+        import copy as _copy
+        from ..core import live_mix as LM
+        p = self.ctrl.project
+        fuentes, ids = [], set()
+        for tr in p.tracks:
+            if tr.kind not in (TRACK_AUDIO, TRACK_VIDEO):
+                continue
+            audible = p.audible(tr)
+            for c in p.clips_on(tr.id):
+                m = p.media_of(c)
+                if not c.enabled or m is None or m.id in self.ctrl.missing:
+                    continue
+                if tr.kind == TRACK_VIDEO and (c.link or m.kind != KIND_VIDEO or not m.has_audio):
+                    continue
+                if tr.kind == TRACK_AUDIO and not (m.kind == KIND_AUDIO or (m.kind == KIND_VIDEO and m.has_audio)):
+                    continue
+                if abs((c.speed or 1.0) - 1.0) > 1e-6 or c.reverse:
+                    continue                   # (cámara lenta, rápida o reversa: su reproductor de siempre)
+                fuentes.append(LM.Source(key=c.id, path=m.path, start=c.start, end=c.end, src_in=c.source_in,
+                                         clip=_copy.copy(c), eq=c.eq, pan=float(c.pan or 0.0),
+                                         duck_db=tr.duck_db if tr.kind == TRACK_AUDIO else None, audible=audible,
+                                         mono=(m.channels or 2) == 1))
+                ids.add(c.id)
+        self._live_ids = ids
+        self.live.set_plan(LM.Plan(sources=fuentes, speech=list(self._speech), mute=self.mute_all))
+        if not self.playing:
+            self.live.prepare(self.time)
 
     # -------------------------------------------------------- sincronizar
     def _sync(self):
+        with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):    # ⚡ clips ordenados una vez
+            self._sync_todo()
+        zp = self.__dict__.get("zones")
+        if zp is not None:
+            try:
+                zp.show_at(self.time, self.playing)
+            except Exception:  # noqa: BLE001 - la vista previa de transiciones nunca para el visor
+                zp.hide()
+
+    def _sync_todo(self):
         self._recycle()               # pistas nuevas: con los reproductores apartados (nunca se crean de más)
         p = self.ctrl.project
         t = self.time
@@ -2843,6 +3267,7 @@ class PlaybackEngine(QObject):
                 if tc is not None and tc.enabled and tc.text and float(tc.text.get("blur_under") or 0) > 0:
                     ramp = max(0.0, min(1.0, (t - tc.start) / 0.2, (tc.end - t) / 0.2))
                     under = max(under, float(tc.text["blur_under"]) * ramp)
+        self._under_now = under                       # (⧉ la transición renderizada no lleva ese desenfoque)
 
         # Video: una capa por pista (de arriba a abajo). Si una capa tapa toda la pantalla,
         # las de debajo no se ven y no hace falta reproducirlas.
@@ -2857,6 +3282,9 @@ class PlaybackEngine(QObject):
             lane = self._vlanes.get(tr.id)
             c = None if (covered or tr.hidden) else p.clip_at(tr.id, t)
             m = p.media_of(c) if c else None
+            va0 = self.__dict__.get("_vaudio")
+            if va0 and tr.id in va0 and (c is None or not c.enabled or m is None or m.kind != KIND_VIDEO):
+                va0[tr.id].idle()                 # (sin clip con sonido: el reproductor de audio auxiliar, quieto)
             if c is None or not c.enabled or m is None or m.id in self.ctrl.missing or m.kind == KIND_AUDIO:
                 layer.hide()
                 if lane:
@@ -2880,23 +3308,47 @@ class PlaybackEngine(QObject):
                 layer.place(canvas.W, canvas.H, box_now, m.width, m.height, zoom, m.path, z_value)
             else:
                 if lane is None:
-                    lane = self._vlanes[tr.id] = _VideoLane(self, layer)
+                    lane = self._vlanes[tr.id] = self._new_vlane(layer)
                 from ..core import black_bars as _BB
                 bars = _BB.of(box_now)                # ▭ sin barras negras: se encuadra con el tamaño sin ellas
                 sw_, sh_ = _BB.size_without(m, bars)
                 layer.place(canvas.W, canvas.H, box_now, sw_, sh_, zoom, None, z_value, bars)
                 vol = 0.0 if (not p.audible(tr) or c.link) else curves.gain(c, t)   # vinculado: suena desde su pista de audio
+                if self._live_on() and c.id in self._live_ids:
+                    vol = 0.0                  # (🎧 suena por la mezcla en directo)
                 if self.mute_all:          # 🎙 grabando la voz: el proyecto no suena (no se cuela en el micro)
                     vol = 0.0
                 run, rate = self._lane_motion(c)
                 max_w = self._view_w(layer) * max(1.0, zoom[0])          # ancho en pantalla (px del visor)
-                lane.drive(self._pick_path(tr.id, m, max_w), src_t, run, vol if run else 0.0, rate, m.fps or p.fps)
+                vpath = self._pick_path(tr.id, m, max_w)
+                if isinstance(lane, _OwnVideoLane):
+                    if lane.failed(vpath):            # (PyAV no lo abre: esta pista vuelve a los reproductores)
+                        lane.park()
+                        lane = self._vlanes[tr.id] = self._qt_vlane(layer)
+                    else:
+                        lane.set_target(max_w, sw_, sh_, vpath)       # (max_w ya va en píxeles reales)
+                lane.drive(vpath, src_t, run, vol if run else 0.0, rate, m.fps or p.fps)
+                # 🎞 el motor propio no suena: si la mezcla en directo no cubre este clip (J/L rápido, velocidad,
+                # audio en directo apagado), su sonido va por un reproductor solo de audio
+                va = self.__dict__.setdefault("_vaudio", {})
+                if isinstance(lane, _OwnVideoLane) and vol > 0 and run and m.has_audio \
+                        and not (self._live_on() and c.id in self._live_ids):
+                    al = va.get(tr.id)
+                    if al is None:
+                        al = va[tr.id] = _Lane(self)
+                    al.drive(self.ctrl.preview_path(m), src_t, run, vol, rate)
+                elif tr.id in va:
+                    va[tr.id].idle()
                 # El siguiente plano de la pista, preparado antes de que llegue (cortes sin trabas)
                 nxt = self._next_clip(tr.id, c)
                 if nxt is not None and nxt.start - t < 2.5:
                     nm = p.media_of(nxt)
                     if nm is not None and nm.kind == KIND_VIDEO and nm.id not in self.ctrl.missing:
-                        lane.preload(self.ctrl.preview_path(nm, max_w), nxt.src_at(0.0), nm.fps or p.fps)
+                        npath = self.ctrl.preview_path(nm, max_w)
+                        if isinstance(lane, _OwnVideoLane):
+                            nsw, nsh = _BB.size_without(nm, _BB.of(box_now))
+                            lane.set_target(max_w, nsw, nsh, npath)
+                        lane.preload(npath, nxt.src_at(0.0), nm.fps or p.fps)
             adj = _GEN.is_adjust(m)
             layer.set_color(None if (self.color_bypass or adj) else c.color)
             layer.set_post([] if adj else list(post))
@@ -2930,6 +3382,10 @@ class PlaybackEngine(QObject):
                 if lane:
                     lane.idle()
                 continue
+            if self._live_on() and c.id in self._live_ids:
+                if lane:
+                    lane.idle()                # (🎧 suena por la mezcla en directo, con su EQ)
+                continue
             if lane is None:
                 spare_a = self.__dict__.get("_spare_audio") or []
                 lane = self._audio[tr.id] = spare_a.pop() if spare_a else _Lane(self)
@@ -2942,8 +3398,20 @@ class PlaybackEngine(QObject):
             lane.drive(self.ctrl.preview_path(m), c.src_at(t - c.start), run, vol if run else 0.0, rate)
 
     def _view_w(self, layer) -> float:
-        """Ancho que ocupa la capa en el visor, en píxeles de pantalla (sin el zoom del clip)."""
-        return self.preview.canvas.transform().m11() * layer.box.rect().width()
+        """Ancho que ocupa la capa en el visor, en píxeles REALES de pantalla (sin el zoom del clip): el mayor de las
+        vistas que la enseñan (el visor y, si está, el de la segunda pantalla), con la escala de la interfaz (dpr)."""
+        canvas = self.preview.canvas
+        best = 0.0
+        for v in canvas.scene().views():
+            try:
+                if v is not canvas and not v.isVisible():
+                    continue
+                best = max(best, v.transform().m11() * max(1.0, float(v.devicePixelRatioF())))
+            except RuntimeError:
+                continue
+        if best <= 0:
+            best = canvas.transform().m11() * max(1.0, float(canvas.devicePixelRatioF()))
+        return best * layer.box.rect().width()
 
     def _pick_path(self, track_id: str, m, max_w: float) -> str:
         """Archivo del visor para una pista. Con un margen del 10 % para no recargar al redimensionar un poco."""
@@ -2983,8 +3451,11 @@ class PlaybackEngine(QObject):
             return
         lane = self._vlanes.get(tr.id)
         if lane is None:
-            lane = self._vlanes[tr.id] = _VideoLane(self, layer)
-        lane.preload(self.ctrl.preview_path(m2, self._view_w(layer)), c2.src_at(at - c2.start), m2.fps or p.fps)
+            lane = self._vlanes[tr.id] = self._new_vlane(layer)
+        ppath = self.ctrl.preview_path(m2, self._view_w(layer))
+        if isinstance(lane, _OwnVideoLane):
+            lane.set_target(self._view_w(layer), m2.width, m2.height, ppath)
+        lane.preload(ppath, c2.src_at(at - c2.start), m2.fps or p.fps)
 
     def _lane_motion(self, c) -> tuple[bool, float]:
         """¿El reproductor de este clip avanza solo, y a qué velocidad? Hacia atrás, congelado o con J

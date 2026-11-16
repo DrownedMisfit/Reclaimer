@@ -25,6 +25,14 @@ PEAK_RATE = 1000  # valores de forma de onda por segundo (1 ms: de cerca se ve d
 
 @functools.lru_cache(maxsize=None)
 def find_tool(name: str) -> str | None:
+    # 📦 La versión «todo en uno» trae su FFmpeg al lado: ese primero (no depende de lo que haya en el PC)
+    from .paths import PROGRAM_DIR
+    import os
+    sitios = [PROGRAM_DIR / "ffmpeg"] + ([PROGRAM_DIR.parent / "ffmpeg"] if os.environ.get("RECLAIMER_PORTABLE") else [])
+    for d in sitios:
+        exe = d / f"{name}.exe"
+        if exe.is_file():
+            return str(exe)
     found = shutil.which(name)
     if found:
         return found
@@ -39,7 +47,8 @@ def find_tool(name: str) -> str | None:
 def ffmpeg() -> str:
     exe = find_tool("ffmpeg")
     if not exe:
-        raise RuntimeError("No se encontró FFmpeg. Instálalo con: winget install Gyan.FFmpeg")
+        raise RuntimeError("No se encontró FFmpeg. Si usas la versión «todo en uno», vuelve a descomprimirla entera "
+                           "(falta la carpeta ffmpeg); si no, instálalo con: winget install Gyan.FFmpeg")
     return exe
 
 
@@ -160,7 +169,12 @@ def _peaks_file(path: str) -> Path:
 def cached_peaks(path: str) -> np.ndarray | None:
     """Los picos de la caché en disco, SOLO si ya existen (cargarlos es barato; calcularlos no)."""
     out = _peaks_file(path)
-    return np.load(out).astype(np.float32) if out.exists() else None
+    if not out.exists():
+        return None
+    try:
+        return np.load(out).astype(np.float32)
+    except (OSError, ValueError):          # (otro hilo lo está escribiendo justo ahora: como si no estuviera)
+        return None
 
 
 def waveform_peaks(path: str) -> np.ndarray | None:
@@ -168,9 +182,10 @@ def waveform_peaks(path: str) -> np.ndarray | None:
     Es lo caro (decodifica todo el sonido): el controlador lo pide solo cuando hace falta (ver ensure_peaks)."""
     # (a 16 kHz: con 8 kHz se perdía casi todo lo de más de 4 kHz, justo donde suenan la «s», la «f» y la «z», y los
     # finales de palabra con esas letras no se veían)
+    ya = cached_peaks(path)
+    if ya is not None:
+        return ya
     out = _peaks_file(path)
-    if out.exists():
-        return np.load(out).astype(np.float32)
     sample_rate = 16000
     samples = decode_mono(path, sample_rate)
     block = sample_rate // PEAK_RATE
@@ -178,7 +193,16 @@ def waveform_peaks(path: str) -> np.ndarray | None:
     if n == 0:
         return np.zeros(1, dtype=np.float32)
     peaks = np.abs(samples[: n * block].reshape(n, block)).max(axis=1)
-    tmp = out.with_name(out.name + ".tmp.npy")     # (atómico: dos hilos no se leen a medias)
-    np.save(tmp, peaks.astype(np.float16))
-    os.replace(tmp, out)
+    # (atómico y con un temporal PROPIO de cada hilo: si dos lo calculan a la vez —la onda pedida en segundo plano y
+    # una acción que la necesita ya— no chocan; antes el segundo fallaba con «WinError 32» y la onda no salía)
+    import threading
+    tmp = out.with_name(f"{out.name}.{os.getpid()}_{threading.get_ident()}.tmp.npy")
+    try:
+        np.save(tmp, peaks.astype(np.float16))
+        os.replace(tmp, out)
+    except OSError:                        # (el otro hilo ya lo dejó: vale lo calculado aquí)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
     return peaks.astype(np.float32)

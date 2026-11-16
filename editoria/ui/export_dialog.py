@@ -20,8 +20,8 @@ from .common import fmt_time
 
 def _default_export_dir() -> str:
     """Si el proyecto aún no tiene carpeta: F:/Reclaimer/Exportados (junto al programa, no en C:)."""
-    from ..core.paths import PROGRAM_DIR
-    d = PROGRAM_DIR / "Exportados"
+    from ..core.paths import user_dir
+    d = user_dir() / "Exportados"
     d.mkdir(parents=True, exist_ok=True)
     return str(d)
 
@@ -40,8 +40,9 @@ class ExportDialog(QDialog):
         p = ctrl.project
 
         self.preset = QComboBox()
-        self.preset.addItems(list(PRESETS) + ["Personalizado"])
         self.preset.currentTextChanged.connect(self._apply_preset)
+        self.preset.activated.connect(lambda _i: self._apply_preset(self.preset.currentText()))   # (el mismo otra vez)
+        self._fill_presets()
         self.width_box = QSpinBox()
         self.width_box.setRange(16, 7680)
         self.width_box.setSingleStep(2)
@@ -100,7 +101,19 @@ class ExportDialog(QDialog):
         self.advanced = QWidget()
         form = QFormLayout(self.advanced)
         form.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Preset", self.preset)
+        prow = QHBoxLayout()
+        prow.addWidget(self.preset, 1)
+        self.btn_save_preset = QPushButton("💾 Guardar…")
+        self.btn_save_preset.setToolTip("Guarda estos ajustes (resolución, FPS, códec, calidad, subtítulos…) con un "
+                                        "nombre: saldrán en esta lista con ★, como en Shotcut")
+        self.btn_save_preset.clicked.connect(lambda: self.save_preset())
+        self.btn_del_preset = QPushButton("🗑")
+        self.btn_del_preset.setFixedWidth(32)
+        self.btn_del_preset.setToolTip("Borra el preset tuyo elegido (★)")
+        self.btn_del_preset.clicked.connect(lambda: self.delete_preset())
+        prow.addWidget(self.btn_save_preset)
+        prow.addWidget(self.btn_del_preset)
+        form.addRow("Preset", prow)
         form.addRow("Resolución", size)
         form.addRow("Fotogramas por segundo", self.fps)
         form.addRow("Códec", self.codec)
@@ -207,6 +220,8 @@ class ExportDialog(QDialog):
         self.preset.blockSignals(True)
         self.preset.setCurrentText("Personalizado")
         self.preset.blockSignals(False)
+        if hasattr(self, "btn_del_preset"):
+            self.btn_del_preset.setEnabled(False)
         self.width_box.setValue(w)
         self.height_box.setValue(h)
         fps = f"{p.fps:g}" if f"{p.fps:g}" in ("24", "25", "30", "50", "60") else "60"
@@ -221,12 +236,97 @@ class ExportDialog(QDialog):
         self.out.setText(os.path.join(folder, f"{name}.mp4"))
         self.adjustSize()
 
+    # ------------------------------------------------------------ ★ tus presets (como Shotcut)
+    @staticmethod
+    def _user_presets() -> dict:
+        import json
+        try:
+            d = json.loads(QSettings("EditorIA", "EditorIA").value("exportar/mis_presets", "{}") or "{}")
+            return d if isinstance(d, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def _fill_presets(self, select: str | None = None):
+        self.preset.blockSignals(True)
+        self.preset.clear()
+        self.preset.addItems(list(PRESETS))
+        for name in self._user_presets():
+            if str(name).strip():
+                self.preset.addItem("★ " + str(name))
+        self.preset.addItem("Personalizado")
+        if select:
+            self.preset.setCurrentText(select)
+        self.preset.blockSignals(False)
+        if hasattr(self, "btn_del_preset"):
+            self.btn_del_preset.setEnabled(self.preset.currentText().startswith("★ "))
+
+    def save_preset(self, name: str | None = None) -> bool:
+        import json
+        if name is None:
+            from PySide6.QtWidgets import QInputDialog
+            name, ok = QInputDialog.getText(self, "Guardar preset", "Nombre (p. ej. «Mis reseñas 1440p»):")
+            if not ok:
+                return False
+        name = (name or "").strip()
+        while name.startswith("★"):
+            name = name[1:].strip()
+        name = name[:60]
+        if not name:
+            return False
+        d = self._user_presets()
+        d[name] = {"w": self.width_box.value(), "h": self.height_box.value(), "fps": self.fps.currentText(),
+                   "codec": self.codec.currentData(), "encoder": self.encoder.currentData(),
+                   "bitrate": self.bitrate.value(), "max_q": self.max_q.isChecked(),
+                   "low_prio": self.low_prio.isChecked()}
+        if self.subs.isEnabled():                 # (sin subtítulos en el proyecto no se guarda «apagados»)
+            d[name]["subs"] = self.subs.isChecked()
+        QSettings("EditorIA", "EditorIA").setValue("exportar/mis_presets", json.dumps(d, ensure_ascii=False))
+        self._fill_presets("★ " + name)
+        self.status.setText(f"★ Preset «{name}» guardado.") if hasattr(self, "status") else None
+        return True
+
+    def delete_preset(self) -> bool:
+        import json
+        cur = self.preset.currentText()
+        if not cur.startswith("★ "):
+            return False
+        d = self._user_presets()
+        d.pop(cur[2:], None)
+        QSettings("EditorIA", "EditorIA").setValue("exportar/mis_presets", json.dumps(d, ensure_ascii=False))
+        self._fill_presets("Personalizado")
+        return True
+
     def _apply_preset(self, name):
+        if hasattr(self, "btn_del_preset"):
+            self.btn_del_preset.setEnabled(name.startswith("★ "))
         if name in PRESETS:
             w, h, br = PRESETS[name]
             self.width_box.setValue(w)
             self.height_box.setValue(h)
             self.bitrate.setValue(br)
+        elif name.startswith("★ "):
+            d = self._user_presets().get(name[2:])
+            if not isinstance(d, dict):
+                return
+            try:
+                self.width_box.setValue(int(d.get("w", self.width_box.value())))
+                self.height_box.setValue(int(d.get("h", self.height_box.value())))
+                if str(d.get("fps")) in [self.fps.itemText(i) for i in range(self.fps.count())]:
+                    self.fps.setCurrentText(str(d["fps"]))
+                for box, key in ((self.codec, "codec"), (self.encoder, "encoder")):
+                    i = box.findData(d.get(key))
+                    if i >= 0:
+                        box.setCurrentIndex(i)
+                import math
+                br = float(d.get("bitrate", self.bitrate.value()))
+                if math.isfinite(br):
+                    self.bitrate.setValue(br)
+                for attr, key in (("subs", "subs"), ("max_q", "max_q"), ("low_prio", "low_prio")):
+                    box = getattr(self, attr, None)
+                    if box is not None and key in d and box.isEnabled():
+                        box.setChecked(bool(d[key]))
+            except (TypeError, ValueError, OverflowError):
+                pass
 
     def _browse(self):
         path, _ = QFileDialog.getSaveFileName(self, "Guardar video", self.out.text(), "Video MP4 (*.mp4)")

@@ -18,6 +18,7 @@ Interacciones:
 """
 from __future__ import annotations
 
+import bisect
 import math
 import re
 from dataclasses import replace
@@ -32,6 +33,7 @@ from ..core.media import PEAK_RATE
 from ..core.model import (KIND_AUDIO, KIND_IMAGE, KIND_VIDEO, ORIGIN_AI, SUG_APPLIED, SUG_PENDING, TRACK_AUDIO,
                           TRACK_TEXT, TRACK_VIDEO)
 from . import help as help_ui
+from . import tema as _TM
 from .common import COLORS, EFFECT_MIME, MEDIA_MIME, NOAUDIO_MIME, SEGMENT_MIME, SUGGESTION_COLORS, fmt_tc, fmt_time
 from .help import add_help_action
 
@@ -43,6 +45,11 @@ class TimelineWidget(QWidget):
     silhouette_requested = Signal(str)    # 👤 enseñar un personaje por su silueta
     dialogue_requested = Signal(list)     # 🗣 solo los diálogos de estos clips de sonido
     keywords_requested = Signal(list)     # 🔑 buscar palabras clave en estos archivos
+    anim_requested = Signal(str)          # 🎞 abrir «Animar imagen» con este medio
+    scene_requested = Signal(float, float)  # 🎬 crear una escena en ese tramo (desde, hasta)
+    scene_open_requested = Signal(str)    # 🎬 abrir esa escena en la página «Escenas»
+    template_requested = Signal(str, float)  # 📚 poner esa animación guardada (archivo) en ese segundo
+    scrub_requested = Signal(float)       # 🔊 arrastrando la barra roja: que suene un trocito ahí
     scene_cuts_requested = Signal(list, str)   # ✂ cortar en los cambios de escena (clips, sensibilidad)
     topics_requested = Signal(str)        # ◎ quedarme con unos temas / mandarlos a Medios (tema pulsado)    # un efecto soltado encima de un clip (y de los seleccionados con él)
     moments_requested = Signal(str, float)   # buscar material para una frase (y dónde ponerlo)
@@ -98,7 +105,7 @@ class TimelineWidget(QWidget):
         self.highlight_sug = ""
         self._hover_topic = ""
         self.gap: tuple[str, float, float] | None = None   # hueco seleccionado: (pista, inicio, fin)
-        # 🎚 Canales (pistas) seleccionados, como en Resolve: dividir (S) y juntar (Ctrl++) trabajan en ellos, no en un
+        # 🎚 Canales (pistas) seleccionados, como en Resolve: dividir (Ctrl+B o S) y juntar (Ctrl++) trabajan en ellos, no en un
         # trozo concreto. Clic en un clip o en su pista = su canal; vacío = toda la línea de tiempo
         self.channels: set[str] = set()
         self.sel_trans: str | None = None   # transición seleccionada (id del clip de la DERECHA del corte)
@@ -153,6 +160,7 @@ class TimelineWidget(QWidget):
         self.selection_changed.connect(self._beats_for_selection)   # 🥁 elegir una canción = reconocer su ritmo
         # Cortes de audio que pueden estar mal (líneas rojas): se recalculan un poco después de cada cambio
         self.cut_issues: list[dict] = []
+        self.cut_issue_sel: tuple[str, float] | None = None   # el corte elegido: solo ese lleva su línea roja
         self._cut_timer = QTimer(self)
         self._cut_timer.setSingleShot(True)
         self._cut_timer.setInterval(400)
@@ -270,10 +278,12 @@ class TimelineWidget(QWidget):
         """🎬 Marcas de «Dijiste…»: banderita en la regla y línea discontinua. [] = quitarlas. No se guardan."""
         prev = self.hint_marks[self.hint_selected] if 0 <= getattr(self, "hint_selected", -1) < len(
             self.hint_marks) else None
+        antes = (list(self.hint_marks), getattr(self, "hint_selected", -1))
         self.hint_marks = [(float(t), str(s)) for t, s in (marks or [])]
         # 🔑 la palabra clave elegida sigue elegida si sigue ahí (si no, ninguna)
         self.hint_selected = self.hint_marks.index(prev) if prev in self.hint_marks else -1
-        self.update()
+        if (self.hint_marks, self.hint_selected) != antes:     # (⚡ las mismas: no se redibuja todo)
+            self.update()
 
     def select_hint(self, i: int):
         """🔑 Elige la banderita i (clic en ella): la biblioteca puede «Añadir en la palabra clave seleccionada»."""
@@ -393,6 +403,22 @@ class TimelineWidget(QWidget):
         if hook is not None:
             hook(menu)
         menu.addAction("⏵ Ir aquí", lambda: self.seek_requested.emit(max(0.0, m["t"])))
+        a = menu.addAction("🎬 Crear escena aquí",
+                           lambda: self.scene_requested.emit(max(0.0, m["t"]), max(0.0, m["t"]) +
+                                                             max(3.0, float(m.get("dur") or 0.0))))
+        a.setToolTip("Abre la página «🎬 Escenas» con un tramo que empieza en esta palabra (lo que dura la frase, "
+                     "3 s como mínimo): ahí pones personajes animados y sonidos.")
+        menu.setToolTipsVisible(True)
+        from ..core import scenes as _sc
+        guardadas = _sc.plantillas()
+        if guardadas:
+            sub = menu.addMenu("📚 Poner una animación aquí")
+            sub.setToolTipsVisible(True)
+            for tp in guardadas:
+                a = sub.addAction(f"🎬 {tp['nombre']}  ({tp['dur']:g} s)",
+                                  lambda x=tp["archivo"]: self.template_requested.emit(x, max(0.0, m["t"])))
+                a.setToolTip("La pone tal cual, empezando en esta palabra (un paso de Ctrl+Z). Para cambiar cuánto "
+                             "dura, doble clic en uno de sus clips.")
         menu.addAction("⚡ Acomodar todo", self.kw_arrange_requested.emit)
         menu.exec(gpos)
 
@@ -403,6 +429,7 @@ class TimelineWidget(QWidget):
             bm = self.ctrl.rhythm_on_timeline() if self.ctrl.rhythm else \
                 {"beats": [], "downbeats": [], "strong": [], "drops": [], "sections": []}
             bm["down_set"], bm["strong_set"] = set(bm["downbeats"]), set(bm["strong"])
+            bm["beats_sorted"] = sorted(bm["beats"])                # (⚡ para buscar solo los de la franja)
             bm["gap"] = self._median_gap(bm["beats"], 1.0)        # (mediana: una unión de dos trozos no la rompe)
             bm["gap_down"] = self._median_gap(bm["downbeats"], 10.0)
             self._beat_memo = bm
@@ -749,6 +776,9 @@ class TimelineWidget(QWidget):
 
     def track_h(self, i: int) -> float:
         """Alto de la pista i (las de audio pueden ser más altas para ver mejor la onda). 0 = no se ve en esta vista."""
+        thc = self.__dict__.get("_th_cache")        # ⚡ mientras se dibuja: las alturas, calculadas una vez
+        if thc is not None and 0 <= i < len(thc):
+            return thc[i]
         tracks = self.ctrl.project.tracks
         sh = self.__dict__.get("_shown_cache") or self._shown()
         if not (0 <= i < len(sh) and sh[i]):
@@ -854,6 +884,7 @@ class TimelineWidget(QWidget):
         self._sug_spans, self._cut_marks = spans, marks
 
     def set_highlight_suggestion(self, sid: str):
+        cambio = sid != getattr(self, "highlight_sug", None)
         self.highlight_sug = sid
         for i, ta, _tb, _k, s_id, _l in self._sug_spans:
             if s_id == sid:
@@ -861,8 +892,10 @@ class TimelineWidget(QWidget):
                 if not (self.HEADER_W <= x <= self.width() - 40):
                     self.scroll = max(0.0, ta - (self.width() - self.HEADER_W) * 0.3 / self.pps)
                     self._update_scrollbar()
+                    cambio = True
                 break
-        self.update()
+        if cambio:                                   # (⚡ la misma y a la vista: nada que redibujar)
+            self.update()
 
     def suggestion_at(self, pos: QPointF):
         i = self.track_index_at(pos.y())
@@ -890,51 +923,181 @@ class TimelineWidget(QWidget):
         def sig(lst):
             return [(i["track_id"], round(i["t"], 4), i["key"], tuple(i["reasons"])) for i in lst]
 
-        if sig(new) != sig(self.cut_issues):
+        s_new, s_old = sig(new), sig(self.cut_issues)
+        if s_new != s_old:
+            # ⚡ Solo se redibujan las franjas de los avisos que aparecen o desaparecen (dividir un clip cambia uno o
+            # dos, no los cientos que haya): antes, toda la línea de tiempo
+            cambia = set(s_new) ^ set(s_old)
             self.cut_issues = new
             self.cut_issues_changed.emit(len(new))
-            self.update()
+            if len(cambia) > 40:
+                self.update()
+            else:
+                from PySide6.QtCore import QRect
+                for _tid, t, _k, _r in cambia:
+                    x = int(self.x_for(t))
+                    self.update(QRect(x - 10, 0, 20, self.height()))
         return len(new)
 
+    FLASH_S = 2.0          # ✨ cuánto se resaltan los clips recién puestos
+
+    def flash_clips(self, ids: list[str]):
+        """✨ Resalta esos clips unos 2 s (lo que se acaba de poner desde 🎬 Escenas: ves qué entró y dónde)."""
+        import time as _time
+        self._flash = (set(ids), _time.monotonic())
+        self.set_selection(list(ids))
+        t = getattr(self, "_flash_timer", None)
+        if t is None:
+            t = self._flash_timer = QTimer(self)
+            t.setInterval(40)
+            t.timeout.connect(self._flash_tick)
+        t.start()
+
+    def _flash_tick(self):
+        import time as _time
+        fl = getattr(self, "_flash", None)
+        if not fl or _time.monotonic() - fl[1] > self.FLASH_S:
+            self._flash = None
+            self._flash_timer.stop()
+        self.update()
+
+    def set_cut_issue_selected(self, track_id: str | None, t: float | None):
+        """El corte que se está revisando (panel ✂): solo él lleva su línea roja en la pista."""
+        nuevo = (track_id, round(float(t), 4)) if track_id and t is not None else None
+        if nuevo != self.cut_issue_sel:
+            self.cut_issue_sel = nuevo
+            self.update()
+
+    def _es_elegido(self, iss: dict) -> bool:
+        s = self.cut_issue_sel
+        return s is not None and iss["track_id"] == s[0] and abs(float(iss["t"]) - s[1]) <= 0.01
+
     def cut_issue_at(self, pos: QPointF) -> int | None:
-        """Índice del aviso de corte bajo el ratón (a ±5 px de su línea roja o de su triángulo de la regla)."""
+        """Índice del aviso de corte bajo el ratón: en su TRIÁNGULO de la regla (±6 px); en la pista, solo el elegido
+        (las demás líneas ya no se dibujan: no estorban al cortar a mano)."""
         if not self.cut_issues:
             return None
         proj = self.ctrl.project
         for k, iss in enumerate(self.cut_issues):
-            if abs(pos.x() - self.x_for(iss["t"])) > 5:
+            if abs(pos.x() - self.x_for(iss["t"])) > 6:
                 continue
             ti = proj.track_index(iss["track_id"])
             if ti < 0 or self.track_h(ti) <= 0:
                 continue
-            if self.RULER_H - 16 <= pos.y() <= self.track_y(ti) + self.track_h(ti):
+            if self.RULER_H - 16 <= pos.y() <= self.RULER_H:
+                return k
+            if self._es_elegido(iss) and abs(pos.x() - self.x_for(iss["t"])) <= 4 and \
+                    self.track_y(ti) - 5 <= pos.y() <= self.track_y(ti) + self.track_h(ti):
                 return k
         return None
 
     def _paint_cut_issues(self, p: QPainter):
-        """Línea roja a toda la altura de su pista de audio (y un poco por encima) + triángulo en la regla."""
+        """Línea roja a toda la altura de su pista de audio SOLO en el corte que revisas (los demás: su triángulo
+        en la regla, que no estorba al cortar a mano)."""
         proj = self.ctrl.project
         W = self.width()
         red = QColor("#ff3b30")
-        for iss in self.cut_issues:
-            x = self.x_for(iss["t"])
-            if x < self.HEADER_W - 2 or x > W + 2:
+        xa_v, xb_v = getattr(self, "_vis", (float(self.HEADER_W), float(W)))
+        tin = getattr(self, "_tindex", None) or {t_.id: (k, t_) for k, t_ in enumerate(proj.tracks)}
+        p.setPen(QPen(red, 2))
+        for iss in self._issues_between(self.t_for(xa_v - 3), self.t_for(xb_v + 3)):
+            if not self._es_elegido(iss):       # (solo el que revisas; los demás, su triángulo arriba)
                 continue
-            ti = proj.track_index(iss["track_id"])
+            x = self.x_for(iss["t"])
+            if x < xa_v - 2 or x > xb_v + 2:
+                continue
+            ti = tin.get(iss["track_id"], (-1, None))[0]
             if ti < 0 or self.track_h(ti) <= 0:
                 continue
             y = self.track_y(ti)
-            p.setPen(QPen(red, 2))
             p.drawLine(QLineF(x, y - 5, x, y + self.track_h(ti)))
             # (el triángulo de arriba va en la regla, ver _paint_ruler)
 
+    def _cut_issue_menu(self, ci: int, gpos):
+        """Clic derecho en un triángulo de corte: revisarlo o quitar el aviso (uno o todos; Ctrl+Z lo devuelve)."""
+        iss = self.cut_issues[ci]
+        m = QMenu(self)
+        m.setToolTipsVisible(True)
+        m.addAction("✂ Revisar este corte", lambda: (self.set_cut_issue_selected(iss["track_id"], iss["t"]),
+                                                    self.seek_requested.emit(max(0.0, iss["t"])),
+                                                    self.cut_issue_clicked.emit(ci)))
+        a = m.addAction("✓ Está bien así (quitar este aviso)", lambda: self.ctrl.approve_cut(iss["key"]))
+        a.setToolTip("Lo das por bueno y su triángulo desaparece (Ctrl+Z lo devuelve).")
+        if len(self.cut_issues) > 1:
+            claves = [x["key"] for x in self.cut_issues]
+            a = m.addAction(f"✓ Quitar todos los avisos ({len(claves)})", lambda: self.ctrl.approve_cuts(claves))
+            a.setToolTip("Das por buenos todos los cortes marcados (un paso de Ctrl+Z).")
+        m.exec(gpos)
+
+    def _issues_between(self, ta: float, tb: float) -> list:
+        """⚡ Los cortes dudosos entre ta y tb (ordenados por tiempo una vez, no se recorren todos en cada dibujo)."""
+        lst = self.cut_issues
+        memo = self.__dict__.get("_iss_memo")
+        if memo is None or memo[0] is not lst or memo[1] != len(lst):
+            orden = sorted(lst, key=lambda i: float(i["t"]))
+            memo = self._iss_memo = (lst, len(lst), [float(i["t"]) for i in orden], orden)
+        ts, orden = memo[2], memo[3]
+        return orden[bisect.bisect_left(ts, ta):bisect.bisect_right(ts, tb)]
+
+    # ------------------------------------------- ⧉⚡ lo que el visor ya tiene renderizado (franja en la regla)
+    RENDER_COLORS = {"ok": "#3fbf6f", "work": "#e8b630", "wait": "#8a6d1f", "far": _TM.aclarar("#6a6e77") if _TM.es_gris() else "#4a4f58", "fail": "#c0392b"}
+
+    def set_render_marks(self, marks: list):
+        """[(t0, t1, estado, por qué)] de ui/zone_preview.py: una rayita bajo los temas, como la barra de render de
+        Premiere (verde = listo; amarillo = preparándose; gris = cuando llegues)."""
+        marks = list(marks or [])
+        if marks == getattr(self, "render_marks", []):
+            return
+        self.render_marks = marks
+        from PySide6.QtCore import QRect
+        self.update(QRect(self.HEADER_W, self._vt(), self.width() - self.HEADER_W, self.RULER_H + 1))
+
+    def _render_band(self):
+        """(y, alto) de la franja de render dentro de la regla."""
+        return self.TOPIC_H + 1, max(3, int(round(3 * max(1.0, self.ui_k))))
+
+    def render_mark_at(self, pos: QPointF):
+        y0, hh = self._render_band()
+        if not (y0 - 2 <= pos.y() <= y0 + hh + 2) or pos.x() < self.HEADER_W:
+            return None
+        t = self.t_for(pos.x())
+        for m in getattr(self, "render_marks", []):
+            if m[0] - 2 / max(self.pps, 1e-6) <= t <= m[1] + 2 / max(self.pps, 1e-6):
+                return m
+        return None
+
+    def _paint_render_marks(self, p: QPainter, lo: float, hi: float):
+        marks = getattr(self, "render_marks", None)
+        if not marks:
+            return
+        y0, hh = self._render_band()
+        W = self.width()
+        cols = {k: QColor(v) for k, v in self.RENDER_COLORS.items()}
+        for t0, t1, st, _why in marks:
+            x0, x1 = max(self.x_for(t0), float(self.HEADER_W)), min(self.x_for(t1), float(W))
+            if x1 < lo - 2 or x0 > hi + 2 or x1 <= x0:
+                continue
+            p.fillRect(QRectF(x0, y0, max(1.5, x1 - x0), hh), cols.get(st, cols["far"]))
+
     def event(self, e):
         if e.type() == QEvent.ToolTip:
+            rm = self.render_mark_at(self._rmap(QPointF(e.pos())))
+            if rm is not None:
+                que = "Transición" if rm[3] == "trans" else "Efectos pesados"
+                txt = {"ok": "listo: el visor lo enseña tal cual se exporta",
+                       "work": "preparándose ahora (unos segundos)",
+                       "wait": "en cola: se prepara enseguida",
+                       "far": "lejos del cabezal: se prepara cuando te acerques",
+                       "fail": "no se pudo preparar: el visor lo aproxima (al exportar sale bien)"}[rm[2]]
+                QToolTip.showText(e.globalPos(), f"{que} ({fmt_tc(rm[0], self.ctrl.project.fps)} – "
+                                  f"{fmt_tc(rm[1], self.ctrl.project.fps)}): {txt}", self)
+                return True
             ci = self.cut_issue_at(self._rmap(QPointF(e.pos())))
             if ci is not None:
                 iss = self.cut_issues[ci]
                 QToolTip.showText(e.globalPos(), "Corte de audio que puede estar mal:\n• "
-                                  + "\n• ".join(iss["reasons"]) + "\nClic = revisar y ajustar este corte", self)
+                                  + "\n• ".join(iss["reasons"]) + "\nClic = revisar y ajustar este corte · clic derecho "
+                                  "= quitar el aviso", self)
                 return True
         return super().event(e)
 
@@ -1084,25 +1247,48 @@ class TimelineWidget(QWidget):
         dd = dict(d, dtrack=dtrack)
         dest = {c.id: proj.tracks[self._dest_track(c, dd)].id for c in moving}
         others: dict[str, list] = {}
+        index: dict[str, tuple[list, list]] = {}         # pista → (inicios, fin máximo hasta cada clip)
         for tid in set(dest.values()):
-            others[tid] = [o for o in proj.clips_on(tid) if o.id not in ids]
+            lst = [o for o in proj.clips_on(tid) if o.id not in ids]
+            others[tid] = lst
+            acc, mx = [], -1e18
+            for o in lst:
+                mx = max(mx, o.end)
+                acc.append(mx)
+            index[tid] = ([o.start for o in lst], acc)
+
+        def choca(tid: str, a: float, b: float) -> bool:
+            starts, maxend = index[tid]
+            k = bisect.bisect_left(starts, b - 1e-6)     # los que empiezan antes de b…
+            return k > 0 and maxend[k - 1] > a + 1e-6    # …¿alguno termina después de a?
 
         def ok(x: float) -> bool:
             for c in moving:
                 a, b = c.start + x, c.end + x
-                if a < -1e-6:
-                    return False
-                if any(o.start < b - 1e-6 and o.end > a + 1e-6 for o in others[dest[c.id]]):
+                if a < -1e-6 or choca(dest[c.id], a, b):
                     return False
             return True
         if ok(dt):
             return dt
-        cands = [0.0]
+        cands = {0.0}
+        for c in moving:                                 # solo los vecinos de donde quieres dejarlo
+            lst, starts = others[dest[c.id]], index[dest[c.id]][0]
+            k = bisect.bisect_left(starts, c.start + dt)
+            for o in lst[max(0, k - 12):k + 12]:
+                cands.add(o.end - c.start)
+                cands.add(o.start - c.end)
+        for x in sorted(cands, key=lambda x: abs(x - dt)):
+            if ok(x) and (x != 0.0 or len(cands) == 1):
+                return x
+        todos = set()                                    # (pista muy llena: el hueco libre está más lejos)
         for c in moving:
             for o in others[dest[c.id]]:
-                cands += [o.end - c.start, o.start - c.end]
-        cands = sorted((x for x in cands if ok(x)), key=lambda x: abs(x - dt))
-        return cands[0] if cands else d.get("dt", 0.0)
+                todos.add(o.end - c.start)
+                todos.add(o.start - c.end)
+        for x in sorted(todos | {0.0}, key=lambda x: abs(x - dt)):
+            if ok(x):
+                return x
+        return d.get("dt", 0.0)
 
     def set_selection(self, ids):
         had_extra = self.sel_trans is not None or self.sel_fx is not None or (ids and self.gap is not None)
@@ -1163,7 +1349,8 @@ class TimelineWidget(QWidget):
         cabeceras —nombres, botones, iconos— en cada paso del cabezal)."""
         from ..core import meters
         try:
-            levels = meters.track_levels(self.ctrl.project, self.ctrl.peaks, self.playhead)
+            with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):
+                levels = meters.track_levels(self.ctrl.project, self.ctrl.peaks, self.playhead)
         except Exception:  # noqa: BLE001 - un medidor nunca debe molestar
             levels = {}
         q = {k: round(meters.to_db(v)) for k, v in levels.items()}
@@ -1454,6 +1641,27 @@ class TimelineWidget(QWidget):
 
     # ------------------------------------------------------------- dibujo
     def paintEvent(self, _e):
+        with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):    # ⚡ clips ordenados una vez
+            try:
+                self._paint_todo(_e)
+            finally:
+                self.__dict__.pop("_th_cache", None)
+                self._ty_cache = None
+
+    def _rev_key(self):
+        p = self.ctrl.project
+        return (id(p), id(p.clips), getattr(self.ctrl, "rev", None))
+
+    def _memo(self, nombre: str, calc):
+        """⚡ Lo que solo cambia con el proyecto (vínculos, transiciones…): se calcula una vez por versión."""
+        m = self.__dict__.setdefault("_memos", {})
+        key = self._rev_key()
+        got = m.get(nombre)
+        if got is None or got[0] != key or key[2] is None:
+            got = m[nombre] = (key, calc())
+        return got[1]
+
+    def _paint_todo(self, _e):
         if _e.rect().contains(self.rect()):      # solo en repintado completo: en uno parcial, las demás siguen
             self._fx_chips = {}
         self._hook_scroll()
@@ -1471,7 +1679,7 @@ class TimelineWidget(QWidget):
             if th <= 0:
                 continue
             y = self.track_y(i)
-            bg = QColor("#20242b") if tr.kind != TRACK_AUDIO else QColor("#1e2420")
+            bg = COLORS["track_video"] if tr.kind != TRACK_AUDIO else COLORS["track_audio"]
             p.fillRect(QRectF(self.HEADER_W, y, W - self.HEADER_W, th), bg)
             if tr.id in self.channels:              # 🎚 canal seleccionado
                 p.fillRect(QRectF(self.HEADER_W, y, W - self.HEADER_W, th), QColor(255, 255, 255, 13))
@@ -1489,22 +1697,58 @@ class TimelineWidget(QWidget):
         # Rendimiento con muchos clips: cuántos clips comparten cada vínculo (una vez, no clip contra clip) y
         # solo se dibujan los que tocan la zona que hay que repintar (al moverse el cabezal es una franja)
         from collections import Counter
-        self._links = Counter(c.link for c in proj.clips.values() if c.link)
+        self._links = self._memo("links", lambda: Counter(c.link for c in proj.clips.values() if c.link))
         reg = _e.region()             # la zona EXACTA a repintar (no el rectángulo que la engloba)
         self._ty_cache = None
+        self.__dict__.pop("_th_cache", None)
         ys, y = [], float(self.RULER_H)
-        for k in range(len(proj.tracks)):     # la altura de cada pista, una vez por dibujo
+        ths = [self.track_h(k) for k in range(len(proj.tracks))]   # la altura de cada pista, una vez por dibujo
+        for k in range(len(proj.tracks)):
             ys.append(y)
-            y += self.track_h(k)
+            y += ths[k]
         self._ty_cache = ys
+        self._th_cache = ths
         hidden = {t.id for k, t in enumerate(proj.tracks) if self.track_h(k) <= 0}
         # ⚡ Antes de calcular nada, fuera los clips que caen fuera (en tiempo) de la zona a repintar: con cientos de
         # clips y el zoom de trabajo solo se ven unos pocos
-        br = reg.boundingRect()
+        # ⚡ Las cabeceras (vúmetros) no cuentan: Qt junta su zona con la franja del cabezal y el rectángulo que
+        # engloba ambas iba de la izquierda al cabezal (se redibujaban cientos de clips cada vez que cambiaba un nivel)
+        from PySide6.QtCore import QRect as _QRz
+        zona = reg.intersected(_QRz(int(self.HEADER_W), 0, max(0, W - int(self.HEADER_W)), H))
+        br = zona.boundingRect() if not zona.isEmpty() else _QRz(int(self.HEADER_W), 0, 0, H)
         self._paint_x = (br.left() - 2, br.right() + 2)     # las ondas solo se dibujan en esta franja
+        mg = max(8.0, 12.0 * self.ui_k)
+        self._vis = (max(float(self.HEADER_W), br.left() - mg), min(float(W), br.right() + mg))   # ⚡ lo visible
         t_lo = self.t_for(br.left() - 4) - 0.5 / max(self.pps, 1e-6)
         t_hi = self.t_for(br.right() + 4) + 0.5 / max(self.pps, 1e-6)
-        for c in proj.clips.values():
+        def _por_pista():
+            out = {}
+            for tr_ in proj.tracks:
+                lst = proj.clips_on(tr_.id)
+                out[tr_.id] = ([c.start for c in lst], lst, max((c.duration for c in lst), default=0.0))
+            return out
+        pp = self._memo("por_pista", _por_pista)
+        cand = []
+        for tid_, (starts_, lst_, maxd_) in pp.items():
+            if tid_ in hidden:
+                continue
+            k0 = bisect.bisect_left(starts_, t_lo - maxd_ - 1e-6)
+            k1 = bisect.bisect_right(starts_, t_hi + 1e-6)
+            cand.extend(lst_[k0:k1])
+        if moving:
+            vistos = {c.id for c in cand}
+            cand.extend(proj.clips[i] for i in d["ids"] if i in proj.clips and i not in vistos)
+        # ⚡ Zoom muy alejado: los clips de menos de 7 px seguidos y del mismo color, en la misma pista, se pintan como
+        # UN rectángulo (cientos de cortes de 1 px eran cientos de dibujos)
+        tramos: dict = {}                             # pista → [x0, x1, y, alto, color]
+        hw = float(self.HEADER_W)
+        WW = float(W)
+
+        def _soltar(tr_id):
+            t_ = tramos.pop(tr_id, None)
+            if t_ is not None:
+                p.fillRect(QRectF(t_[0], t_[2], t_[1] - t_[0], t_[3]), QColor.fromRgba(t_[4]))
+        for c in cand:
             if c.track_id in hidden:
                 continue
             if (c.start > t_hi or c.start + c.duration < t_lo) and not (moving and c.id in d["ids"]):
@@ -1515,11 +1759,24 @@ class TimelineWidget(QWidget):
                     continue
             if moving and c.id in d["ids"]:
                 if not d.get("nudge"):           # (⇆ Alt + rueda: el clip se desliza, no deja copia atenuada)
-                    self._paint_clip(p, c, self.clip_rect(c), dim=True)
+                    self._paint_clip(p, c, rc, dim=True)
             elif d and d["type"] == "trim" and d.get("active") and (c.id == d["clip"] or c.id in d.get("partners", [])):
                 continue                              # se dibuja abajo, ya recortado
+            elif rc.width() < 7 and self._nudge is None:
+                if rc.right() < hw or rc.left() > WW:
+                    continue
+                col = self._tiny_rgb(c)
+                t_ = tramos.get(c.track_id)
+                if t_ is not None and t_[4] == col and rc.left() <= t_[1] + 0.25 and t_[2] == rc.top():
+                    t_[1] = max(t_[1], rc.right())
+                else:
+                    _soltar(c.track_id)
+                    tramos[c.track_id] = [rc.left(), rc.right(), rc.top(), rc.height(), col]
             else:
-                self._paint_clip(p, c, self.clip_rect(c))
+                _soltar(c.track_id)
+                self._paint_clip(p, c, rc)
+        for tr_id in list(tramos):
+            _soltar(tr_id)
         if moving:
             for cid in d["ids"]:
                 c = proj.clips.get(cid)
@@ -1566,22 +1823,25 @@ class TimelineWidget(QWidget):
                     r = self.clip_rect(c)
                     p.setPen(QColor("#ffd166"))
                     p.drawText(r.adjusted(4, 16, 0, 0), Qt.AlignLeft | Qt.AlignTop, f"slip {d['dt']:+.2f} s")
-        # 🔗 Uniones: una línea fina donde se pegan dos trozos; en rojo un huequito y en naranja un solape diminutos
+        # 🔗 Uniones: donde se pegan dos trozos, una separación bien visible de arriba abajo (franja oscura con una línea
+        # clara en medio: el usuario no distinguía dónde acababa un clip); en rojo un huequito y en naranja un solape
         # (casi no se ven y hacen que un corte bien hecho parezca mal editado: Ctrl++ los arregla)
         if self.pps >= 4:
             jn = self._joins()
+            ta_v, tb_v = self.t_for(self._vis[0]) - 0.01, self.t_for(self._vis[1]) + 0.01
             for t_id, t, tipo, cuanto in jn["marcas"]:
-                x = self.x_for(t)
-                if x < self.HEADER_W or x > W:
+                if t < ta_v or t > tb_v:
                     continue
+                x = self.x_for(t)
                 k_t = self._tindex.get(t_id)
                 if k_t is None or self.track_h(k_t[0]) <= 0:
                     continue
                 y0 = self.track_y(k_t[0]) + 2
                 y1 = y0 + self.track_h(k_t[0]) - 4
                 if tipo == "ok":
-                    p.setPen(QPen(QColor(235, 238, 245, 150), 1))
-                    p.drawLine(QLineF(x, y0 + 16 * self.ui_k, x, y1))
+                    p.fillRect(QRectF(x - 1.5, y0 - 2, 3.0, y1 - y0 + 4), QColor(12, 13, 16, 235))
+                    p.setPen(QPen(QColor(245, 247, 252, 235), 1))
+                    p.drawLine(QLineF(x, y0 - 2, x, y1 + 2))
                 else:
                     col = QColor("#ff4d4d") if tipo == "hueco" else QColor("#ff9f1c")
                     p.setPen(QPen(col, 2))
@@ -1589,19 +1849,37 @@ class TimelineWidget(QWidget):
                     p.setPen(Qt.NoPen)
                     p.setBrush(col)
                     p.drawPolygon(QPolygonF([QPointF(x - 5, y0), QPointF(x + 5, y0), QPointF(x, y0 + 7)]))
+        # ✨ Clips resaltados un momento (lo que se acaba de poner desde 🎬 Escenas): borde amarillo que late
+        fl = getattr(self, "_flash", None)
+        if fl:
+            import math as _m
+            import time as _time
+            pasado = _time.monotonic() - fl[1]
+            if pasado <= self.FLASH_S:
+                a = int(255 * (0.55 + 0.45 * _m.sin(pasado * 9.0)) * (1.0 - pasado / self.FLASH_S * 0.6))
+                for cid in fl[0]:
+                    c = proj.clips.get(cid)
+                    if c is None:
+                        continue
+                    r = self.clip_rect(c)
+                    if r.right() < self._vis[0] or r.left() > self._vis[1]:
+                        continue
+                    p.setPen(QPen(QColor(255, 209, 102, a), 3))
+                    p.setBrush(QColor(255, 209, 102, a // 5))
+                    p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 4, 4)
         # Transiciones: una pajarita sobre el corte (ancho = su duración)
         from ..core import transitions as TR
         for i, tr in enumerate(proj.tracks):
             if tr.kind != TRACK_VIDEO or self.track_h(i) <= 0:
                 continue
             y = self.track_y(i)
-            for left, right, t in TR.pairs(proj, tr.id):
+            for left, right, t in self._memo("tr_" + tr.id, lambda tid=tr.id: list(TR.pairs(proj, tid))):
                 xc = self.x_for(right.start)
                 dur = t["dur"]
                 if self._trans_preview and self._trans_preview[0] == right.id:
                     dur = self._trans_preview[1]
                 hw = max(7.0, dur * self.pps / 2)
-                if xc + hw < self.HEADER_W or xc - hw > W:
+                if xc + hw < self._vis[0] or xc - hw > self._vis[1]:
                     continue
                 r = QRectF(xc - hw, y + 17, 2 * hw, self.track_h(i) - 21)
                 sel = right.id == self.sel_trans
@@ -1623,7 +1901,7 @@ class TimelineWidget(QWidget):
         # Sugerencias pendientes de la IA (zonas de color) y cortes aplicados (✂)
         for i, ta, tb, kind, sid, _label in self._sug_spans:
             x1, x2 = self.x_for(ta), self.x_for(tb)
-            if x2 < self.HEADER_W or x1 > W:
+            if x2 < self._vis[0] or x1 > self._vis[1]:
                 continue
             col = QColor(SUGGESTION_COLORS.get(kind, QColor("#888")))
             r = QRectF(x1, self.track_y(i) + 18, max(2.0, x2 - x1), self.track_h(i) - 21)
@@ -1635,7 +1913,7 @@ class TimelineWidget(QWidget):
             p.drawRect(r)
         for i, tc, _label in self._cut_marks:
             x = self.x_for(tc)
-            if x < self.HEADER_W or x > W:
+            if x < self._vis[0] or x > self._vis[1]:
                 continue
             y = self.track_y(i)
             p.setPen(QPen(COLORS["ai"], 2))
@@ -1649,7 +1927,7 @@ class TimelineWidget(QWidget):
             hot = self._drop[0] == "new"
             zr = QRectF(self.HEADER_W + 4, zy + 3, W - self.HEADER_W - 8, self.NEW_ZONE - 6)
             p.fillRect(zr, QColor(232, 116, 47, 70 if hot else 22))
-            p.setPen(QPen(COLORS["selection"] if hot else QColor("#6b6f78"), 1.2, Qt.DashLine))
+            p.setPen(QPen(COLORS["selection"] if hot else _TM.qc("#6b6f78"), 1.2, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
             p.drawRect(zr)
             p.setPen(QColor("#ffd2b8") if hot else QColor("#9a9ea8"))
@@ -1710,6 +1988,8 @@ class TimelineWidget(QWidget):
         # Líneas de marcadores
         for m in proj.markers:
             x = self.x_for(m.time)
+            if x < self._vis[0] - 1 or x > self._vis[1] + 1:
+                continue
             c = QColor(m.color)
             c.setAlpha(70 if m.kind != "topic" else 45)
             p.setPen(QPen(c, 1, Qt.DashLine))
@@ -1717,7 +1997,7 @@ class TimelineWidget(QWidget):
         # ⭐ Propuestas de efectos: rombo dorado y línea fina
         for i, (t, _label) in enumerate(self.effect_marks):
             x = self.x_for(t)
-            if x < self.HEADER_W or x > W:
+            if x < self._vis[0] or x > self._vis[1]:
                 continue
             cur = i == self.effect_current
             p.setPen(QPen(QColor(242, 179, 61, 200 if cur else 90), 1.5 if cur else 1, Qt.DotLine))
@@ -1733,7 +2013,7 @@ class TimelineWidget(QWidget):
             for m in self.kw_marks:
                 x = self.x_for(m["t"])
                 x2 = self.x_for(m["t"] + max(0.0, float(m.get("dur") or 0)))
-                if x2 < self.HEADER_W or x > W:
+                if x2 < self._vis[0] or x > self._vis[1]:
                     continue
                 c = QColor(_KWC.get(m["kind"], "#6b6f78"))
                 if m["kind"] != "none":
@@ -1761,7 +2041,7 @@ class TimelineWidget(QWidget):
         # 🎬 Marcas de «Dijiste…»: línea fina discontinua cian (solo las que se ven)
         for t, _label in self.hint_marks:
             x = self.x_for(t)
-            if x < self.HEADER_W or x > W:
+            if x < self._vis[0] or x > self._vis[1]:
                 continue
             p.setPen(QPen(QColor(64, 200, 230, 170), 1, Qt.DashLine))
             p.drawLine(QLineF(x, self.RULER_H, x, H))
@@ -1891,7 +2171,7 @@ class TimelineWidget(QWidget):
         W = self.width()
         T = self.TOPIC_H
         p.fillRect(QRectF(0, 0, W, self.RULER_H), COLORS["panel"])
-        p.fillRect(QRectF(0, 0, W, T), QColor("#1d2026"))
+        p.fillRect(QRectF(0, 0, W, T), COLORS["topic_band"])
         p.setPen(COLORS["line"])
         p.drawLine(QLineF(0, self.RULER_H - 0.5, W, self.RULER_H - 0.5))
         step = next((s for s in (0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200)
@@ -1926,7 +2206,7 @@ class TimelineWidget(QWidget):
             if m.kind != "topic" or m.end is None:
                 continue
             x1, x2 = max(self.x_for(m.time), float(self.HEADER_W)), min(self.x_for(m.end), float(W))
-            if x2 <= x1:
+            if x2 <= x1 or x2 < lo - 2 or x1 > hi + 2:
                 continue
             c = QColor(m.color)
             fill = QColor(c)
@@ -1940,13 +2220,16 @@ class TimelineWidget(QWidget):
             p.drawText(r.adjusted(5, 0, -3, 0), Qt.AlignVCenter,
                        p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 8)))
         p.setFont(f)
+        self._paint_render_marks(p, lo, hi)      # ⧉⚡ lo que el visor ya tiene renderizado
         # Marcadores puntuales
         for m in self.ctrl.project.markers:
             if m.kind == "topic":
                 continue
             x = self.x_for(m.time)
-            if x < self.HEADER_W - 2 or x > W:
+            if x < self.HEADER_W - 2 or x > W or x > hi + 8:
                 continue
+            if x < lo and (not m.label or x + 8 + p.fontMetrics().horizontalAdvance(m.label) < lo):
+                continue                                 # (su etiqueta tampoco llega a la franja)
             color = QColor(m.color)
             p.setPen(Qt.NoPen)
             p.setBrush(color)
@@ -1963,9 +2246,8 @@ class TimelineWidget(QWidget):
             down, strong, gap = bm["down_set"], bm["strong_set"], bm["gap"]
             ver_todos = gap * self.pps >= 5
             yb = self.RULER_H - 1
-            for b in bm["beats"]:
-                if b < vis_a or b > vis_b:
-                    continue
+            bs = bm.get("beats_sorted") or sorted(bm["beats"])
+            for b in bs[bisect.bisect_left(bs, vis_a):bisect.bisect_right(bs, vis_b)]:
                 x = self.x_for(b)
                 if b in down:
                     p.setPen(QPen(QColor(255, 255, 255, 200), 1.4))
@@ -2022,11 +2304,13 @@ class TimelineWidget(QWidget):
             p.setPen(QColor("#0b1f24"))
             p.drawText(r, Qt.AlignCenter, self.hint_marks[i][1])
         # ✂ Cortes de audio que pueden estar mal: triángulo rojo en la regla (la línea va en las pistas)
-        for iss in self.cut_issues:
+        tin = getattr(self, "_tindex", None) or {t_.id: (k, t_) for k, t_ in enumerate(proj.tracks)}
+        xa_t, xb_t = max(float(self.HEADER_W), lo) - 8, min(float(W), hi) + 8    # (⚡ solo la franja a repintar)
+        for iss in self._issues_between(self.t_for(xa_t - 2), self.t_for(xb_t + 2)):
             x = self.x_for(iss["t"])
-            if x < self.HEADER_W - 2 or x > W + 2:
+            if x < xa_t or x > xb_t:
                 continue
-            ti = proj.track_index(iss["track_id"])
+            ti = tin.get(iss["track_id"], (-1, None))[0]
             if ti < 0 or self.track_h(ti) <= 0:
                 continue
             top = self.RULER_H - 14
@@ -2174,13 +2458,13 @@ class TimelineWidget(QWidget):
         if g.height() < 20:
             return
         hot = getattr(self, "_drag", None) and self._drag.get("type") == "track_zoom" or getattr(self, "_grip_hover", False)
-        p.fillRect(g, QColor("#1b1b1e"))
-        p.fillRect(QRectF(g.right() - 1, g.top(), 1, g.height()), QColor("#141416"))
+        p.fillRect(g, COLORS["grip"])
+        p.fillRect(QRectF(g.right() - 1, g.top(), 1, g.height()), COLORS["grip_line"])
         knob = QRectF(g.left() + 1.5, g.center().y() - 26, g.width() - 3, 52)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#5a5a62") if hot else QColor("#3a3a40"))
+        p.setBrush(_TM.qc("#5a5a62") if hot else _TM.qc("#3a3a40" if not _TM.es_gris() else "#4a4c52"))
         p.drawRoundedRect(knob, 2.5, 2.5)
-        p.setPen(QPen(QColor("#9a9aa3") if hot else QColor("#6e6e76"), 1))
+        p.setPen(QPen(_TM.qc("#9a9aa3") if hot else _TM.qc("#6e6e76"), 1))
         for dy in (-8, -3, 2, 7):
             y = knob.center().y() + dy
             p.drawLine(QLineF(knob.left() + 1.5, y, knob.right() - 1.5, y))
@@ -2189,7 +2473,8 @@ class TimelineWidget(QWidget):
         """Solo los vúmetros de las cabeceras (lo mismo que dibuja _paint_headers en esa zona)."""
         from ..core import meters
         try:
-            levels = meters.track_levels(self.ctrl.project, self.ctrl.peaks, self.playhead)
+            with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):
+                levels = meters.track_levels(self.ctrl.project, self.ctrl.peaks, self.playhead)
         except Exception:  # noqa: BLE001
             levels = {}
         for i, tr in enumerate(self.ctrl.project.tracks):
@@ -2197,12 +2482,12 @@ class TimelineWidget(QWidget):
             if th <= 20:
                 continue
             y = self.track_y(i)
-            p.fillRect(QRectF(self._meter_rect(i)), QColor("#252527"))
+            p.fillRect(QRectF(self._meter_rect(i)), COLORS["header"])
             if tr.id in levels:
                 db = meters.to_db(levels[tr.id])
                 frac = min(1.0, max(0.0, (db + 60) / 60))
                 bar = QRectF(self.HEADER_W - 6, y + 4, 3, th - 8)
-                p.fillRect(bar, QColor("#1a1a1c"))
+                p.fillRect(bar, COLORS["meter_bg"])
                 hfill = bar.height() * frac
                 col = QColor("#e5484d") if db > -3 else QColor("#f2b33d") if db > -12 else QColor("#3fb950")
                 p.fillRect(QRectF(bar.left(), bar.bottom() - hfill, bar.width(), hfill), col)
@@ -2210,7 +2495,8 @@ class TimelineWidget(QWidget):
     def _paint_headers(self, p: QPainter):
         from ..core import meters
         try:
-            levels = meters.track_levels(self.ctrl.project, self.ctrl.peaks, self.playhead)
+            with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):
+                levels = meters.track_levels(self.ctrl.project, self.ctrl.peaks, self.playhead)
         except Exception:  # noqa: BLE001 - un medidor nunca debe impedir dibujar la timeline
             levels = {}
         emoji = self._f(9, family="Segoe UI Emoji")
@@ -2224,10 +2510,10 @@ class TimelineWidget(QWidget):
             if th <= 0:
                 continue
             r = QRectF(0, y, self.HEADER_W, th)
-            p.fillRect(r, QColor("#2f333b") if tr.id in self.channels else QColor("#252527"))
+            p.fillRect(r, COLORS["header_sel"] if tr.id in self.channels else COLORS["header"])
             if tr.id in self.channels:
                 p.fillRect(QRectF(self._grip_rect().right(), y, 3 * self.ui_k, th), QColor("#9a9ea8"))
-            p.setPen(QColor("#141416"))
+            p.setPen(COLORS["header_line"])
             p.drawLine(QLineF(0, y + th - 0.5, self.HEADER_W, y + th - 0.5))
             badge, name = self.track_badge(i)
             color = (COLORS["clip_text"] if tr.kind == TRACK_TEXT else
@@ -2253,26 +2539,26 @@ class TimelineWidget(QWidget):
             # Candado
             # Candado: solo resalta (ámbar) si la pista está BLOQUEADA (eso sí impide editar); libre = gris discreto
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#5a4510") if tr.locked else QColor("#323235"))
+            p.setBrush(QColor("#5a4510") if tr.locked else _TM.qc("#3a3b40" if _TM.es_gris() else "#323235"))
             p.drawRoundedRect(lock_r, 3, 3)
             self._paint_lock(p, lock_r, tr.locked)
             # Video: ojo · Audio: M (silenciar), como en Resolve
             if tr.kind == TRACK_AUDIO:
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor("#b23a32") if tr.muted else QColor("#323235"))
+                p.setBrush(QColor("#b23a32") if tr.muted else _TM.qc("#3a3b40" if _TM.es_gris() else "#323235"))
                 p.drawRoundedRect(vis_r, 3, 3)
                 p.setFont(bold)
                 p.setPen(QColor("white") if tr.muted else COLORS["text_dim"])
                 p.drawText(vis_r, Qt.AlignCenter, "M")
                 sr = self._solo_rect(i)          # S = solo (como en Resolve)
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor("#c9a227") if tr.solo else QColor("#323235"))
+                p.setBrush(QColor("#c9a227") if tr.solo else _TM.qc("#3a3b40" if _TM.es_gris() else "#323235"))
                 p.drawRoundedRect(sr, 3, 3)
                 p.setPen(QColor("black") if tr.solo else COLORS["text_dim"])
                 p.drawText(sr, Qt.AlignCenter, "S")
             else:
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor("#4a2a28") if tr.hidden else QColor("#323235"))
+                p.setBrush(QColor("#4a2a28") if tr.hidden else _TM.qc("#3a3b40" if _TM.es_gris() else "#323235"))
                 p.drawRoundedRect(vis_r, 3, 3)
                 p.setFont(emoji)
                 p.setPen(QColor("#e6e6e8"))
@@ -2282,11 +2568,11 @@ class TimelineWidget(QWidget):
                 db = meters.to_db(levels[tr.id])
                 frac = min(1.0, max(0.0, (db + 60) / 60))
                 bar = QRectF(self.HEADER_W - 6, y + 4, 3, th - 8)
-                p.fillRect(bar, QColor("#1a1a1c"))
+                p.fillRect(bar, COLORS["meter_bg"])
                 hfill = bar.height() * frac
                 col = QColor("#e5484d") if db > -3 else QColor("#f2b33d") if db > -12 else QColor("#3fb950")
                 p.fillRect(QRectF(bar.left(), bar.bottom() - hfill, bar.width(), hfill), col)
-        p.setPen(QColor("#141416"))
+        p.setPen(COLORS["header_line"])
         p.drawLine(QLineF(self.HEADER_W - 0.5, self.RULER_H, self.HEADER_W - 0.5, self.height()))
 
     def _thumb(self, media_id: str, h: int) -> QPixmap | None:
@@ -2317,18 +2603,13 @@ class TimelineWidget(QWidget):
             p.drawPixmap(QRectF(x, top, tw, th), pix, QRectF(i * tile_w, 0, tile_w, pix.height()))
             x += tw
 
-    def _paint_clip(self, p: QPainter, c, r: QRectF, dim=False, ghost=False):
-        if r.right() < self.HEADER_W or r.left() > self.width():
-            return
-        nz = self._nudge
-        if nz is not None and c.id in nz.get("src", {}):      # ⇆ slip con Alt + rueda: su contenido nuevo, en vivo
-            c = replace(c, source_in=nz["src"][c.id])
-        proj = self.ctrl.project
-        m = proj.media_of(c)
+    def _clip_base(self, c):
+        """(color base, medio, tipo, falta el archivo) de un clip."""
+        m = self.ctrl.project.media_of(c)
         kind = m.kind if m else ("text" if c.text else "video")
         tr = self._track_obj(c.track_id)
         if tr is not None and tr.kind == TRACK_AUDIO and m is not None:
-            kind = KIND_AUDIO        # el sonido de un video, separado en una pista de audio
+            kind = KIND_AUDIO
         missing = c.text is None and (m is None or m.id in self.ctrl.missing)
         base = (COLORS["missing"] if missing else
                 COLORS["clip_disabled"] if not c.enabled and c.text else
@@ -2337,6 +2618,24 @@ class TimelineWidget(QWidget):
                 QColor(c.label) if c.label else
                 COLORS["clip_audio"] if kind == KIND_AUDIO else
                 COLORS["clip_image"] if kind == KIND_IMAGE else COLORS["clip_video"])
+        return base, m, kind, missing
+
+    def _tiny_rgb(self, c) -> int:
+        """⚡ El color (como número) de un clip de menos de 7 px: igual que en _paint_clip."""
+        if c.id in self.selected:
+            return COLORS["clip_sel"].rgba()
+        if c.origin == ORIGIN_AI:
+            return COLORS["ai"].darker(115).rgba()
+        base = self._clip_base(c)[0]
+        return (base.darker(160) if c.locked else base.darker(130)).rgba()
+
+    def _paint_clip(self, p: QPainter, c, r: QRectF, dim=False, ghost=False):
+        if r.right() < self.HEADER_W or r.left() > self.width():
+            return
+        nz = self._nudge
+        if nz is not None and c.id in nz.get("src", {}):      # ⇆ slip con Alt + rueda: su contenido nuevo, en vivo
+            c = replace(c, source_in=nz["src"][c.id])
+        base, m, kind, missing = self._clip_base(c)  # (el sonido de un video en una pista de audio cuenta como audio)
         p.save()
         if dim:
             p.setOpacity(0.35)
@@ -2848,15 +3147,22 @@ class TimelineWidget(QWidget):
         """El ritmo sobre la canción: rayita en cada golpe, más larga al empezar cada compás, punto naranja
         en los golpes fuertes y una línea roja 💥 en el drop."""
         lo, hi = c.source_in, c.source_in + c.duration
-        vis_a = lo + max(0.0, (0 - r.left())) / self.pps
-        vis_b = lo + (self.width() - r.left()) / self.pps
-        down = set(rh.get("downbeats", []))
-        strong = set(rh.get("strong", []))
+        px_a, px_b = getattr(self, "_paint_x", (0.0, float(self.width())))   # ⚡ solo la franja que se repinta
+        vis_a = lo + max(0.0, (max(0.0, px_a - 2) - r.left())) / self.pps
+        vis_b = lo + (min(float(self.width()), px_b + 2) - r.left()) / self.pps
+        rm = self.__dict__.setdefault("_rh_memo", {})                       # (conjuntos y orden, una vez por canción)
+        got = rm.get(id(rh))
+        if got is None or got[0] is not rh:
+            got = rm[id(rh)] = (rh, sorted(rh.get("beats", [])), set(rh.get("downbeats", [])),
+                                set(rh.get("strong", [])))
+            if len(rm) > 64:
+                rm.clear()
+                rm[id(rh)] = got
+        beats, down, strong = got[1], got[2], got[3]
         top = r.top() + 16 * self.ui_k
         p.save()
-        for b in rh.get("beats", []):
-            if b < max(lo, vis_a) or b >= min(hi, vis_b):
-                continue
+        a_, b_ = max(lo, vis_a), min(hi, vis_b)
+        for b in beats[bisect.bisect_left(beats, a_):bisect.bisect_left(beats, b_)]:
             xb = r.left() + (b - lo) * self.pps
             if b in down:
                 p.setPen(QPen(QColor(255, 255, 255, 210), 1.4))
@@ -2922,9 +3228,14 @@ class TimelineWidget(QWidget):
         if pos.x() < self.HEADER_W:
             self._header_click(pos, e)
             return
-        ci = self.cut_issue_at(pos) if e.button() == Qt.LeftButton else None
-        if ci is not None:          # línea roja: el cabezal va al corte y se abre su ajuste
-            self.seek_requested.emit(max(0.0, self.cut_issues[ci]["t"]))
+        ci = self.cut_issue_at(pos) if e.button() in (Qt.LeftButton, Qt.RightButton) else None
+        if ci is not None and e.button() == Qt.RightButton:
+            self._cut_issue_menu(ci, e.globalPosition().toPoint())
+            return
+        if ci is not None:          # triángulo: el cabezal va al corte y se abre su ajuste (a la derecha)
+            iss = self.cut_issues[ci]
+            self.set_cut_issue_selected(iss["track_id"], iss["t"])
+            self.seek_requested.emit(max(0.0, iss["t"]))
             self.cut_issue_clicked.emit(ci)
             return
         k = self.effect_mark_at(apos) if e.button() == Qt.LeftButton else -1
@@ -3299,7 +3610,9 @@ class TimelineWidget(QWidget):
                 return
             self._drag = d = {"type": "scrub"}
         if d["type"] == "scrub":
-            self._seek_soon(max(0.0, self.t_for(pos.x())))
+            t = max(0.0, self.t_for(pos.x()))
+            self._seek_soon(t)
+            self.scrub_requested.emit(t)
             return
         if d["type"] in ("curve_point", "curve_level"):
             self._curve_move(d, pos)
@@ -3501,6 +3814,12 @@ class TimelineWidget(QWidget):
         m = self.marker_at(pos) or self.topic_at(pos)[0]
         if m:
             self._rename_marker(m)
+            return
+        from ..core import scenes as _sc
+        c = self.clip_at(pos)
+        eid = _sc.id_de_nota(getattr(c, "note", "")) if c is not None else None
+        if eid and eid in self.ctrl.project.scenes:          # 🎬 doble clic en un clip de una escena: abrirla
+            self.scene_open_requested.emit(eid)
 
     def keyReleaseEvent(self, e):
         if e.key() == Qt.Key_Alt and self._nudge is not None:   # ⇆ al soltar Alt se aplica ya
@@ -3567,6 +3886,14 @@ class TimelineWidget(QWidget):
         if clip:
             proj = self.ctrl.project
             sel = sorted(self.selected) if clip.id in self.selected else [clip.id]
+            from ..core import scenes as _sc
+            eid = _sc.id_de_nota(clip.note)
+            if eid and eid in proj.scenes:                     # 🎬 es parte de una escena
+                a = menu.addAction(f"🎬 Editar la escena «{proj.scenes[eid].get('nombre') or 'Escena'}»",
+                                   lambda e=eid: self.scene_open_requested.emit(e))
+                a.setToolTip("La abre en la página «🎬 Escenas» (también con doble clic en cualquiera de sus clips).")
+                menu.addAction("🗑 Quitar la escena entera", lambda e=eid: self.ctrl.remove_scene(e))
+                menu.addSeparator()
             # --- compuesto
             if self.ctrl.is_compound(clip.id):
                 menu.addAction("Deshacer clip compuesto", lambda: self.set_selection(self.ctrl.break_compound(clip.id)))
@@ -3834,6 +4161,20 @@ class TimelineWidget(QWidget):
             sub.addAction(name, lambda k=key, ii=list(imgs): self.ctrl.set_image_style(ii, k))
         sub.addSeparator()
         sub.addAction("⏱ Ajustar a la frase", lambda ii=list(imgs): self.ctrl.set_image_style(ii, "phrase"))
+        from ..core import image_anim
+        an = menu.addMenu("🎞 Animación")
+        a = an.addAction("✨ Según lo que digo", lambda ii=list(imgs): self.ctrl.set_image_anim(ii, "auto"))
+        a.setToolTip("La que pide lo que dices en ese momento: «dispara» → disparar, «muere» → morir, «llega» → "
+                     "entrar deslizando… (hace falta la transcripción).")
+        an.addSeparator()
+        for k, n, d in image_anim.ANIMS:
+            a = an.addAction(n, lambda kk=k, ii=list(imgs): self.ctrl.set_image_anim(ii, kk))
+            a.setToolTip(d + " Mira hacia el centro de la pantalla.")
+        an.addSeparator()
+        c0 = proj.clips.get(imgs[0])
+        a = an.addAction("🎞 Animar imagen…", lambda mid=c0.media_id: self.anim_requested.emit(mid))
+        a.setToolTip("Abre la ventana para elegir dónde va con una vista previa, cuánto dura y en qué momentos.")
+        an.setToolTipsVisible(True)
         menu.addSeparator()
 
     def _add_ideas(self, menu, ids):
@@ -4000,7 +4341,7 @@ class TimelineWidget(QWidget):
             return
         cur = TR.of(right)
         tm = menu.addMenu("⧉ Transición " + ("al final" if near_end else "al inicio"))
-        dur = float(cur["dur"]) if cur else 0.5
+        dur = float(cur["dur"]) if cur else (None if TR.auto_on() else 0.5)     # (⏱ sin transición: automática)
         for key, name, desc in TR.CATALOG:
             a = tm.addAction(name, lambda k=key: self.ctrl.set_transition([right.id], k, dur))
             a.setToolTip(desc)

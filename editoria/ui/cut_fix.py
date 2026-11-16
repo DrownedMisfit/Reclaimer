@@ -10,12 +10,16 @@ Un panel pequeño, no modal:
   · «✓ Aplicar todas las sugerencias» (todas en un solo paso de Deshacer).
 Al aplicar o dar por bueno un corte, si su aviso desaparece el panel pasa solo al siguiente corte dudoso.
 Cada acción es un paso de Deshacer (Ctrl+Z).
+Va en el panel de la DERECHA (pestaña «✂ Corte de audio», junto al Inspector), con un DIBUJO de la onda del corte:
+verde lo que se oye, gris rayado el silencio que se quitó y, al pasar el ratón por un botón, azul lo que recuperaría
+y rojo lo que quitaría de más (sin ratón encima: la sugerencia, punteada).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-                               QVBoxLayout)
+                               QVBoxLayout, QWidget)
 
 from ..core import cut_check
 from .common import fmt_time
@@ -70,9 +74,150 @@ def conectar_clic(etiqueta, fn):
     etiqueta.setCursor(Qt.PointingHandCursor)
 
 
+VERDE, GRIS, AZUL, ROJO = "#4cc38a", "#5b5f68", "#5aa9ff", "#ff5a5a"
+CTX = 1.0          # segundos de onda a cada lado del corte
+
+
+class CutView(QWidget):
+    """🔍 El corte dibujado: la onda del archivo alrededor del corte (lo que se oye, el silencio quitado en medio,
+    comprimido) y lo que haría el botón bajo el ratón (azul = se recupera · rojo = se quita de más)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(96)
+        self.peaks = None
+        self.j: dict | None = None
+        self.fix: dict | None = None
+        self.preview: tuple[str, float] | None = None
+        self.setToolTip("Verde: lo que se oye · gris rayado: el silencio que se quitó · al pasar el ratón por un "
+                        "botón: azul lo que recuperaría, rojo lo que quitaría de más (la sugerencia, punteada)")
+
+    def set_data(self, peaks, j: dict | None, fix: dict | None):
+        self.peaks, self.j, self.fix = peaks, j, fix
+        self.update()
+
+    def set_preview(self, pv: tuple[str, float] | None):
+        self.preview = pv
+        self.update()
+
+    # ---- geometría: tiempo DEL ARCHIVO → x (el hueco quitado, comprimido en medio)
+    def _geo(self):
+        j = self.j
+        W = max(60.0, self.width() - 12.0)
+        gap = max(1e-3, j["in"] - j["out"])
+        s0 = W / (2 * CTX + gap)
+        gw = min(max(gap * s0, 46.0), 0.32 * W)
+        s = (W - gw) / (2 * CTX)
+        return 6.0, s, gw, gap
+
+    def x_de(self, t: float) -> float:
+        x0, s, gw, gap = self._geo()
+        j = self.j
+        if t <= j["out"]:
+            return x0 + (t - (j["out"] - CTX)) * s
+        if t < j["in"]:
+            return x0 + CTX * s + (t - j["out"]) / gap * gw
+        return x0 + CTX * s + gw + (t - j["in"]) * s
+
+    def t_de(self, x: float) -> float:
+        x0, s, gw, gap = self._geo()
+        j = self.j
+        xa = x0 + CTX * s
+        if x <= xa:
+            return j["out"] - CTX + (x - x0) / s
+        if x < xa + gw:
+            return j["out"] + (x - xa) / gw * gap
+        return j["in"] + (x - xa - gw) / s
+
+    def _tramo(self, pv: tuple[str, float]) -> tuple[float, float, str]:
+        """(desde, hasta, color) en tiempo del archivo de lo que haría ese ajuste."""
+        side, d = pv
+        j = self.j
+        if side == "antes":
+            return (j["out"], j["out"] + d, AZUL) if d > 0 else (j["out"] + d, j["out"], ROJO)
+        return (j["in"] - d, j["in"], AZUL) if d > 0 else (j["in"], j["in"] - d, ROJO)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor("#1c1d20"))
+        if self.j is None:
+            p.setPen(QColor("#8a8e96"))
+            p.drawText(self.rect(), Qt.AlignCenter, "Elige un corte de la lista")
+            p.end()
+            return
+        j = self.j
+        H = self.height()
+        mid = H / 2 - 6
+        amp = H / 2 - 16
+        pk = self.peaks
+        n = len(pk) if pk is not None else 0
+        tramo = self._tramo(self.preview) if self.preview else None
+        # la onda, columna a columna
+        for xi in range(6, self.width() - 6, 2):
+            ta, tb = self.t_de(xi), self.t_de(xi + 2)
+            if tb <= 0:
+                continue
+            v = 0.0
+            if n:
+                ia, ib = max(0, int(ta * 1000)), min(n, max(int(ta * 1000) + 1, int(tb * 1000)))
+                if ia < ib:
+                    v = float(max(pk[ia:ib]))
+            quitado = j["out"] < (ta + tb) / 2 < j["in"]
+            col = QColor(GRIS if quitado else VERDE)
+            if tramo and tramo[0] - 1e-6 <= (ta + tb) / 2 <= tramo[1] + 1e-6:
+                col = QColor(tramo[2])
+            h = max(1.0, min(1.0, v) * amp)
+            p.fillRect(QRectF(xi, mid - h, 1.6, 2 * h), col)
+        # el silencio quitado: rayado y su etiqueta
+        xa, xb = self.x_de(j["out"]), self.x_de(j["in"])
+        p.fillRect(QRectF(xa, 4, xb - xa, H - 22), QBrush(QColor(255, 255, 255, 18), Qt.BDiagPattern))
+        p.setPen(QPen(QColor("#ffffff"), 1.5))
+        p.drawLine(QPointF(xa, 4), QPointF(xa, H - 18))
+        p.drawLine(QPointF(xb, 4), QPointF(xb, H - 18))
+        # la sugerencia (punteada) cuando no hay botón bajo el ratón
+        if not self.preview and self.fix:
+            a, b, col = self._tramo((self.fix["side"], self.fix["delta"]))
+            pen = QPen(QColor(col), 2, Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(QRectF(self.x_de(a), 6, max(3.0, self.x_de(b) - self.x_de(a)), H - 26))
+        p.setPen(QColor("#c8cad0"))
+        f = p.font()
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1))
+        p.setFont(f)
+        gap_ms = round((j["in"] - j["out"]) * 1000)
+        p.drawText(QRectF(xa, H - 17, xb - xa, 16), Qt.AlignCenter, f"✂ {gap_ms} ms")
+        p.drawText(QRectF(6, H - 17, xa - 10, 16), Qt.AlignLeft | Qt.AlignVCenter, "◀ antes del corte")
+        p.drawText(QRectF(xb + 4, H - 17, self.width() - xb - 10, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   "después del corte ▶")
+        if tramo:
+            ms = round(abs(tramo[1] - tramo[0]) * 1000)
+            txt = f"+{ms} ms se recuperan" if tramo[2] == AZUL else f"−{ms} ms se quitan"
+            p.setPen(QColor(tramo[2]))
+            p.drawText(QRectF(0, 2, self.width(), 14), Qt.AlignCenter, txt)
+        p.end()
+
+
+class _HoverFilter(QObject):
+    """Al pasar el ratón por un botón de ajuste, el dibujo enseña lo que haría."""
+
+    def __init__(self, vista: CutView, fn):
+        super().__init__(vista)
+        self.vista, self.fn = vista, fn
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Enter:
+            self.vista.set_preview(self.fn())
+        elif ev.type() == QEvent.Leave:
+            self.vista.set_preview(None)
+        return False
+
+
 class CutFixPanel(QFrame):
     def __init__(self, win):
-        super().__init__(win, Qt.Tool)
+        super().__init__(win)
+        self.win = win
         self.ctrl = win.ctrl
         self.engine = win.engine
         self.timeline = win.timeline
@@ -109,6 +254,14 @@ class CutFixPanel(QFrame):
         self.title.setWordWrap(True)
         self.title.setStyleSheet("font-weight: bold;")
         lay.addWidget(self.title)
+        self.view = CutView(self)
+        lay.addWidget(self.view)
+        leyenda = QLabel(f"<span style='color:{VERDE}'>■</span> se oye &nbsp; "
+                         f"<span style='color:{GRIS}'>■</span> se quitó &nbsp; "
+                         f"<span style='color:{AZUL}'>■</span> se recupera &nbsp; "
+                         f"<span style='color:{ROJO}'>■</span> se quita más")
+        leyenda.setObjectName("dim")
+        lay.addWidget(leyenda)
         self.reasons = QLabel()
         self.reasons.setWordWrap(True)
         lay.addWidget(self.reasons)
@@ -121,6 +274,8 @@ class CutFixPanel(QFrame):
         self.btn_apply.setStyleSheet("font-weight: bold;")
         self.btn_apply.setToolTip("Aplica la sugerencia de este corte; si su aviso desaparece, pasa al siguiente")
         self.btn_apply.clicked.connect(self._apply_fix)
+        self.btn_apply.installEventFilter(_HoverFilter(
+            self.view, lambda: (self.view.fix["side"], self.view.fix["delta"]) if self.view.fix else None))
         lay.addWidget(self.btn_apply)
         self.words = QLabel()
         self.words.setWordWrap(True)
@@ -141,6 +296,7 @@ class CutFixPanel(QFrame):
                 b = QPushButton(text)
                 b.setToolTip(tip)
                 b.clicked.connect(lambda _c=False, s=side, d=delta: self._adjust(s, d))
+                b.installEventFilter(_HoverFilter(self.view, lambda s=side, d=delta: (s, d)))
                 row.addWidget(b)
                 self.step_buttons.append(b)
             lay.addLayout(row)
@@ -157,6 +313,8 @@ class CutFixPanel(QFrame):
         self.btn_all = QPushButton("↺ Devolver todo el silencio")
         self.btn_all.setToolTip("Vuelve a poner el silencio entero que se cortó aquí")
         self.btn_all.clicked.connect(self._restore_all)
+        self.btn_all.installEventFilter(_HoverFilter(
+            self.view, lambda: ("antes", self.view.j["in"] - self.view.j["out"]) if self.view.j else None))
         bottom.addWidget(self.btn_all)
         lay.addLayout(bottom)
 
@@ -193,6 +351,8 @@ class CutFixPanel(QFrame):
         self.track_id, self.t = track_id, t
         self.timeline.refresh_cut_issues()
         self._refresh()
+        if hasattr(self.win, "show_panel") and self.win.show_panel(self) is not None:
+            return                                      # (en su pestaña de la derecha)
         self.show()
         self.raise_()
 
@@ -212,7 +372,10 @@ class CutFixPanel(QFrame):
         self.btn_apply_all.setEnabled(n > 0)
 
         j = cut_check.junction_at(p, self.track_id, self.t)
+        if hasattr(self.timeline, "set_cut_issue_selected"):
+            self.timeline.set_cut_issue_selected(self.track_id if j else None, j["t"] if j else None)
         if j is None:
+            self.view.set_data(None, None, None)
             self.title.setText("Este corte ya no está: quedó unido o lo cambiaste.")
             self.reasons.setText("")
             self.sugg.setText("")
@@ -245,6 +408,7 @@ class CutFixPanel(QFrame):
                               "💡 Sin sugerencia: revísalo a mano (Escuchar o los botones de abajo).")
         self.btn_apply.setEnabled(fix is not None and not approved)
         self.words.setText(self._words_text(p, j))
+        self.view.set_data(self._peaks(j["media_id"]), j, None if approved else fix)
 
     def _fill_list(self, k: int | None):
         self.list.blockSignals(True)

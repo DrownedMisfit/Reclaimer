@@ -883,7 +883,11 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
             png = os.path.join(tdir, f"texto_{i}.png")
             img.save(png, "PNG")
             dur = max(0.05, b - a)
-            fd = min(0.15, dur / 3)
+            try:
+                fd = min(max(0.0, float(t.get("fade", 0.15))), dur / 3)
+            except (TypeError, ValueError):
+                fd = min(0.15, dur / 3)
+            fd = max(fd, 0.001)
             bu = float(t.get("blur_under") or 0)
             if bu > 0:      # «Desenfocar lo de debajo»: la imagen se desenfoca mientras se ve el texto
                 sig = (4 + 26 * min(1.0, bu)) * H / 1080

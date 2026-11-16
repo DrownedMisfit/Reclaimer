@@ -5,6 +5,8 @@ Resolve quita por volumen, solo donde es silencio de verdad), «🎙 Voz precisa
 borde se ajusta cada 5 ms; no se come principios ni finales de palabras ni la engaña el ruido) o «🔊 Solo volumen»
 (como Resolve). Mientras mueves los controles, la línea de tiempo marca en naranja lo que se
 quitará. Ajustes guardados: los del usuario (de Resolve) y los que guarde aquí.
+La ventana NO bloquea: con ella abierta te mueves y reproduces en la línea de tiempo (y «▶ Escuchar sin silencios»
+reproduce cómo quedará). La primera vez trae lo más básico («Solo volumen» y nada extra activado).
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from .jobs import BackgroundJob
 
 KEY = "silencio/ajustes"
 MORE_KEY = "silencio/mas_opciones"                  # ⚙ Más opciones: abierto o plegado (lo recuerda)
+BASICO_KEY = "silencio/basico_v1"                   # (15/11: lo extra empieza apagado; se aplicó una vez)
 INFO_TIP = ("Los silencios se marcan en naranja en la línea de tiempo (en rojo, la voz que se cortaría). Si sale ⚠: "
             "prueba «🎯 Respetar las palabras», la protección «Máxima» o el modo «🎚 Híbrido».")
 
@@ -56,6 +59,7 @@ class SilenceDialog(QDialog):
         self._track_all = [c.id for tid in tids for c in p.clips_on(tid)
                            if p.media_of(c) is not None and c.text is None
                            and (p.media_of(c).kind == "audio" or p.media_of(c).has_audio)]
+        self._pista_entera = bool(self._track_all) and set(self._track_all) == set(self._sel_ids)
         self.who = QLabel()
         self.who.setWordWrap(True)
         lay.addWidget(self.who)
@@ -139,6 +143,7 @@ class SilenceDialog(QDialog):
             self.preset.addItem(name, name)
         self.preset.activated.connect(self._load_preset)
         b_save = QPushButton("💾 Guardar como ajuste…")
+        b_save.setToolTip("Guarda estos valores con un nombre para usarlos otra vez.")
         b_save.clicked.connect(self._save_preset)
         prow.addWidget(self.preset, 1)
         prow.addWidget(b_save)
@@ -181,7 +186,7 @@ class SilenceDialog(QDialog):
         self.clicks.setToolTip("Golpecitos de pocos milisegundos que destacan mucho de lo que hay alrededor (ratón, "
                                "teclado…). Solo se quitan si no hay voz a menos de 60 ms (nunca se toca una «p», «t» o "
                                "«k» de tus palabras). Funciona con «🎚 Híbrido» y «🎙 Voz precisa».")
-        self.clicks.setChecked(True)
+        self.clicks.setChecked(False)
         self.clicks.toggled.connect(lambda _v: self._changed())
         mb.addWidget(self.clicks)
         from ..ai import voice_model as VM
@@ -192,7 +197,7 @@ class SilenceDialog(QDialog):
                                     "protege lo que es palabra y quita los restos de silencio que dejan los márgenes de "
                                     "seguridad. Aprende solo cada vez que transcribes (menú Voz → Entrenar). Funciona "
                                     "con «🎚 Híbrido».")
-        self.voice_model.setChecked(bool(vinfo))
+        self.voice_model.setChecked(False)
         self.voice_model.setEnabled(bool(vinfo))
         self.voice_model.toggled.connect(lambda _v: self._changed())
         mb.addWidget(self.voice_model)
@@ -205,7 +210,7 @@ class SilenceDialog(QDialog):
             "umbral manda en pausas, respiraciones y ruido). La primera vez tarda (unos 20 s por minuto de audio); "
             "queda guardado.\n"
             "Además, la IA aprende tu voz con cada grabación.")
-        self.words_cb.setChecked(ok_words and str(QSettings("EditorIA", "EditorIA").value("silencio/palabras", "true"))
+        self.words_cb.setChecked(ok_words and str(QSettings("EditorIA", "EditorIA").value("silencio/palabras", "false"))
                                  .lower() == "true")
         self.words_cb.setEnabled(ok_words)
         self.words_cb.toggled.connect(self._words_toggled)
@@ -221,7 +226,7 @@ class SilenceDialog(QDialog):
                                  "tampoco. Funciona con «🎚 Híbrido» y «🎙 Voz precisa».\n"
                                  f"Retoques hasta ahora: {n}" + ("" if what else
                                                                  f" (hacen falta {SL.MIN_OBS} de un mismo lado)"))
-        self.learn_cb.setChecked(bool(what))
+        self.learn_cb.setChecked(False)
         self.learn_cb.setEnabled(bool(what))
         self.learn_cb.toggled.connect(lambda _v: self._changed())
         mb.addWidget(self.learn_cb)
@@ -241,6 +246,12 @@ class SilenceDialog(QDialog):
         self.more_btn.toggled.connect(self._toggle_more)
 
         brow = QHBoxLayout()
+        self.b_oir = QPushButton("▶ Escuchar sin silencios")
+        self.b_oir.setToolTip("Reproduce desde el cabezal tal como quedará (saltando lo naranja), sin cortar nada "
+                              "todavía. También puedes moverte y reproducir en la línea de tiempo con esta ventana "
+                              "abierta.")
+        self.b_oir.clicked.connect(self._escuchar)
+        brow.addWidget(self.b_oir)
         brow.addStretch()
         b_cancel = QPushButton("Cancelar")
         b_cancel.clicked.connect(self.reject)
@@ -258,6 +269,10 @@ class SilenceDialog(QDialog):
         self._timer.setSingleShot(True)
         self._timer.setInterval(120)
         self._timer.timeout.connect(self._recompute)
+        try:
+            self.ctrl.project_changed.connect(self._changed)
+        except (AttributeError, RuntimeError):
+            pass
         self._set(self._last())
         clips = [p.clips[i] for i in dict.fromkeys(self._sel_ids + self._track_all) if i in p.clips]
         paths = list(dict.fromkeys(p.media_of(c).path for c in clips if p.media_of(c)))
@@ -414,6 +429,13 @@ class SilenceDialog(QDialog):
         for k, (_sl, spin) in self.ctl.items():
             if k in st:
                 spin.setValue(st[k])
+        for cb, k in ((self.voice_model, "voice_model"), (self.words_cb, "words")):
+            if k in st and cb.isEnabled():               # (lo que elegiste la última vez, si se puede usar)
+                cb.blockSignals(True)
+                cb.setChecked(bool(st[k]))
+                cb.blockSignals(False)
+        if self.learn_cb.isEnabled():
+            self.learn_cb.setChecked(bool(st.get("learned")))
         if st.get("mode") in ("hibrido", "voz", "volumen"):        # (los ajustes de Resolve no lo traen: se queda el elegido)
             self.mode.setCurrentIndex(max(0, self.mode.findData(st["mode"])))
         if "clicks" in st:
@@ -437,10 +459,27 @@ class SilenceDialog(QDialog):
 
     def _last(self) -> dict:
         qs = QSettings("EditorIA", "EditorIA")
+        if not str(qs.value("silencio/ultimo", "") or ""):
+            # Primera vez: lo más BÁSICO (como Resolve: solo volumen) y nada extra activado; cada uno activa lo que
+            # le sirva cuando entiende qué hace (el usuario: «que no tenga tantas cosas activas al mismo tiempo»)
+            for k in ("silencio/hibrido_visto", "silencio/davinci_visto", BASICO_KEY):
+                qs.setValue(k, "true")
+            return dict(next(iter(S.PRESETS.values())), mode="volumen", protect="davinci", clicks=False,
+                        voice_model=False, words=False)
         try:
             st = json.loads(str(qs.value("silencio/ultimo", "")))
         except ValueError:
             st = dict(next(iter(S.PRESETS.values())))
+        if str(qs.value(BASICO_KEY, "false")).lower() != "true":
+            # una sola vez (15/11): las funciones extra, apagadas; tus números y tu modo se quedan
+            qs.setValue(BASICO_KEY, "true")
+            qs.setValue("silencio/hibrido_visto", "true")
+            qs.setValue("silencio/davinci_visto", "true")
+            qs.setValue(MORE_KEY, "false")
+            st = {k: v for k, v in st.items() if k != "learned"}
+            st.update(clicks=False, voice_model=False, words=False)
+            qs.setValue("silencio/ultimo", json.dumps(st))
+            return st
         # 🎚 La primera vez con el modo híbrido: lo trae puesto (hace todo lo de «Voz precisa» y más); luego, lo tuyo
         if str(qs.value("silencio/hibrido_visto", "false")).lower() != "true":
             qs.setValue("silencio/hibrido_visto", "true")
@@ -481,6 +520,12 @@ class SilenceDialog(QDialog):
         if not self._ready:
             return
         p = self.ctrl.project
+        if (self.scope.currentData() == "pista") if self.scope is not None else self._pista_entera:   # (si cortaste
+            tids = {p.clips[i].track_id for i in self.clip_ids if i in p.clips}   # abierta, la mitad nueva también)
+            self.clip_ids = [c.id for tid in tids for c in p.clips_on(tid)
+                             if p.media_of(c) is not None and c.text is None
+                             and (p.media_of(c).kind == "audio" or p.media_of(c).has_audio)] or self.clip_ids
+            self._update_who()
         clips = [p.clips[i] for i in self.clip_ids if i in p.clips]
         self.regions = S.plan(p, clips, self.fps, self.settings())
         total = sum(b - a for a, b in self.regions)
@@ -525,8 +570,40 @@ class SilenceDialog(QDialog):
                 "cierre de una «p», «t» o «k»): quitarlas se comería palabras. "
                 + ("Si aun así quieres, «Solo el umbral» en la protección." if st.get("protect") != "resolve" else ""))
 
+    def _escuchar(self):
+        """Lo que se queda, desde el cabezal (hasta 60 s): como sonará después de eliminar los silencios."""
+        eng = getattr(self.win, "engine", None)
+        if eng is None:
+            return
+        if getattr(eng, "playing", False):
+            eng.pause()
+            return
+        p = self.ctrl.project
+        clips = [p.clips[i] for i in self.clip_ids if i in p.clips]
+        if not clips:
+            return
+        t0 = max(float(eng.time), min(c.start for c in clips))
+        fin = min(max(c.end for c in clips), t0 + 60.0)
+        tramos, t = [], t0
+        for a, b in sorted(self.regions):
+            if b <= t:
+                continue
+            if a > t:
+                tramos.append((t, min(a, fin)))
+            t = max(t, b)
+            if t >= fin:
+                break
+        if t < fin:
+            tramos.append((t, fin))
+        tramos = [(a, b) for a, b in tramos if b - a > 0.02]
+        if tramos:
+            eng.play_ranges(tramos)
+
     def _apply(self):
         from ..core import silence_learn as SL
+        eng = getattr(self.win, "engine", None)
+        if eng is not None:
+            eng.pause()
         st = {k: v for k, v in self.settings().items() if k != "learned"}
         QSettings("EditorIA", "EditorIA").setValue("silencio/ultimo", json.dumps(st))
         before = SL.snapshot(self.ctrl.project, self.clip_ids)
@@ -540,6 +617,11 @@ class SilenceDialog(QDialog):
             self.accept()
 
     def done(self, r):
+        self._timer.stop()
+        try:
+            self.ctrl.project_changed.disconnect(self._changed)
+        except (RuntimeError, TypeError):
+            pass
         self.win.timeline.set_preview_regions([])
         if self._job is not None and self._job.isRunning():
             self._job.wait(5000)

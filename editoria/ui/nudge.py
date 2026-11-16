@@ -12,8 +12,8 @@ RULES = [
     (("analizar tus clips", "analizar tus medios", "botón ◈"), "library.btn_analyze"),
     (("importa", "importando", "panel izquierdo", "primero una canción"), "library"),
     (("efectos favoritos",), "effects.b_mem_add"),
-    (("selecciona", "línea de tiempo", "timeline", "bajo el cabezal", "en el cabezal", "un corte"), "timeline"),
 ]
+# (14/11: la línea de tiempo NUNCA se resalta: al usuario no le gusta que su contorno parpadee en naranja)
 
 
 def main_window() -> QWidget | None:
@@ -50,6 +50,13 @@ def nudge(widget: QWidget | None, tip: str | None = None, seconds: float = 4.0):
     """Resalta ese control en naranja unos segundos (y, si se da, explica qué falta junto a él)."""
     if widget is None:
         return
+    w_ = widget                                  # (dentro de la línea de tiempo: sin contorno naranja, solo la ayuda)
+    while w_ is not None:
+        if type(w_).__name__ == "TimelineWidget" or w_.objectName() in ("timeline_box",):
+            if tip:
+                QToolTip.showText(widget.mapToGlobal(widget.rect().center()), tip, widget)
+            return
+        w_ = w_.parentWidget()
     from .guide import Highlighter, highlighter_of
     try:
         win = widget.window()

@@ -2,7 +2,9 @@
 Corrección de color por clip (como la página Color de Resolve, en sencillo).
 
 Clip.color = {"exposure": -2…2 (pasos), "contrast": -1…1, "saturation": -1…1, "temperature": -1…1,
-              "tint": -1…1, "shadows": -1…1, "highlights": -1…1, "lut": ruta .cube, "lut_mix": 0…1}
+              "tint": -1…1, "shadows": -1…1, "highlights": -1…1, "lut": ruta .cube, "lut_mix": 0…1,
+              "lift" / "gamma" / "gain": [x, y, brillo] (🎨 ruedas de color, como Resolve: x, y = hacia qué color
+              se empuja dentro del círculo, radio ≤ 1; brillo -1…1)}
 
 Todo se convierte en UNA tabla de color 3D (33×33×33, el formato de los LUT .cube):
   · el visor la aplica a cada fotograma (rápido, con una tabla de 64 niveles),
@@ -26,13 +28,45 @@ LABELS = {"exposure": "Exposición", "contrast": "Contraste", "saturation": "Sat
           "temperature": "Temperatura", "tint": "Tinte (verde ↔ magenta)", "shadows": "Sombras",
           "highlights": "Luces"}
 RANGES = {"exposure": (-2.0, 2.0)}   # el resto: -1…1
+WHEELS = ("lift", "gamma", "gain")
+WHEEL_LABELS = {"lift": "Sombras", "gamma": "Medios", "gain": "Luces"}
+
+
+def wheel(color: dict | None, name: str) -> tuple[float, float, float]:
+    """(x, y, brillo) de una rueda; (0, 0, 0) si no se tocó o el dato no vale."""
+    v = (color or {}).get(name)
+    try:
+        x, y, lv = (float(v[0]), float(v[1]), float(v[2]))
+    except (TypeError, ValueError, LookupError):
+        return 0.0, 0.0, 0.0
+    if not all(np.isfinite((x, y, lv))):
+        return 0.0, 0.0, 0.0
+    r = (x * x + y * y) ** 0.5
+    if r > 1.0:
+        x, y = x / r, y / r
+    return x, y, max(-1.0, min(1.0, lv))
+
+
+def wheel_rgb(x: float, y: float) -> np.ndarray:
+    """El empuje de color de una rueda por canal (suma 0: no cambia el brillo). Ángulo 0° = rojo, 120° = verde,
+    240° = azul (como el círculo de color de la rueda)."""
+    import math
+    r = min(1.0, (x * x + y * y) ** 0.5)
+    if r < 1e-6:
+        return np.zeros(3, np.float32)
+    a = math.atan2(y, x)
+    return np.array([math.cos(a), math.cos(a - 2 * math.pi / 3), math.cos(a + 2 * math.pi / 3)], np.float32) * r
+
+
+def _wheels_neutral(color: dict) -> bool:
+    return all(max(abs(v) for v in wheel(color, w)) < 1e-4 for w in WHEELS)
 
 
 def is_neutral(color: dict | None) -> bool:
     if not color:
         return True
-    return all(abs(float(color.get(k, 0) or 0)) < 1e-4 for k in KEYS) and not (color.get("lut") and
-                                                                                float(color.get("lut_mix", 1)) > 0)
+    return all(abs(float(color.get(k, 0) or 0)) < 1e-4 for k in KEYS) and _wheels_neutral(color) and not (
+        color.get("lut") and float(color.get("lut_mix", 1)) > 0)
 
 
 # ------------------------------------------------------------------- LUT .cube
@@ -122,6 +156,18 @@ def grade(rgb: np.ndarray, color: dict) -> np.ndarray:
         t, ti = c["temperature"], c["tint"]
         gains = np.array([1 + 0.18 * t + 0.06 * ti, 1 - 0.12 * ti, 1 - 0.18 * t + 0.06 * ti], np.float32)
         x = x * gains
+    if not _wheels_neutral(color):
+        # 🎨 Ruedas Lift / Gamma / Gain (la fórmula clásica): sombras = se suma abajo (lift), luces = se multiplica
+        # (gain), medios = curva de gamma. Cada rueda empuja hacia su color y su anillo sube o baja el brillo.
+        lx, ly, ll = wheel(color, "lift")
+        mx, my, ml = wheel(color, "gamma")
+        hx, hy, hl = wheel(color, "gain")
+        lift = 0.25 * ll + 0.12 * wheel_rgb(lx, ly)
+        gain = (2.0 ** hl) * (1 + 0.35 * wheel_rgb(hx, hy))
+        gexp = 2.0 ** -(0.9 * ml + 0.45 * wheel_rgb(mx, my))
+        x = np.clip(x, 0, None)
+        x = gain * (x + lift * (1 - np.clip(x, 0, 1)))
+        x = np.clip(x, 0, None) ** gexp
     if c["contrast"]:
         k = 1 + c["contrast"] * (0.8 if c["contrast"] > 0 else 0.6)
         x = (x - 0.5) * k + 0.5
@@ -149,6 +195,9 @@ def table(color: dict, n: int = SIZE) -> np.ndarray:
 
 def key(color: dict) -> str:
     d = {k: round(float(color.get(k, 0) or 0), 4) for k in KEYS}
+    for w in WHEELS:
+        if max(abs(v) for v in wheel(color, w)) >= 1e-4:
+            d[w] = [round(v, 4) for v in wheel(color, w)]
     d["lut"] = color.get("lut") or ""
     d["lut_mix"] = round(float(color.get("lut_mix", 1.0)), 3)
     if d["lut"] and os.path.exists(d["lut"]):

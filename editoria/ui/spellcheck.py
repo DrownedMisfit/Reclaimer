@@ -19,6 +19,7 @@ from ..core import spelling as SP
 KEY = "texto/ortografia"
 _highlighters: "weakref.WeakSet[SpellHighlighter]" = weakref.WeakSet()
 _combos: "weakref.WeakSet[QComboBox]" = weakref.WeakSet()
+_precarga_programada = False
 
 
 def current_lang() -> str:
@@ -41,7 +42,7 @@ def set_lang(lang: str):
     _rehighlight_when_ready()
 
 
-def _rehighlight_when_ready(tries: int = 60):
+def _rehighlight_when_ready(tries: int = 120):
     """Los diccionarios se cargan en segundo plano (~0,8 s): en cuanto estén, se subraya."""
     if SP.ready(current_lang()) or current_lang() == "off" or tries <= 0:
         for h in list(_highlighters):
@@ -120,7 +121,11 @@ def attach(edit) -> QWidget:
     edit._spell = SpellHighlighter(edit.document())
     edit.setContextMenuPolicy(Qt.CustomContextMenu)
     edit.customContextMenuRequested.connect(lambda p, e=edit: _context_menu(e, p))
-    SP.preload(current_lang())
+    global _precarga_programada
+    if not _precarga_programada:             # ⚡ el diccionario (~1,5 s de Python) se lee cuando la ventana ya está
+        _precarga_programada = True          #    abierta: leído al construirla, le quitaba tiempo al arranque
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(4000, lambda: None if SP.ready(current_lang()) else SP.preload(current_lang()))
     _rehighlight_when_ready()
     row = QWidget()
     h = QHBoxLayout(row)

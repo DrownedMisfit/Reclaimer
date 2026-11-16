@@ -117,7 +117,10 @@ def main():
     # la ventana
     cid = ctrl.project.clips_on(tr.id)[0].id
     dlg = SilenceDialog(win, [cid])
-    assert dlg.learn_cb.isEnabled() and dlg.learn_cb.isChecked() and "+100 ms después" in dlg.learn_cb.text()
+    # (15/11: lo extra empieza APAGADO; se puede usar y, al marcarlo, se aplica)
+    assert dlg.learn_cb.isEnabled() and not dlg.learn_cb.isChecked() and "+100 ms después" in dlg.learn_cb.text()
+    assert "learned" not in dlg.settings(), "apagado, no se aplica"
+    dlg.learn_cb.setChecked(True)
     assert dlg.settings()["learned"]["after"] > 0.09
     print(f"✓ la ventana lo enseña: «{dlg.learn_cb.text()}» y lo aplica")
     dlg.reject()

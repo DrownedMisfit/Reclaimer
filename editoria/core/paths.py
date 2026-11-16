@@ -3,6 +3,8 @@
 Todo vive JUNTO al programa (F:/Reclaimer/datos), no en C: — así el disco del sistema no se llena.
 (Antes estaba en %LOCALAPPDATA%/EditorIA: migrate_old_data() lo muda la primera vez que se abre.)
 Las pruebas usan otra carpeta con la variable EDITORIA_DATOS.
+📦 En la versión «todo en uno», Reclaimer.exe pone RECLAIMER_DATOS (<carpeta>\\datos) y RECLAIMER_RAIZ (la carpeta de
+Reclaimer.exe): datos, exportados y grabaciones quedan FUERA de app\\, así actualizar (cambiar app\\) no borra nada.
 """
 from __future__ import annotations
 
@@ -22,9 +24,43 @@ def _ensure(d: Path) -> Path:
     return d
 
 
+_DATOS: dict[str, Path] = {}     # (por carpeta pedida: las pruebas la cambian sobre la marcha)
+
+
 def app_data_dir() -> Path:
-    override = os.environ.get("EDITORIA_DATOS")
-    return _ensure(Path(override) if override else PROGRAM_DIR / "datos")
+    """La carpeta de datos. Si no se puede escribir (Reclaimer dentro de «Archivos de programa», una carpeta de solo
+    lectura…), la del usuario: %LOCALAPPDATA%\\Reclaimer\\datos (así nunca deja de abrir sin avisar)."""
+    override = os.environ.get("EDITORIA_DATOS") or os.environ.get("RECLAIMER_DATOS")
+    d = Path(override) if override else PROGRAM_DIR / "datos"
+    hecho = _DATOS.get(str(d))
+    if hecho is not None:
+        return hecho
+    pedido = str(d)
+    prueba = d / f".escritura_{os.getpid()}"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        prueba.write_text("ok", encoding="utf-8")
+    except OSError:
+        d = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Reclaimer" / "datos"
+        d.mkdir(parents=True, exist_ok=True)
+        os.environ["RECLAIMER_DATOS_MOVIDOS"] = str(d)  # (la ventana lo avisa)
+    else:
+        try:
+            prueba.unlink(missing_ok=True)
+        except OSError:                                 # (un antivirus que lo tiene abierto: da igual)
+            pass
+    _DATOS[pedido] = _ensure(d)
+    return _DATOS[pedido]
+
+
+def user_dir() -> Path:
+    """Donde van tus cosas (Exportados, Audio extraído, Grabaciones de voz sin proyecto): junto al programa; en la
+    versión «todo en uno», junto a Reclaimer.exe (y si ahí no se puede escribir, junto a los datos)."""
+    raiz = os.environ.get("RECLAIMER_RAIZ")
+    if not raiz:
+        return PROGRAM_DIR
+    app_data_dir()                                 # (comprueba si se puede escribir: si no, marca MOVIDOS)
+    return app_data_dir().parent if os.environ.get("RECLAIMER_DATOS_MOVIDOS") else Path(raiz)
 
 
 def temp_dir() -> Path:
@@ -34,7 +70,7 @@ def temp_dir() -> Path:
 
 def old_data_dir() -> Path | None:
     """La carpeta de antes en C: (%LOCALAPPDATA%/EditorIA), si aún tiene algo que mudar."""
-    if os.environ.get("EDITORIA_DATOS"):
+    if os.environ.get("EDITORIA_DATOS") or os.environ.get("RECLAIMER_PORTABLE"):   # (la portátil no se lleva lo de otro)
         return None
     base = os.environ.get("LOCALAPPDATA")
     if not base:

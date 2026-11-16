@@ -107,9 +107,41 @@ def main():
     pump(app, 0.2)
     txt = win.material.info.text()
     assert "Gameplay.mp4" in win.material.title.text() and "La IA ve: Gameplay · combate" in txt and "00:10" in txt, txt
+    mt = win.material
+    assert not mt.b_similar.isHidden() and not mt.b_tags.isHidden()
+    win.engine.seek(0.0)
     win.timeline.set_selection([])
-    assert "Ningún clip" in win.material.title.text()
-    print("✓ Material del clip: de dónde sale, qué vio la IA y sus acciones; sin clip, lo dice")
+    pump(app, 0.4)
+    assert "Nada en el cabezal" in mt.title.text(), mt.title.text()
+    assert all(b.isHidden() for b in (mt.b_similar, mt.b_example, mt.b_tags, mt.b_media)), "sin nada: sin botones"
+    print("✓ Material del clip: de dónde sale, qué vio la IA y sus acciones; sin nada, sin botones (ocultos)")
+    win.engine.seek(3.0)
+    mt._cabezal_movido()
+    mt.set_selection([])
+    assert mt.title.text().startswith("▶ En el cabezal: Gameplay.mp4"), mt.title.text()
+    assert not mt.b_similar.isHidden() and not mt.b_media.isHidden()
+    print("✓ sin clip elegido, enseña el clip que está en el cabezal (lo que estás usando)")
+    from PySide6.QtWidgets import QTreeWidgetItemIterator
+    from editoria.ui.library import ROLE_MEDIA
+    lib = win.library
+    win.ctrl.media_changed.emit()
+    pump(app, 0.5)
+    found, itx = None, QTreeWidgetItemIterator(lib.tree)
+    while itx.value():
+        if itx.value().data(0, ROLE_MEDIA) == "m":
+            found = itx.value()
+            break
+        itx += 1
+    assert found is not None, "el archivo debe salir en Medios"
+    lib.tree.clearSelection()
+    found.setSelected(True)                               # (como cuando Medios se rehace solo: no cambia nada)
+    pump(app, 0.2)
+    assert mt.title.text().startswith("▶ En el cabezal"), "una selección sin clic no cambia el panel"
+    lib.tree.itemClicked.emit(found, 0)                   # (tu clic)
+    pump(app, 0.2)
+    assert mt.title.text().startswith("📂 En Medios: Gameplay.mp4"), mt.title.text()
+    assert mt.b_media.isHidden() and mt.b_similar.isHidden() and not mt.b_tags.isHidden()
+    print("✓ lo que seleccionas en Medios sale aquí (solo con los botones que sirven)")
 
     win.ctrl.undo_stack.setClean()
     win.ctrl._media_dirty = False

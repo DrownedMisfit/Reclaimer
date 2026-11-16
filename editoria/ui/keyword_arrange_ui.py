@@ -18,10 +18,43 @@ from ..core import keyword_folders as KF
 AJUSTE_FILA = "timeline/palabras_fila"
 AJUSTE_ORDEN = "timeline/palabras_orden_archivos"
 AJUSTE_CONTEXTO = "timeline/palabras_segun_lo_que_dices"
+AJUSTE_RELLENO = "timeline/palabras_relleno"
+AJUSTE_ANIMAR = "timeline/palabras_animar"     # 🎞 los recortes (PNG con transparencia), animados según lo que dices
 
 
 def _on(clave: str, defecto: bool = True) -> bool:
     return str(QSettings("EditorIA", "EditorIA").value(clave, "true" if defecto else "false")).lower() == "true"
+
+
+def _covered(p) -> list[tuple[float, float]]:
+    """Tramos donde YA se ve algo a pantalla completa: clips de video o imagen (no textos, ni capas de ajuste, ni
+    recuadros pequeños, ni pistas ocultas) que no sean del ⚡ anterior (esos se quitan al volver a acomodar)."""
+    from ..core.model import TRACK_VIDEO
+    vt = {t.id for t in p.tracks if t.kind == TRACK_VIDEO and not t.hidden}
+    out = []
+    for c in p.clips.values():
+        if c.track_id not in vt or not c.enabled or c.text is not None:
+            continue
+        if (c.note or "").startswith("🔑⚡") and not c.locked:
+            continue
+        m = p.media.get(c.media_id)
+        if m is not None and (m.gen or {}).get("kind") == "adjust":
+            continue
+        box = c.layout or {}
+        if float(box.get("w", 1.0)) < 0.98 or float(box.get("h", 1.0)) < 0.98 or c.opacity < 0.5:
+            continue                               # (un recuadro o algo transparente no tapa el hueco)
+        out.append((c.start, c.end))
+    return out
+
+
+def _fin_narracion(p) -> float:
+    """Dónde acaba lo que importa: el último clip con transcripción (tu voz); si no hay, el último clip que no sea del
+    ⚡ anterior. Así el relleno no se estira con la música ni con el relleno de antes."""
+    voz = [c.end for c in p.clips.values() if c.media_id in p.transcripts and c.enabled]
+    if voz:
+        return max(voz)
+    otros = [c.end for c in p.clips.values() if not ((c.note or "").startswith("🔑⚡") and not c.locked)]
+    return max(otros, default=0.0)
 
 
 class _LazyQ:
@@ -185,13 +218,21 @@ class KeywordArranger(QObject):
         """Opciones de la secuencia (en el clic derecho de un chip); se recuerdan."""
         sub = menu.addMenu("Secuencia")
         for clave, texto in ((AJUSTE_ORDEN, "Seguir el orden de los archivos (01, 02…)"),
-                             (AJUSTE_CONTEXTO, "Elegir el momento por lo que dices (con las huellas de la IA)")):
+                             (AJUSTE_CONTEXTO, "Elegir el momento por lo que dices (con las huellas de la IA)"),
+                             (AJUSTE_RELLENO, "🧩 Donde no hay nada: gameplay del juego del que hablas"),
+                             (AJUSTE_ANIMAR, "🎞 Animar los recortes según lo que digo")):
             a = sub.addAction(texto)
             a.setCheckable(True)
             a.setChecked(_on(clave))
             a.toggled.connect(lambda on, c=clave: (QSettings("EditorIA", "EditorIA").setValue(c, "true" if on else "false"),
                                                      self.refresh(c == AJUSTE_ORDEN)))
         menu.addAction("⟳ Volver a leer las carpetas", lambda: self.refresh(True))
+
+    @staticmethod
+    def _rev_sin_kw(p) -> tuple:
+        """Lo que se ve, sin lo del ⚡ (si añades o mueves un clip mientras acomoda, el resultado ya no vale)."""
+        return tuple(sorted((c.track_id, round(c.start, 3), round(c.end, 3)) for c in p.clips.values()
+                            if not (c.note or "").startswith("🔑⚡")))
 
     # ----------------------------------------------------------- acciones
     def _kind(self, keys: list, kind: str):
@@ -229,12 +270,14 @@ class KeywordArranger(QObject):
         choices = dict(p.kw_choices)
         pools = self.pools
         _ms, frases = self._mentions()
-        fin_linea = p.duration() or None
+        fin_linea = _fin_narracion(p) or None      # (sin el ⚡ anterior ni la música más larga que la voz)
         contexto = _on(AJUSTE_CONTEXTO)
+        relleno = _on(AJUSTE_RELLENO)
+        cubierto = _covered(p)                   # lo que ya se ve a pantalla completa (sin lo del ⚡ anterior)
         conocidas = {os.path.normcase(os.path.abspath(m.path)): float(m.duration)
                      for m in p.media.values() if m.probed and m.duration > 0}
         dur_memo = self._dur
-        firma = (id(p), tuple((m["key"], round(m["t"], 3)) for m in mentions))
+        firma = (id(p), tuple((m["key"], round(m["t"], 3)) for m in mentions), self._rev_sin_kw(p))
 
         def work(prog, cancelado):
             from ..ai import clip_analysis
@@ -271,7 +314,7 @@ class KeywordArranger(QObject):
             q = _LazyQ({m["key"]: m["context"] for m in mentions}) if contexto else None
             items, res = KA.plan(mentions, choices, pools, duration_of, lambda t: frases.get(t, 4.0), fin_linea,
                                  context=contexto, vecs_of=vecs_of if contexto else None, qvecs=q,
-                                 cancel=cancelado)
+                                 cancel=cancelado, fill=relleno, covered=cubierto)
             if cancelado():                      # cancelado desde las tareas: no se pone nada (ni a medias)
                 from ..ai.base import Cancelled
                 raise Cancelled()
@@ -290,7 +333,8 @@ class KeywordArranger(QObject):
                 return
             items, res, infos = out
             self._marks()
-            ahora = (id(self.ctrl.project), tuple((m["key"], round(m["t"], 3)) for m in self.mentions))
+            ahora = (id(self.ctrl.project), tuple((m["key"], round(m["t"], 3)) for m in self.mentions),
+                     self._rev_sin_kw(self.ctrl.project))
             if self.ctrl.project is not p or ahora != firma or dict(self.ctrl.project.kw_choices) != choices:
                 self.win.statusBar().showMessage(
                     "⚡ La narración o los tipos cambiaron mientras acomodaba: no puse nada. Pulsa ⚡ otra vez.", 9000)
@@ -300,12 +344,16 @@ class KeywordArranger(QObject):
                 return
             vivas = {m["key"] for m in mentions} | {k for k in choices          # (de narración que sigue existiendo)
                                                     if k.count("|") >= 2 and k.split("|")[1] in self.ctrl.project.transcripts}
-            ids = self.ctrl.arrange_keywords(items, infos, keep_keys=vivas)
+            ids = self.ctrl.arrange_keywords(items, infos, keep_keys=vivas, animar=_on(AJUSTE_ANIMAR))
             if not ids:
                 return                           # (el controlador ya avisó del motivo)
             partes = [f"✓ {len(ids)} clips acomodados en las palabras clave"]
             if res.get("by_context"):
                 partes.append(f"{res['by_context']} elegidos por lo que dices")
+            if res.get("filled"):
+                partes.append(f"🧩 {int(round(res['filled_s']))} s de huecos con gameplay del juego del que hablas")
+            elif relleno:
+                partes.append("🧩 no había huecos sin imagen")
             if res.get("skipped"):
                 partes.append(f"{res['skipped']} sin sitio o sin material")
             if res.get("repeated"):

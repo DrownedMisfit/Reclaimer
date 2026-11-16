@@ -182,11 +182,19 @@ class Workspaces(QObject):
         p = self.ctrl.project
         carry = [m for m in p.media.values() if not getattr(m, "gen", None) and m.id not in (p.compounds or {})
                  and m.id not in self.ctrl.missing]
+        vaciadas = self._vaciadas()
+        if p.media and self.current in vaciadas:       # (ya importaste algo aquí: vuelve a ser parte de la común)
+            vaciadas.discard(self.current)
         self.current = fmt
         self.settings.setValue("espacios/actual", fmt)
         self._set_bar(fmt)
         self.restore(fmt)
-        added = self.ctrl.adopt_media(carry)
+        # 🔄 una pestaña que reiniciaste (o empezaste de nuevo) se queda vacía: no le llega nada de las otras; y lo que
+        # tenía al reiniciar no vuelve nunca solo (aunque luego importes otra cosa)
+        fuera = self._descartados(fmt)
+        carry = [m for m in carry if os.path.normcase(os.path.abspath(m.path)) not in fuera]
+        added = 0 if fmt in vaciadas else self.ctrl.adopt_media(carry)
+        self._guardar_vaciadas(vaciadas)
         self.switched.emit(fmt)
         title = dict(TABS)[fmt].split("  ", 1)[-1]
         self.win.statusBar().showMessage(f"{title}: «{self.ctrl.project.name}». La otra pestaña quedó guardada."
@@ -343,18 +351,46 @@ class Workspaces(QObject):
         except OSError:
             pass
 
+    def _vaciadas(self) -> set[str]:
+        """Pestañas reiniciadas o empezadas de nuevo (no reciben los medios de las otras hasta que importes algo)."""
+        v = self.settings.value("espacios/vaciadas", "") or ""
+        return {x for x in str(v).split(",") if x in KEYS}
+
+    def _guardar_vaciadas(self, v: set[str]):
+        self.settings.setValue("espacios/vaciadas", ",".join(sorted(v)))
+
+    def _marcar_vaciada(self, media=None):
+        v = self._vaciadas()
+        v.add(self.current)
+        self._guardar_vaciadas(v)
+        if media:                                    # lo que había: no vuelve solo desde las otras pestañas
+            import json
+            fuera = self._descartados(self.current)
+            fuera |= {os.path.normcase(os.path.abspath(m.path)) for m in media}
+            self.settings.setValue(f"espacios/descartados/{self.current}", json.dumps(sorted(fuera)[-3000:]))
+
+    def _descartados(self, fmt: str) -> set[str]:
+        import json
+        try:
+            return set(json.loads(self.settings.value(f"espacios/descartados/{fmt}", "[]") or "[]"))
+        except (TypeError, ValueError):
+            return set()
+
     def new_here(self):
         """Ctrl+N: proyecto nuevo en esta pestaña."""
         c = self.ctrl
         if c.path and c.dirty and not self.win._confirm_discard():
-            return
+            return False
         self._backup_unnamed()
+        antes = list(c.project.media.values())
         self.settings.setValue(self._key(self.current), "")
         try:
             os.remove(ws_file(self.current))
         except OSError:
             pass
         self._new(self.current)
+        self._marcar_vaciada(antes)
+        return True
 
     def reset_here(self) -> str:
         """🔄 Reinicio de proyecto: guarda una copia de seguridad de lo que hay y deja esta pestaña vacía (sin preguntar:
@@ -363,9 +399,20 @@ class Workspaces(QObject):
         import time
         from ..core.paths import backups_dir
         c = self.ctrl
+        if not c.project.clips and not c.project.media:      # (vacío: nada que guardar en copia)
+            c.path = None
+            self.settings.setValue(self._key(self.current), "")
+            try:
+                os.remove(ws_file(self.current))
+            except OSError:
+                pass
+            self._new(self.current)
+            self._marcar_vaciada()
+            return ""
         name = (c.project.name or "Proyecto").replace("/", "-").replace("\\", "-")
         dest = str(backups_dir() / f"{name}_antes del reinicio_{time.strftime('%Y%m%d_%H%M%S')}.eia")
         data = c.project.to_dict()
+        antes = list(c.project.media.values())
         data["_autosave_of"] = c.path
         with open(dest, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False))
@@ -376,6 +423,7 @@ class Workspaces(QObject):
         except OSError:
             pass
         self._new(self.current)
+        self._marcar_vaciada(antes)
         return dest
 
     def open_into(self, path: str) -> bool:

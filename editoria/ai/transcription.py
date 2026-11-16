@@ -12,7 +12,7 @@ import os
 import numpy as np
 
 from ..core.paths import app_data_dir
-from .base import CancelFn, ProgressFn, check_cancel, report
+from .base import CancelFn, Cancelled, ProgressFn, check_cancel, report
 
 SAMPLE_RATE = 16000
 
@@ -90,8 +90,35 @@ def transcribe(samples: np.ndarray, model_key: str = "equilibrado", language: st
     Los tiempos son del archivo original (no de la timeline).
     """
     name = MODELS[model_key][0]
-    report(progress, 0.0, "Cargando el modelo de voz…" if is_downloaded(model_key)
-           else "Descargando el modelo de voz (solo la primera vez, puede tardar varios minutos)…")
+    aviso = ""
+    global _motor_off, _motor_fallos
+    if _usar_tarjeta_motor(name):            # 🎙 AMD (o sin las DLL de NVIDIA): Whisper en la tarjeta, por el motor de IA
+        ultimo: list = []
+
+        def guardar_parcial(p):
+            ultimo[:] = [p]
+            if partial is not None:
+                partial(p)
+        try:
+            tr = _transcribe_motor(samples, name, language, progress, cancelled, fillers, guardar_parcial, block,
+                                   start_at, prev)
+            _motor_fallos = 0
+            return tr
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - la tarjeta falla: como siempre, con el procesador
+            from ..core import motor_ia as _MI
+            _motor_fallos += 1
+            if isinstance(exc, _MI.SinTarjeta) or _motor_fallos >= 2:
+                _motor_off = True                    # (sin tarjeta, o falló 2 veces seguidas: el resto de la sesión, CPU)
+            aviso = ("Sin tarjeta usable: " if isinstance(exc, _MI.SinTarjeta)
+                     else f"La tarjeta no pudo ({str(exc).strip().splitlines()[-1][:80] if str(exc).strip() else 'error'}): ")
+            if ultimo and ultimo[0].get("hasta"):    # lo que ya transcribió la tarjeta se queda: se sigue desde ahí
+                prev, start_at = ultimo[0], float(ultimo[0]["hasta"])
+            report(progress, 0.0, aviso + "sigo con el procesador…")
+    report(progress, 0.0, aviso + ("cargando el modelo de voz…" if aviso else "Cargando el modelo de voz…")
+           if is_downloaded(model_key)
+           else aviso + "descargando el modelo de voz (solo la primera vez, puede tardar varios minutos)…")
     model = _load(name)
     check_cancel(cancelled)
     total = max(len(samples) / SAMPLE_RATE, 0.001)
@@ -136,6 +163,116 @@ def transcribe(samples: np.ndarray, model_key: str = "equilibrado", language: st
     tr = {"language": info.language, "model": name, "words": words, "segments": segs}
     tr = fill_holes(samples, tr, model, language, cancelled)
     report(progress, 1.0, f"Transcripción lista: {len(tr['words'])} palabras.")
+    return tr
+
+
+# ------------------------------------------------------------------ 🎙 en la tarjeta (motor de IA)
+_motor_off = False                         # sin tarjeta o 2 fallos seguidos en esta sesión: no se vuelve a intentar
+_motor_fallos = 0
+_MOTOR_NAMES = {"large-v3-turbo": "turbo", "large-v3": "large-v3", "medium": "medium", "small": "small",
+                "base": "base"}
+
+
+def _borrar(ruta: str):
+    import os as _os
+    try:
+        _os.remove(ruta)
+    except OSError:
+        pass
+
+
+def _usar_tarjeta_motor(name: str) -> bool:
+    """La tarjeta por el motor de IA solo si faster-whisper NO la usa ya (AMD, o NVIDIA sin sus DLL), el motor tiene
+    Whisper y no lo apagaste (Voz → ajustes: «voz/tarjeta_motor»)."""
+    if _motor_off or name not in _MOTOR_NAMES:
+        return False
+    import os as _os
+    if _os.environ.get("EDITORIA_TARJETA_MOTOR") == "0":    # (las pruebas con modelos falsos: el procesador)
+        return False
+    try:
+        from PySide6.QtCore import QSettings
+        if str(QSettings("EditorIA", "EditorIA").value("voz/tarjeta_motor", "true")).lower() != "true":
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    from ..core import motor_ia
+    from ..core.hw import whisper_device
+    return whisper_device()[0] == "cpu" and motor_ia.whisper_ok()
+
+
+def _transcribe_motor(samples, name, language, progress, cancelled, fillers, partial, block, start_at, prev) -> dict:
+    import json as _json
+    import os as _os
+    import tempfile as _tmp
+    import wave
+    from ..core import media as media_tools
+    from ..core import motor_ia
+    from ..core.paths import temp_dir
+    from .word_fix import hotwords
+    total = max(len(samples) / SAMPLE_RATE, 0.001)
+    start_at = min(max(0.0, float(start_at or 0.0)), total)
+    fd, wav = _tmp.mkstemp(prefix="voz_", suffix=".wav", dir=str(temp_dir()))
+    _os.close(fd)
+    salida = wav[:-4] + ".json"
+    try:
+        with wave.open(wav, "wb") as w:              # (el audio ya está a 16 kHz: se pasa tal cual, por trozos de 60 s)
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            paso = 60 * SAMPLE_RATE
+            for i in range(0, len(samples), paso):
+                w.writeframes((np.clip(samples[i:i + paso], -1, 1) * 32767).astype("<i2").tobytes())
+    except BaseException:
+        _borrar(wav)
+        raise
+    keep = [list(w) for w in (prev or {}).get("words", []) if start_at and float(w[1]) <= start_at + 1e-3]
+    keep_segs = [list(sg) for sg in (prev or {}).get("segments", []) if start_at and sg[3] <= len(keep)]
+
+    def unir(res: dict) -> dict:
+        off = len(keep)
+        words = keep + [list(w) for w in res.get("words", [])]
+        segs = keep_segs + [[sg[0], sg[1], sg[2] + off, sg[3] + off] for sg in res.get("segments", [])]
+        out = {"language": res.get("language") or language or "es", "model": name, "motor": "tarjeta",
+               "words": words, "segments": segs}
+        if "hasta" in res:
+            out["hasta"] = res["hasta"]
+        return out
+
+    def al_parcial(ruta: str):
+        if partial is None:
+            return
+        with open(ruta, encoding="utf-8") as f:
+            partial(unir(_json.load(f)))
+
+    hw_ = hotwords() or ""
+    hw_ = " ".join(hw_.split()[-28:]) if isinstance(hw_, str) else ""     # (~100 fichas: que quepa todo el ejemplo)
+    job = {"ffmpeg": media_tools.ffmpeg(), "entrada": wav, "salida": salida, "idioma": language or "",
+           "palabras": hw_, "prompt": FILLER_PROMPT if fillers else "",
+           "previo": " ".join(w[2] for w in keep[-30:]),
+           "desde": start_at, "bloque": float(block or BLOCK), "modelo": _MOTOR_NAMES[name]}
+
+    def prog(f, txt=""):
+        report(progress, f, txt)
+    try:
+        ruta = motor_ia.run("transcribir.py", job, prog, cancelled, partial=al_parcial)
+        with open(ruta, encoding="utf-8") as f:
+            tr = unir(_json.load(f))
+    except RuntimeError as exc:
+        if "Cancelado" in str(exc) or (cancelled is not None and cancelled()):
+            raise Cancelled() from exc
+        raise
+    finally:                                         # (también al cancelar o fallar: nada se queda en «temporal»)
+        for x in (wav, salida, salida + ".parcial.json"):
+            _borrar(x)
+    if holes(samples, tr["words"]):            # red de seguridad: los huecos con voz, con el modelo de siempre
+        report(progress, 0.98, "Repasando los tramos con voz que se quedaron sin texto…")
+        try:
+            tr = fill_holes(samples, tr, _load(name), language, cancelled)
+        except Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 - lo de la tarjeta ya vale: la red de seguridad es un extra
+            pass
+    report(progress, 1.0, f"Transcripción lista (tarjeta gráfica): {len(tr['words'])} palabras.")
     return tr
 
 

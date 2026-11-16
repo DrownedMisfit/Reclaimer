@@ -54,11 +54,13 @@ def main():
     win.resize(1500, 900)
     win.show()
     pump(app, 0.3)
+    win.reset_layout()            # (de fábrica: tu distribución guardada no cuenta; se te devuelve al terminar)
+    pump(app, 0.3)
     ctrl = win.ctrl
     try:
         # 1) El botón de página va después de «Editar»
         keys = [k for k, _i, _l in win.PAGES]
-        assert keys.index("guided") == keys.index("edit") + 1, keys
+        assert keys.index("guided") == keys.index("scenes") + 1 == keys.index("edit") + 2, keys   # (🎬 Escenas va entre medias)
         assert win.page_buttons["guided"].text() == "Montaje guiado"
         print("✓ «Montaje guiado» está justo después de «Editar» en la barra de páginas")
 

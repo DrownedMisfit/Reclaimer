@@ -28,7 +28,27 @@ COLORS = {
     "ai": QColor("#ffb020"),
     "locked": QColor("#d9a400"),
     "missing": QColor("#b03a30"),
+    # fondos de la línea de tiempo (antes escritos a mano en timeline.py)
+    "track_video": QColor("#20242b"),
+    "track_audio": QColor("#1e2420"),
+    "topic_band": QColor("#1d2026"),
+    "grip": QColor("#1b1b1e"),
+    "grip_line": QColor("#141416"),
+    "meter_bg": QColor("#1a1a1c"),
+    "header": QColor("#252527"),
+    "header_sel": QColor("#2f333b"),
+    "header_line": QColor("#141416"),
 }
+
+
+def _tema_gris():
+    """🎨 Tema «gris» (ui/tema.py): la línea de tiempo, más clara y con líneas que se notan."""
+    from . import tema
+    for k, v in tema.linea().items():
+        COLORS[k] = QColor(v)
+
+
+_tema_gris()
 
 
 # Colores de cada tipo de sugerencia de la IA

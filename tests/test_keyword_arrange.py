@@ -175,6 +175,56 @@ def prueba_nucleo():
     assert [it.key for it in items] == ["b"] and res["skipped"] == 1, (items, res)
     print("✓ una mención en ✕ no recorta la anterior; dos pegadas: la primera (0,6 s) no sale")
 
+    # 🧩 relleno: donde no se ve nada, el gameplay del juego del que hablas
+    assert KA.gaps([(2, 5), (4, 8)], 0, 12) == [(0, 2), (8, 12)]
+    assert KA.gaps([(0, 11.5)], 0, 12) == [], "un hueco de menos de 1 s no se rellena"
+    H, Z = g("Gameplay", "H.mp4"), g("Gameplay", "Z.mp4")
+    dz = {H: 60.0, Z: 60.0}.get
+    pz = {"Halo": KA.Pool("Halo", gameplay=[H]), "Zelda": KA.Pool("Zelda", gameplay=[Z])}
+    mz = [{"key": "h", "folder": "Halo", "term": "Halo", "t": 10.0, "context": "", "mods": []},
+          {"key": "z", "folder": "Zelda", "term": "Zelda", "t": 30.0, "context": "", "mods": []}]
+    items, res = KA.plan(mz, {}, pz, dz, lambda t: 2.0, 40.0, fill=True, covered=[(0.0, 3.0)])
+    rell = [it for it in items if it.fill]
+    tramos = [(round(it.t, 2), round(it.t + it.dur, 2), os.path.basename(it.path)) for it in rell]
+    assert tramos == [(3.0, 10.0, "H.mp4"), (12.0, 30.0, "H.mp4"), (32.0, 40.0, "Z.mp4")], tramos
+    solapes(items)
+    todo = sorted((it.t, it.t + it.dur) for it in items)
+    assert all(b0 <= a1 + 1e-6 for (a0, b0), (a1, b1) in zip(todo, todo[1:])), "nada se pisa"
+    assert abs(res["filled_s"] - 33.0) < 0.01 and res["filled"] == 3, res
+    items, res = KA.plan(mz, {"z": "none"}, pz, dz, lambda t: 2.0, 40.0, fill=True, covered=[])
+    rell = [(round(it.t, 2), os.path.basename(it.path)) for it in items if it.fill]
+    assert rell[-1] == (30.0, "Z.mp4") and rell[-2][1] == "H.mp4", rell
+    items, _res = KA.plan(mz, {}, pz, dz, lambda t: 2.0, 40.0)
+    assert not any(it.fill for it in items), "apagado: como siempre"
+    # (revisión de Fable) poco material y un hueco largo: se rellena entero volviendo a empezar las veces que haga falta
+    corto = {"Halo": KA.Pool("Halo", gameplay=[H])}
+    items, res = KA.plan(mz[:1], {}, corto, {H: 60.0}.get, lambda t: 2.0, 300.0, fill=True, covered=[])
+    cubierto = sum(it.dur for it in items)
+    assert cubierto > 299.0, cubierto
+    # el material del mismo juego va siempre hacia delante (mención incluida), sin saltos atrás
+    mh = [{"key": f"h{t}", "folder": "Halo", "term": "Halo", "t": t, "context": "", "mods": []} for t in (10, 40, 70)]
+    items, res = KA.plan(mh, {}, {"Halo": KA.Pool("Halo", gameplay=[H])}, {H: 600.0}.get, lambda t: 4.0, 100.0,
+                         fill=True, covered=[])
+    srcs = [it.src for it in sorted(items, key=lambda it: it.t)]
+    assert all(b0 >= a0 for a0, b0 in zip(srcs, srcs[1:])), srcs
+    solapes(items)
+    # una carpeta con solo cinemáticas corta el relleno (no sigue enseñando el juego de antes)
+    C = g("Cine", "C.mp4")
+    pc = {"Halo": KA.Pool("Halo", gameplay=[H]), "Cine": KA.Pool("Cine", cinematic=[C])}
+    mc = [{"key": "h", "folder": "Halo", "term": "Halo", "t": 5.0, "context": "", "mods": []},
+          {"key": "c", "folder": "Cine", "term": "Cine", "t": 20.0, "context": "", "mods": []}]
+    items, res = KA.plan(mc, {}, pc, {H: 600.0, C: 600.0}.get, lambda t: 2.0, 40.0, fill=True, covered=[])
+    assert not [it for it in items if it.fill and it.t >= 20.0], [(it.t, it.path) for it in items if it.fill]
+    # sin rendijas negras de menos de 1 s entre lo que se ve
+    todo = sorted((it.t, it.t + it.dur) for it in KA.plan(mz, {}, pz, dz, lambda t: 2.0, 40.0, fill=True,
+                                                            covered=[(0.0, 3.0)])[0])
+    huecos = [a1 - b0 for (_a0, b0), (a1, _b1) in zip(todo, todo[1:]) if a1 - b0 > 1e-3]
+    assert not [h for h in huecos if h < 1.0], huecos
+    print("✓ 🧩 (revisión) huecos largos con poco material, material siempre hacia delante, una carpeta solo de "
+          "cinemáticas corta el relleno y sin destellos negros de menos de 1 s")
+    print("✓ 🧩 donde no hay nada: gameplay del juego del que hablas (antes de la primera mención, el de la primera;"
+          " cambia al nombrar otro, aunque esa mención esté en ✕), sin pisar ni repetir")
+
 
 def _video(ruta: str, segundos: float):
     os.makedirs(os.path.dirname(ruta), exist_ok=True)
@@ -196,6 +246,8 @@ def prueba_programa(app):
     from editoria.ui import clips_panel as CP
     from editoria.ui.keyword_arrange_ui import KeywordArranger
     from editoria.ui.timeline import TimelineWidget
+    from editoria.ui.keyword_arrange_ui import AJUSTE_RELLENO
+    QSettings("EditorIA", "EditorIA").setValue(AJUSTE_RELLENO, "false")   # (el relleno se prueba al final)
     shutil.rmtree(CARPETAS, ignore_errors=True)
     _video(os.path.join(CARPETAS, "Fortnite", "Gameplay", "01 partida.mp4"), 9.0)
     _video(os.path.join(CARPETAS, "Fortnite", "Gameplay", "02 partida.mp4"), 9.0)
@@ -289,6 +341,32 @@ def prueba_programa(app):
     acomodar()
     assert len(de_acomodo()) == 2 and all(abs(c.start - tiempos[1]) > 0.05 for c in de_acomodo())
     print("✓ volver a pulsar ⚡ sustituye lo del ⚡ anterior (sin restos); una mención pasada a ✕ se vacía")
+    QSettings("EditorIA", "EditorIA").setValue(AJUSTE_RELLENO, "true")
+    acomodar()
+    rel = [c for c in ctrl.project.clips.values() if c.note == ctrl.FILL_NOTE]
+    men = [c for c in de_acomodo() if c.note != ctrl.FILL_NOTE]
+    assert rel and len(men) == 2, (len(rel), len(men))
+    assert all(not (r.start < m.end - 1e-3 and r.end > m.start + 1e-3) for r in rel for m in men), "no pisa"
+    assert len({c.track_id for c in rel + men}) == 1 and all(c.volume == 0 for c in rel)
+    # (revisión de Fable) un recuadro tuyo en la pista de palabras clave NO se borra: el relleno lo rodea
+    pista = rel[0].track_id
+    mio = Clip("mio", rel[0].media_id, pista, rel[0].start + 0.2, 0.0, 0.8, volume=0.0,
+               layout={"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3})
+    ctrl.project.clips["mio"] = mio
+    ctrl._bump_rev()
+    acomodar()
+    assert "mio" in ctrl.project.clips, "el relleno no puede borrar un clip tuyo"
+    assert not any(c.start < mio.end - 1e-3 and c.end > mio.start + 1e-3 for c in ctrl.project.clips.values()
+                   if c.note == ctrl.FILL_NOTE), "ni ponerse encima"
+    ctrl.project.clips.pop("mio", None)
+    ctrl._bump_rev()
+    print("✓ 🧩 (revisión) un recuadro tuyo en esa pista no se borra: el relleno lo rodea")
+    acomodar()
+    assert len([c for c in ctrl.project.clips.values() if c.note == ctrl.FILL_NOTE]) == len(rel), "sin duplicar"
+    ctrl.undo_stack.undo()
+    print(f"✓ 🧩 ⚡ con relleno: {len(rel)} trozos de gameplay en los huecos, en la misma pista, sin pisar ni "
+          "duplicar al repetir ⚡")
+    QSettings("EditorIA", "EditorIA").setValue(AJUSTE_RELLENO, "false")
 
     # clic real en un chip (y arrastrar desde él = mover el cabezal, sin cambiar nada)
     from PySide6.QtCore import QEvent, QPointF, Qt

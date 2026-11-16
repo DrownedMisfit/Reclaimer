@@ -76,7 +76,7 @@ drop y en cada parte, o en cada compás (numerados); volver a escuchar; imán a 
 (corta los clips elegidos en cada cambio de escena), <b>📱 Vertical</b> (solo en Shorts y Edits: el recorte sigue la
 acción), <b>🖼 Miniatura</b> y <b>⬆ Exportar</b>. En <b>⋯ Más</b>: ⚡ Ráfaga de cortes al ritmo y 〰 Curvas. Si la
 ventana es estrecha, los botones enseñan solo su icono (el nombre sale al pasar el ratón). Lo de la IA también está en
-el menú <b>IA ✨</b>.</li>
+la pestaña <b>IA ✨</b> → <b>«✨ Más»</b>.</li>
 <li><b>Supr</b> = eliminar · <b>Mayús+Supr</b> = eliminar y cerrar el hueco · <b>Ctrl+L</b> = bloquear el clip.</li>
 <li><b>🔑 Palabras clave</b> (botón 🔑 arriba de los nombres de las pistas): en la regla sale cada vez que dices una
 palabra que tiene carpeta (Medios → 🔑 Palabras clave; también carpetas de tu PC), con lo que va: 🎮 gameplay,
@@ -284,6 +284,9 @@ Tolerancia: si queda fondo, súbela; si se come a la persona, bájala."""),
 Ajusta el color de un clip de video o imagen, como en la página Color de DaVinci Resolve (en sencillo):
 <b>exposición</b> (más luz o menos, en pasos), <b>contraste</b>, <b>saturación</b>, <b>temperatura</b> (más azul ↔
 más naranja), <b>tinte</b> (verde ↔ magenta), <b>sombras</b> y <b>luces</b>.<br><br>
+<b>🎨 Ruedas Sombras · Medios · Luces</b> (Lift / Gamma / Gain): arrastra el punto hacia un color para teñir esa
+zona (p. ej. sombras hacia el azul y luces hacia el naranja = «look» de cine); la barra de debajo la aclara u oscurece.
+Doble clic = volver al centro; Mayús = movimiento fino.<br><br>
 <b>✨ Color automático</b>: mira el fotograma del cabezal y corrige exposición, contraste y balance de blancos.<br>
 <b>🎨 LUT (.cube)</b>: un «look» de color ya hecho (de Resolve, de tu cámara, descargado…), con su intensidad.<br>
 <b>👁 Ver sin corrección</b>: compara el antes y el después en el visor.<br><br>
@@ -354,8 +357,11 @@ fundido a negro, destello blanco, latigazo, zoom, deslizar, barrido, círculo, p
 También con <b>clic derecho</b> sobre un clip → «⧉ Transición» (al inicio o al final) o <b>Alt+T</b> (disolver).<br>
 <b>Duración</b>: se centra en el corte (empieza la mitad antes y acaba la mitad después), así el video no
 cambia de duración. Si no hay más material en el archivo, se alarga el borde con una imagen quieta.<br>
-En la línea de tiempo se ve como una pajarita sobre el corte. En el visor se ve como un fundido;
-<b>«▶ Ver la transición»</b> prepara el resultado exacto en unos segundos.<br><br>
+<b>⏱ Auto</b>: la duración típica de cada tipo (un latigazo es rápido, un fundido a negro más pausado) y, si suena
+música con su ritmo reconocido, ½, 1 o 2 golpes para que acabe a ritmo.<br>
+En la línea de tiempo se ve como una pajarita sobre el corte. <b>En el visor se ve tal cual queda</b>: se prepara sola
+en segundo plano unos segundos después de ponerla (mientras tanto, un fundido). Se apaga en Reproducción →
+«⧉ Transiciones reales en el visor». <b>«▶ Ver la transición»</b> la repite en bucle en una ventana.<br><br>
 <b>Editarla en la línea de tiempo</b>: <b>clic</b> en la pajarita = seleccionarla (naranja) · <b>Supr</b> o
 <b>Ctrl+X</b> = quitarla (los clips quedan igual) · <b>arrastra un borde</b> = más larga o más corta ·
 <b>clic derecho</b> = 🔁 Reemplazar por otra, ⏱ Duración (+/− 0,25 s o un valor), ✕ Quitar.<br>
@@ -619,7 +625,7 @@ Se hace una vez por archivo y se guarda (la siguiente vez es instantáneo)."""),
 Escribe palabras o frases («Marcus, la traición, explosión») y te dice DÓNDE se dicen, gastando poco:
 solo escucha donde hay voz (se salta la música, el ruido y el silencio), con un modelo pequeño, y deja la tarjeta
 gráfica libre. Tolera acentos y pequeños errores («Marcos» encuentra «Marcus»). Lo escuchado se guarda: buscar
-otra palabra en el mismo archivo es instantáneo (y si ya lo transcribiste en «Limpieza», usa eso).<br>
+otra palabra en el mismo archivo es instantáneo (y si ya lo transcribiste en «🎙 Transcribir», usa eso).<br>
 <b>Dónde</b>: pestaña IA ✨ → «🗣 Buscar lo que se dice», clic derecho en un clip (✨ IA) o en Medios.<br>
 <b>Resultados</b>: doble clic = ir ahí · arrastrar a la línea de tiempo · «➕ Poner en el cabezal» ·
 «📍 Marcadores» (si buscaste en la línea de tiempo).<br>

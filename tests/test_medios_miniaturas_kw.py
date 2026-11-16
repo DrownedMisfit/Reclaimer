@@ -58,6 +58,9 @@ def main():
     from editoria.ui.main_window import MainWindow
     win = MainWindow()
     lib = win.library
+    t0 = lib._kw_del_proyecto(__import__("editoria.core.keyword_folders", fromlist=["x"]).list_folders(raiz), {})
+    assert t0 == [], "proyecto vacío: ninguna palabra clave en Medios"
+    lib._kw_recientes.add("Volcan")             # (como si la hubieras creado en este proyecto)
     lib._rebuild() if hasattr(lib, "_rebuild") else lib.refresh()
     pump(app, 3.0)
     it = lib._kw_items_ruta.get(bueno)

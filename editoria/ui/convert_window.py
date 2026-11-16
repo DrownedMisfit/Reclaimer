@@ -19,7 +19,7 @@ from ..core.model import kind_for_path
 
 def quick_folders() -> list[tuple[str, str]]:
     """Carpetas de tu PC para guardar con un clic."""
-    from ..core.paths import PROGRAM_DIR
+    from ..core.paths import user_dir
     out = []
     for name, loc in (("🖥 Escritorio", QStandardPaths.DesktopLocation),
                       ("⬇ Descargas", QStandardPaths.DownloadLocation),
@@ -27,7 +27,7 @@ def quick_folders() -> list[tuple[str, str]]:
         p = QStandardPaths.writableLocation(loc)
         if p and os.path.isdir(p):
             out.append((name, p))
-    out.append(("📦 Exportados", str(PROGRAM_DIR / "Exportados")))
+    out.append(("📦 Exportados", str(user_dir() / "Exportados")))
     return out
 
 
@@ -101,8 +101,8 @@ class ConvertWindow(QDialog):
         self.folder_lbl = QLabel("")
         self.folder_lbl.setObjectName("dim")
         lay.addWidget(self.folder_lbl)
-        from ..core.paths import PROGRAM_DIR
-        self._set_folder(str(self.st.value("convertir/carpeta", "") or (PROGRAM_DIR / "Exportados")))
+        from ..core.paths import user_dir
+        self._set_folder(str(self.st.value("convertir/carpeta", "") or (user_dir() / "Exportados")))
         self.status = QLabel("")
         self.status.setWordWrap(True)
         lay.addWidget(self.status)

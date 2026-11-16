@@ -177,6 +177,7 @@ class MainWindow(QMainWindow):
         self.timeline.broll_range_requested.connect(lambda a, b: self.ai_panel.propose((a, b), apply=True))
         self.transcript.moments_requested.connect(lambda t, a: self.open_moments(t, None if a < 0 else a))
         timeline_box = QWidget()
+        timeline_box.setObjectName("timeline_box")
         tl = QVBoxLayout(timeline_box)
         tl.setContentsMargins(0, 0, 0, 0)
         tl.setSpacing(0)
@@ -212,6 +213,7 @@ class MainWindow(QMainWindow):
         self._dock("kw_folders", "🗂 Carpetas", self.kw_folders)
         self._dock("inspector", "Inspector", self.inspector)
         self._dock("voice", "Limpieza", self.voice)
+        self.ai_panel.set_transcriber(self.voice)            # 🎙 el transcriptor, en la pestaña «IA ✨»
         self._dock("transcript", "Texto", self.transcript)
         self._dock("subtitles", "Subtítulos", self.subtitles)
         self._dock("history", "Historial", history)
@@ -279,6 +281,7 @@ class MainWindow(QMainWindow):
         self.engine.time_changed.connect(lambda t: self.tl_timecode.setText(fmt_tc(t, self.ctrl.project.fps)))
         self.engine.time_changed.connect(self._update_meter)
         self.timeline.seek_requested.connect(self.engine.user_seek)
+        self.timeline.scrub_requested.connect(self.engine.scrub)      # 🔊 se oye al arrastrar la barra roja
         self.timeline.selection_changed.connect(self.inspector.set_selection)
         from .text_writer import OnScreenText           # ✍ escribir el texto seleccionado en la pestaña «Texto»
         self.text_writer = OnScreenText(self.ctrl, self.engine, self.timeline)
@@ -321,6 +324,7 @@ class MainWindow(QMainWindow):
         from .keyword_arrange_ui import KeywordArranger
         self.kw_arranger = KeywordArranger(self)                                # ⚡ fila de palabras clave
         self.library.add_moment_requested.connect(self._add_moment)
+        self.library.anim_requested.connect(self.open_image_anim)
         self.library.example_requested.connect(
             lambda mid, t: (self.show_panel(self.moments), self.moments.example_from_media(mid, t)))
         self.ctrl.message.connect(lambda msg: self.statusBar().showMessage(msg, 8000))
@@ -341,11 +345,18 @@ class MainWindow(QMainWindow):
         self._sil_timer.timeout.connect(self._observe_silence_edges)
         self.ctrl.project_changed.connect(lambda *_: self._sil_timer.start() if self._sil_edges else None)
         self.ctrl.project_replaced.connect(lambda *_: self._sil_edges.clear())
+        self.ctrl.project_replaced.connect(lambda *_: self.moments.limpiar())        # (resultados de otro proyecto)
+        self.ctrl.project_replaced.connect(lambda *_: self._fill_edit_panel())       # (canciones y clips de este)
         self._build_actions()
         if _mcp_enabled():
             self.claude_bridge.start()
         self._motor_warning.connect(lambda t: self.statusBar().showMessage(t, 20000))
         QTimer.singleShot(20000, self._check_motor_soon)     # sin prisa, cuando ya estás editando
+        QTimer.singleShot(900, self._bienvenida_si_toca)     # 👋 la primera vez: qué viene y qué es opcional
+        movidos = os.environ.get("RECLAIMER_DATOS_MOVIDOS")
+        if movidos:                                           # (paths.app_data_dir: no se podía escribir junto al programa)
+            QTimer.singleShot(2500, lambda: self.statusBar().showMessage(
+                f"📦 En la carpeta de Reclaimer no se puede escribir: tus datos se guardan en {movidos}", 60000))
         self.apply_font_scale()
         self._update_title()
         self.statusBar().showMessage("Bienvenido. Empieza importando tu narración y tus clips (panel izquierdo).")
@@ -424,7 +435,7 @@ class MainWindow(QMainWindow):
         self.tool_snap.setChecked(True)
         self.tool_link.setChecked(self.timeline.linked)
         lay.addSpacing(12)
-        btn("Dividir", "Dividir en el cabezal (S)", self._split)
+        btn("Dividir", "Dividir en el cabezal (Ctrl+B o S)", self._split)
         # ⚡ Ráfaga de cortes (a mano: la IA ya no las hace sola salvo una en canciones enérgicas)
         from PySide6.QtWidgets import QMenu as _QMenu, QToolButton as _QTB
         self.btn_burst = _QTB()
@@ -452,12 +463,23 @@ class MainWindow(QMainWindow):
                             "Ctrl+Z las devuelve (o vuelve a pulsarlo).", self.remove_black_bars)
         btn("⚑", "Añadir marcador en el cabezal (M)", self._marker)
         btn("T", "Añadir texto en el cabezal (T)", lambda: self.ctrl.add_text(self.engine.time, 4.0, "Texto"))
+        self.btn_titles = btn("🅣", "Plantillas de título: un texto con estilo ya hecho (título grande, rótulo "
+                                   "inferior, capítulo, meme, cita…) en el cabezal. Las ★ son las tuyas (Inspector → "
+                                   "texto → «★ Guardar como plantilla»).")
+        self.btn_titles.setMenu(self._titles_menu(self.btn_titles))
         lay.addSpacing(12)
         # 13/11: lo de uso frecuente, a la vista (antes solo con clic derecho o en un menú)
         self.btn_broll = btn("✨ B-roll", "Proponer B-roll: la IA elige clips de tu material para lo que dices "
                              "(panel IA ✨; nada se pone sin que lo aceptes)", self._toolbar_broll)
-        self.btn_scenes = btn("🎬 Escenas", "Cortar los clips elegidos en cada cambio de escena (sin IA: donde la "
-                              "imagen cambia de golpe). Ctrl+Z lo deshace.", self._toolbar_scenes)
+        self.btn_scenes = btn("🎬 Escenas", "Cambios de escena de los clips elegidos (sin IA: donde la imagen cambia "
+                              "de golpe): cortarlos, también los cambios suaves, o solo poner un marcador en cada uno "
+                              "(como Kdenlive). Ctrl+Z lo deshace.")
+        sm = _QMenu(self.btn_scenes)
+        sm.addAction("✂ Cortar en los cambios claros", lambda: self._toolbar_scenes("normal"))
+        sm.addAction("✂ Cortar también en los suaves (menús, fundidos)", lambda: self._toolbar_scenes("alta"))
+        sm.addSeparator()
+        sm.addAction("⚑ Solo poner un marcador en cada cambio", lambda: self._toolbar_scenes("normal", True))
+        self.btn_scenes.setMenu(sm)
         self.btn_vertical = btn("📱 Vertical", "Encuadre vertical que sigue la acción: los clips horizontales elegidos "
                                 "llenan la pantalla 9:16 y el recorte sigue lo que pasa (Shorts y Edits)",
                                 self._toolbar_vertical)
@@ -504,6 +526,10 @@ class MainWindow(QMainWindow):
         self.timeline.silhouette_requested.connect(self.open_silhouette_teach)
         self.timeline.dialogue_requested.connect(self.separate_dialogue)
         self.timeline.keywords_requested.connect(lambda mids: self.open_keywords(mids))
+        self.timeline.anim_requested.connect(self.open_image_anim)
+        self.timeline.scene_requested.connect(lambda a, b: self.open_scenes(rango=(a, b)))
+        self.timeline.scene_open_requested.connect(lambda eid: self.open_scenes(escena_id=eid))
+        self.timeline.template_requested.connect(self.put_template)
         self.timeline.scene_cuts_requested.connect(
             lambda ids, sens: self.cut_scenes(ids, sens.replace("+marcas", ""), sens.endswith("+marcas")))
         self.timeline.topics_requested.connect(self.open_topics_tool)
@@ -597,12 +623,12 @@ class MainWindow(QMainWindow):
         self.show_panel(self.ai_panel)
         self.ai_panel.propose()
 
-    def _toolbar_scenes(self):
+    def _toolbar_scenes(self, sensitivity: str = "normal", markers: bool = False):
         ids = self._sel_video_clips()
         if not ids:
-            self.statusBar().showMessage("🎬 Elige antes los clips de video que quieres cortar por escenas.", 6000)
+            self.statusBar().showMessage("🎬 Elige antes los clips de video (clic en uno; Ctrl+clic para varios).", 6000)
             return
-        self.cut_scenes(ids)
+        self.cut_scenes(ids, sensitivity, markers)
 
     def _toolbar_vertical(self):
         ids = self._sel_video_clips()
@@ -645,15 +671,35 @@ class MainWindow(QMainWindow):
         self.timeline.set_playhead(t, follow=True)
         self._open_cut_issue(k)
 
+    def _cut_panel_visible(self, vis: bool):
+        """✂ Con el panel de cortes a la vista, su corte lleva la línea roja en la pista; oculto, ninguno."""
+        cf = self.cut_fix
+        if vis and cf is not None and cf.track_id:
+            self.timeline.set_cut_issue_selected(cf.track_id, cf.t)
+        elif not vis:
+            self.timeline.set_cut_issue_selected(None, None)
+
     def _open_cut_issue(self, k: int):
         """Abre (o recoloca) el panel de ajuste del corte k de la línea de tiempo."""
         issues = self.timeline.cut_issues
         if not (0 <= k < len(issues)):
             return
+        self.cut_fix_panel().show_issue(issues[k]["track_id"], issues[k]["t"])
+
+    def cut_fix_panel(self):
+        """✂ El panel de cortes, creado y ACOPLADO (pestaña de la derecha, junto al Inspector) la primera vez. Lo usan
+        también la revisión guiada y el montaje guiado (antes lo creaban suelto, flotando en una esquina)."""
         if self.cut_fix is None:
             from .cut_fix import CutFixPanel
             self.cut_fix = CutFixPanel(self)
-        self.cut_fix.show_issue(issues[k]["track_id"], issues[k]["t"])
+            d = self._dock("cortes", "✂ Corte de audio", self.cut_fix)
+            self.addDockWidget(Qt.RightDockWidgetArea, d)
+            self.tabifyDockWidget(self.docks["inspector"], d)
+            d.visibilityChanged.connect(self._cut_panel_visible)
+            # (tras Ctrl+Z o «✓ Quitar todos los avisos», la lista y el dibujo al día)
+            self.timeline.cut_issues_changed.connect(
+                lambda _n: self.cut_fix._refresh() if self.cut_fix.isVisible() and self.cut_fix.track_id else None)
+        return self.cut_fix
 
     def _sync_vh_menu(self):
         for a in self.vh_actions:
@@ -799,6 +845,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("🎓 Ya se está preparando el proyecto de ejemplo…", 5000)
             return
         from ..core import example_project as EX
+        from .jobs import BackgroundJob             # (faltaba: sin los clips descargados, fallaba al empezar)
         dest = self.example_dir()
         ruta = os.path.join(dest, EX.NOMBRE + ".eia")
         existe = os.path.isfile(ruta)
@@ -955,8 +1002,10 @@ class MainWindow(QMainWindow):
         return bar
 
     PAGES = [("media", "🗂", "Medios"), ("effects", "✦", "Efectos"), ("edit", "🎞", "Editar"),
+             ("scenes", "🎬", "Escenas"),
              ("guided", "🧭", "Montaje guiado"),
-             ("fairlight", "🎚", "Audio"), ("ai", "✨", "IA"), ("thumb", "🖼", "Miniatura"), ("deliver", "🚀", "Entrega")]
+             ("fairlight", "🎚", "Audio"), ("thumb", "🖼", "Miniatura"), ("deliver", "🚀", "Entrega")]
+    # (14/11: «IA» ya no va en esta barra: la IA tiene UN sitio, la pestaña «IA ✨» del panel, con «✨ Más»)
 
     def _page_bar(self) -> QWidget:
         from PySide6.QtCore import QSize
@@ -991,9 +1040,17 @@ class MainWindow(QMainWindow):
         """Cambiar de «página» como en Resolve (todas trabajan sobre el mismo proyecto)."""
         if key != "thumb" and self._thumb_page is not None and getattr(self, "_thumb_editor", None) is not None:
             self._thumb_editor.close()             # sale de 🖼 Miniatura (se guarda) y vuelve el editor
+        if key != "scenes" and getattr(self, "_scenes_state", None) is not None:
+            pg = getattr(self, "_scenes_widget", None)
+            if pg is not None and not pg.volver(key):     # (cambios sin aplicar y «Cancelar»: se queda)
+                for k, b in self.page_buttons.items():
+                    b.setChecked(k == "scenes")
+                return
         for k, b in self.page_buttons.items():
             b.setChecked(k == key)
-        if key == "media":
+        if key == "scenes":
+            self.open_scenes()
+        elif key == "media":
             self.show_panel(self.library)
             self.library.search.setFocus()
         elif key == "effects":
@@ -1003,8 +1060,14 @@ class MainWindow(QMainWindow):
             self.show_panel(self.library)
             self.show_panel(self.inspector)
         elif key == "guided":
+            d = self.docks
+            self.show_panel(self.clips)
+            if d["guided"] in self.tabifiedDockWidgets(d["clips"]) or d["guided"].isFloating() or                     d["guided"].isHidden():      # (en pestaña con 🎬 Clips se tapaban: el guiado, debajo, a la vista)
+                d["guided"].setFloating(False)
+                self.removeDockWidget(d["guided"])
+                self.addDockWidget(Qt.RightDockWidgetArea, d["guided"], Qt.Vertical)
             self.show_panel(self.guided)
-            self.show_panel(self.clips)         # a la izquierda; el guiado, a la derecha: se ven a la vez
+            self.show_panel(self.clips)         # 🎬 Clips y el guiado se ven a la vez
         elif key == "fairlight":
             sel = list(self.inspector._ids)   # una imagen con su sonido vinculado cuenta como uno
             c = self.ctrl.project.clips.get(sel[0]) if len(sel) == 1 else None
@@ -1017,9 +1080,6 @@ class MainWindow(QMainWindow):
                 self.ai_panel.show_audio_section()
                 self.statusBar().showMessage("Selecciona un clip de audio para ver su ecualizador en el Inspector.",
                                              6000)
-        elif key == "ai":
-            self.show_panel(self.ai_panel)
-            self.show_panel(self.voice)
         elif key == "thumb":
             self.open_thumbnail()
         elif key == "deliver":
@@ -1099,6 +1159,10 @@ class MainWindow(QMainWindow):
         act(m, "🖼 Crear miniatura…", "Ctrl+Shift+M", self.open_thumbnail)
         act(m, "📸 Exportar este fotograma (PNG)", "Ctrl+Alt+G", self.export_frame)
         act(m, "📝 Descripción para YouTube (capítulos, créditos…)", "Ctrl+Shift+K", self.open_chapters)
+        act(m, "⇄ Llevar a DaVinci Resolve / Premiere (XML)…", None, self.export_xml,
+            "Guarda la línea de tiempo (clips, pistas, velocidad, volumen, transiciones y marcadores) en un XML que "
+            "DaVinci Resolve, Premiere Pro y Final Cut 7 abren con «Importar línea de tiempo». Los archivos no se "
+            "copian: el otro editor los busca donde están.")
         m.addSeparator()
         act(m, "Salir", "Ctrl+Q", self.close)
 
@@ -1137,7 +1201,9 @@ class MainWindow(QMainWindow):
         act(m, "Buscar en el panel multimedia", "Alt+F", self._find_in_media)
         act(m, "Atributos del clip…", None, self._clip_info)
         m.addSeparator()
-        act(m, "Dividir en el cabezal", "S", self._split)
+        a_div = act(m, "Dividir en el cabezal", "Ctrl+B", self._split)      # (Ctrl+B, como en DaVinci Resolve)
+        if a_div.shortcut().toString() == "Ctrl+B":                  # (si no elegiste otro: también la S de siempre)
+            a_div.setShortcuts([QKeySequence("Ctrl+B"), QKeySequence("S")])
         act(m, "Eliminar", "Delete", lambda: self._delete(False))
         act(m, "Eliminar y cerrar hueco", "Shift+Delete", lambda: self._delete(True))
         act(m, "⇤ Juntar: todo se pega a la izquierda (canal seleccionado o todo)", "Ctrl++", self._join_right,
@@ -1159,9 +1225,7 @@ class MainWindow(QMainWindow):
         act(m, "Congelar la imagen desde el cabezal", "Shift+R", self._freeze)
         act(m, "Reproducir al revés (sí/no)", None, self._toggle_reverse)
         act(m, "✂ Eliminar silencio…", "Ctrl+Shift+Delete", self.open_silence)
-        act(m, "⧉ Poner transición (disolver) en el corte", "Alt+T",
-            lambda: self.ctrl.set_transition(self.ctrl.transition_targets(sorted(self.timeline.selected),
-                                                                          self.engine.time), "fade", 0.5))
+        act(m, "⧉ Poner transición (disolver) en el corte", "Alt+T", self._alt_t)
         m.addSeparator()
         act(m, "Herramienta de selección", "A", lambda: self.set_tool("select"))
         act(m, "Herramienta cuchilla", "B", lambda: self.set_tool("blade"))
@@ -1194,6 +1258,56 @@ class MainWindow(QMainWindow):
         self.act_snap_rhythm = a_rh
 
         m = mb.addMenu("&Reproducción")
+        a_live = act(m, "🎧 Audio en directo (ecualizador mientras suena)", None, lambda: None,
+                     "Como en DaVinci Resolve: el ecualizador, el volumen, las curvas, los fundidos y la música que baja "
+                     "cuando hablas se oyen mientras reproduces, al instante de cambiarlos. Los efectos de PISTA "
+                     "(mejora de voz, compresor) y el volumen final solo se oyen al exportar o con «Escuchar con EQ». "
+                     "Apagado: suenan los reproductores de siempre.")
+        a_live.setCheckable(True)
+        a_live.setChecked(self.engine.live is not None)
+        a_live.toggled.connect(self.engine.set_live_audio)
+        self.a_live_audio = a_live
+        a_scrub = act(m, "🔊 Oír al arrastrar el cabezal", None, lambda: None,
+                      "Mientras arrastras la barra roja suena un trocito de lo que hay ahí (como en Resolve o "
+                      "Premiere): así encuentras los cortes sin darle a play. Va con «🎧 Audio en directo».")
+        a_scrub.setCheckable(True)
+        from .preview import scrub_activo as _scrub_on
+        a_scrub.setChecked(_scrub_on())
+        a_scrub.toggled.connect(lambda on: QSettings("EditorIA", "EditorIA").setValue(
+            "reproduccion/oir_al_arrastrar", "true" if on else "false"))
+        a_vid = act(m, "🎞 Video con motor propio (beta)", None, lambda: None,
+                    "Como DaVinci, Kdenlive o Shotcut: Reclaimer decodifica el video él mismo (en segundo plano, al "
+                    "tamaño con que se ve), con fotogramas por delante y una caché de los recientes: cortes sin "
+                    "trabas, saltos exactos y arrastrar el cabezal más fluido. Beta: si algo falla, apágalo y vuelven "
+                    "los reproductores de siempre. El sonido de los videos va por «🎧 Audio en directo».")
+        a_vid.setCheckable(True)
+        a_vid.setChecked(self.engine._own_video_on())
+        a_vid.toggled.connect(self.engine.set_own_video)
+        self.a_own_video = a_vid
+        a_tr = act(m, "⧉ Transiciones reales en el visor", None, lambda: None,
+                   "Cada transición (deslizar, barrido, zoom, círculo…) se prepara en segundo plano con el mismo motor "
+                   "que la exportación y el visor la enseña tal cual queda (en unos segundos tras ponerla). Apagado: "
+                   "el visor las aproxima con un fundido.")
+        a_tr.setCheckable(True)
+        from .zone_preview import enabled as _zp_on
+        a_tr.setChecked(_zp_on())
+        a_tr.toggled.connect(lambda on: self.engine.zones.set_enabled(on) if self.engine.zones else None)
+        self.a_real_trans = a_tr
+        a_fx = act(m, "⚡ Pre-render de efectos pesados en el visor", None, lambda: None,
+                   "Los tramos que el visor no puede enseñar o enseña lento (grano, glitch, tono cálido o frío, "
+                   "desenfoque de movimiento, cámara lenta suave, máscara de la IA, pantalla verde, desenfoque por "
+                   "zonas, efectos de edit, capas de ajuste) se preparan en segundo plano, en trozos, con el mismo "
+                   "motor que la exportación: se ven tal cual y la reproducción va fluida. Primero lo cercano al "
+                   "cabezal. Apagado: el visor los aproxima como siempre.")
+        a_fx.setCheckable(True)
+        from .zone_preview import fx_enabled as _zp_fx
+        a_fx.setChecked(_zp_fx())
+        a_fx.toggled.connect(lambda on: self.engine.zones.set_fx_enabled(on) if self.engine.zones else None)
+        self.a_prerender_fx = a_fx
+        if self.engine.zones is not None:          # ⧉⚡ franja de render en la regla (verde = listo)
+            self.engine.zones.marks_changed.connect(self.timeline.set_render_marks)
+            self.timeline.set_render_marks(self.engine.zones.marks())
+        m.addSeparator()
         pm = m.addMenu("Resolución de la línea de tiempo (proxy)")
         self.proxy_actions = {}
         for lv, (label, _div) in __import__("editoria.core.proxies", fromlist=["LEVELS"]).LEVELS.items():
@@ -1240,8 +1354,8 @@ class MainWindow(QMainWindow):
         act(m, "Corte de audio siguiente (línea roja)", "Alt+Right", lambda: self._go_cut(1))
 
         m = mb.addMenu("&Voz")
-        act(m, "Transcribir y analizar la narración", "Ctrl+T",
-            lambda: (self.right_tabs.setCurrentWidget(self.voice), self.voice.transcribe()))
+        act(m, "Transcribir y analizar la narración", "Ctrl+T",                # (🎙 vive en la pestaña IA)
+            lambda: (self.show_panel(self.ai_panel), self.ai_panel.tabs.setCurrentIndex(0), self.voice.transcribe()))
         act(m, "Volver a analizar (silencios, muletillas…)", "Ctrl+Shift+T",
             lambda: (self.right_tabs.setCurrentWidget(self.voice), self.voice.analyze()))
         act(m, "🔎 Buscar en lo que dijiste", "Ctrl+Alt+F",           # (Ctrl+F ya es de «Buscar clips por contenido»)
@@ -1282,9 +1396,16 @@ class MainWindow(QMainWindow):
         act(m, "Buscar clips por contenido", "Ctrl+F",
             lambda: (self.library.btn_ai_search.setChecked(True), self.library.search.setFocus()))
         m.setTitle("IA ✨")
+        # 14/11 (él): una sola IA = la pestaña «IA ✨» del panel. El menú sale de la barra de arriba; sus acciones van al
+        # botón «✨ Más» de esa pestaña y sus atajos siguen funcionando (las acciones quedan en la ventana).
+        mb.removeAction(m.menuAction())           # (act() ya puso cada acción en la ventana: los atajos siguen)
+        self.ai_panel.set_more_menu(m)
 
         m = mb.addMenu("&Timeline")
         act(m, "T Añadir texto en el cabezal", "T", lambda: self.ctrl.add_text(self.engine.time, 4.0, "Texto"))
+        tm = self._titles_menu(m)
+        tm.setTitle("🅣 Plantillas de título")
+        m.addMenu(tm)
         act(m, "🟦 Añadir color sólido o degradado…", None, lambda: self.open_generator())
         act(m, "🎨 Añadir capa de ajuste (color y efectos a todo lo de debajo)", None, self.add_adjustment)
         act(m, "Acercar", "+", lambda: self.timeline.zoom(1.5))
@@ -1355,6 +1476,8 @@ class MainWindow(QMainWindow):
         act(m, "Restablecer la distribución de paneles", None, self.reset_layout)
         m.addSeparator()
         act(m, "🔠 Tamaño de letra…", "Ctrl+Alt+=", self.open_font_size)
+        self._ui_scale_menu(m)
+        self._tema_menu(m)
         act(m, "⌨ Personalizar atajos de teclado…", None, self.open_shortcuts)
 
         m = mb.addMenu("&Convertir")
@@ -1372,6 +1495,8 @@ class MainWindow(QMainWindow):
         act(m, "⌨ Personalizar atajos…", None, self.open_shortcuts)
         act(m, "✧ Caché y diagnóstico…", None, self.open_diagnostics)
         act(m, "◈ Motor de IA (tarjeta gráfica)…", None, self.open_motor)
+        act(m, "👋 Bienvenida y componentes…", None, self.open_bienvenida,
+            "Lo que viene incluido y lo opcional (como el motor de IA), con su tamaño y un botón para instalarlo.")
         m.addSeparator()
         from .claude_bridge import enabled as _mcp_on
         a_mcp = act(m, "🤝 Dejar que Claude edite conmigo (MCP)", None, lambda: None,
@@ -1422,8 +1547,17 @@ class MainWindow(QMainWindow):
             return
         if note:
             self.statusBar().showMessage(note, 6000)
+        viejo = getattr(self, "_silence_dialog", None)
+        try:
+            if viejo is not None and viejo.isVisible():
+                viejo.close()                         # (una sola a la vez: la nueva, con lo seleccionado ahora)
+        except RuntimeError:
+            pass
+        # Sin bloquear: con la ventana abierta te mueves y escuchas en la línea de tiempo para comprobar los cortes
         self._silence_dialog = SilenceDialog(self, ids)
-        self._silence_dialog.exec()
+        self._silence_dialog.setModal(False)
+        self._silence_dialog.setAttribute(Qt.WA_DeleteOnClose)
+        self._silence_dialog.show()
 
     def _fill_gaps_menu(self, m, add=None):
         """⇤ Las opciones de huecos (las mismas en el botón del visor y en el menú Timeline).
@@ -1738,6 +1872,11 @@ class MainWindow(QMainWindow):
             return
         rev = not self.ctrl.project.clips[sel[0]].reverse
         self.ctrl.set_speed(sel, reverse=rev)
+
+    def open_image_anim(self, media_id: str | None = None):
+        """🎞 «Animar imagen» (ui/image_anim_dialog.py)."""
+        from . import image_anim_dialog
+        self._image_anim_dlg = image_anim_dialog.abrir(self, media_id)
 
     def _add_at_playhead(self, ids):
         created = self.ctrl.add_media(ids, None, self.engine.time)
@@ -2354,6 +2493,114 @@ class MainWindow(QMainWindow):
             b.setChecked(k == "thumb")
         return ed
 
+    def open_scenes(self, escena_id: str | None = None, rango: tuple[float, float] | None = None):
+        """🎬 La página «Escenas» (ocupa la ventana como 🖼 Miniatura; al volver, el editor queda tal cual).
+        escena_id = abrir esa escena · rango = una nueva en ese tramo · nada = la que estaba abierta, o una nueva en el
+        tramo marcado (I/O) o en el cabezal."""
+        from PySide6.QtGui import QAction, QShortcut
+
+        from ..core import scenes as SC
+        from .scenes_page import ScenesPage
+        if self._thumb_page is not None and getattr(self, "_thumb_editor", None) is not None:
+            self._thumb_editor.close()
+        self.engine.pause()
+        esc, aviso = None, ""
+        if escena_id and escena_id in self.ctrl.project.scenes:
+            esc, aviso = self.ctrl.scene_state(escena_id)     # (recolocada donde están ahora sus clips)
+        elif rango is not None:
+            esc = SC.nueva(rango[0], rango[1], f"Escena {len(self.ctrl.project.scenes) + 1}")
+        pg = getattr(self, "_scenes_widget", None)
+        if pg is not None and esc is not None and pg.escena.get("id") != esc["id"]:
+            if pg.sucia and pg._tiene_contenido() and not pg._descartar_ok():
+                return pg
+            self.central_stack.removeWidget(pg)
+            pg.deleteLater()
+            pg = None
+        if pg is None:
+            pg = self._scenes_widget = ScenesPage(self, esc, aviso)
+            pg.closed.connect(self._leave_scenes_page)
+            self.central_stack.addWidget(pg)
+            if esc is not None and escena_id is None:
+                pg._ensuciar()
+        if getattr(self, "_scenes_state", None) is None:
+            acts = [a for a in self.findChildren(QAction) if a.shortcuts() and not self._in_widget(a, pg)]
+            shorts = [s for s in self.findChildren(QShortcut) if s.isEnabled() and not self._in_widget(s, pg)]
+            self._scenes_state = {"state": self.saveState(3), "acts": [(a, a.shortcutContext()) for a in acts],
+                                  "shorts": shorts}
+            for key, d in self.docks.items():
+                if key != "guide" and not d.isFloating():
+                    d.hide()
+            for a in acts:
+                a.setShortcutContext(Qt.WidgetShortcut)
+            for s in shorts:
+                s.setEnabled(False)
+        self.central_stack.setCurrentWidget(pg)
+        pg.show()
+        pg.setFocus()
+        for k, b in self.page_buttons.items():
+            b.setChecked(k == "scenes")
+        return pg
+
+    def put_template(self, archivo: str, t: float):
+        """📚 Pone una animación guardada en el segundo t (desde el clic derecho de una palabra clave)."""
+        from ..core import scenes as SC
+        tp = next((x for x in SC.plantillas() if x.get("archivo") == archivo), None)
+        if tp is None:
+            self.statusBar().showMessage("Esa animación ya no está en «📚 Mis animaciones».", 6000)
+            return None
+        esc, faltan = SC.desde_plantilla(tp, t, self.ctrl.media_for_path)
+        if not esc["actores"] and not esc["sonidos"]:
+            self.statusBar().showMessage("No se encuentran los archivos de esa animación.", 8000)
+            return None
+        ids = self.ctrl.apply_scene(esc)
+        if ids:
+            self.timeline.set_selection(ids)
+            msg = f"🎬 «{tp.get('nombre')}» puesta en {t:.1f} s."
+            if faltan:
+                msg += f" Faltan {len(faltan)} archivos (no se pusieron)."
+            self.statusBar().showMessage(msg, 8000)
+        return ids
+
+    @staticmethod
+    def _in_widget(obj, w) -> bool:
+        o = obj
+        while o is not None:
+            if o is w:
+                return True
+            o = o.parent()
+        return False
+
+    def _leave_scenes_page(self, back_to: str = "edit"):
+        """Salir de 🎬 Escenas: el editor vuelve tal cual (paneles, atajos). La página se cierra (lo aplicado ya está
+        en el proyecto)."""
+        st, self._scenes_state = getattr(self, "_scenes_state", None), None
+        pg = getattr(self, "_scenes_widget", None)
+        resaltar = getattr(pg, "resaltar", None) if pg is not None else None
+        self.central_stack.setCurrentWidget(self.preview)
+        if pg is not None:
+            self.central_stack.removeWidget(pg)
+            pg.deleteLater()
+            self._scenes_widget = None
+        if st is not None:
+            self.restoreState(st["state"], 3)
+            for a, ctx in st["acts"]:
+                try:
+                    a.setShortcutContext(ctx)
+                except RuntimeError:
+                    pass
+            for s in st["shorts"]:
+                try:
+                    s.setEnabled(True)
+                except RuntimeError:
+                    pass
+        for k, b in self.page_buttons.items():
+            b.setChecked(k == back_to)
+        if resaltar:                                   # 🎬 lo que se acaba de aplicar: el editor va ahí y lo resalta
+            ids, t = resaltar
+            self.engine.user_seek(t)
+            self.timeline.set_playhead(t, follow=True)
+            self.timeline.flash_clips(ids)
+
     def _in_thumb(self, obj) -> bool:
         ed = getattr(self, "_thumb_editor", None)
         o = obj
@@ -2816,9 +3063,54 @@ class MainWindow(QMainWindow):
             return self.save()
         return r == QMessageBox.Discard
 
+    def limpiar_interfaz(self):
+        """Proyecto nuevo o reinicio: ningún panel enseña nada del proyecto anterior (Medios, palabras clave,
+        internet, Momentos, edit musical, carpetas)."""
+        for w, m in ((self.library, "limpiar"), (self.clips, "limpiar"), (self.moments, "limpiar")):
+            try:
+                getattr(w, m)()
+            except Exception:  # noqa: BLE001 - un panel no impide limpiar los demás
+                pass
+        self._fill_edit_panel()
+        try:
+            self.ai_panel.plans = []
+            self.ai_panel.plan_tree.clear()
+            self.ai_panel.director_text.clear()
+            self.transcript.search.clear()
+        except Exception:  # noqa: BLE001
+            pass
+        dock = getattr(self, "kw_folders", None)
+        if dock is not None:
+            dock.term, dock._firma_vista = "", None
+            if dock.isVisible():
+                dock._mostrar()
+
+    def _fill_edit_panel(self):
+        ep = getattr(self, "edit_panel", None)
+        if ep is None or getattr(ep, "job", None) is not None:      # (con un edit creándose no se toca)
+            return
+        try:
+            ep._fill(ep.song.currentData())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _antes_de_vaciar(self) -> bool:
+        """Reinicio / proyecto nuevo: no con una tarea en marcha; la página Miniatura se cierra antes."""
+        busy = self.workspaces._busy()
+        if busy:
+            self.statusBar().showMessage(f"Espera a que termine (está {busy}) antes de empezar de cero.", 7000)
+            return False
+        if getattr(self, "_thumb_page", None) is not None and getattr(self, "_thumb_editor", None):
+            self._thumb_editor.close()            # (la miniatura se guarda en el proyecto viejo, no en el nuevo)
+        return True
+
     def new_project(self):
         """Ctrl+N: proyecto nuevo en la pestaña actual (🎬 Video · 🎵 Edits · 📱 Shorts)."""
-        self.workspaces.new_here()
+        if not self._antes_de_vaciar():
+            return
+        if self.workspaces.new_here() is False:       # (canceló: el proyecto sigue y no se limpia nada)
+            return
+        self.limpiar_interfaz()
         if self.workspaces.current == "edit":
             QTimer.singleShot(0, self.open_edit_maker)
 
@@ -2882,6 +3174,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"🚀 Cola: exportando «{q.current['name']}» "
                                          f"{q.current['progress'] * 100:.0f} %", 3000)
 
+    def _bienvenida_si_toca(self):
+        from . import bienvenida
+        if bienvenida.toca_mostrar() and self.isVisible():
+            self.open_bienvenida()
+
+    def open_bienvenida(self):
+        """👋 Bienvenida y componentes (ui/bienvenida.py)."""
+        from . import bienvenida
+        self._bienvenida_dlg = bienvenida.abrir(self)
+
     def open_motor(self):
         """◈ Cómo está el motor de IA (PyTorch en la tarjeta NVIDIA o AMD, SAM 2.1, Demucs) e instalar / reparar."""
         from PySide6.QtWidgets import QApplication as _QA
@@ -2911,17 +3213,30 @@ class MainWindow(QMainWindow):
         b_dir = box.addButton("Abrir la carpeta", QMessageBox.ActionRole)
         box.addButton("Cerrar", QMessageBox.RejectRole)
         box.exec()
-        if box.clickedButton() is b_inst:
-            motor_ia.open_installer()
-            self.statusBar().showMessage("◈ Se abrió el instalador del motor de IA en otra ventana.", 8000)
+        if box.clickedButton() is b_inst:                      # (una ventana de Reclaimer, sin consolas)
+            self.abrir_motor_instalador(reparar=st["installed"])
         elif box.clickedButton() is b_dir:
-            os.startfile(str(motor_ia.ROOT))    # noqa: S606 - abrir la carpeta en el Explorador
+            os.startfile(str(motor_ia.DATOS_MOTOR if motor_ia.DATOS_MOTOR.is_dir() else motor_ia.ROOT))    # noqa: S606
+
+    def abrir_motor_instalador(self, reparar: bool = False):
+        """◈ La ventana de instalar el motor (una sola: si ya está abierta, se trae delante)."""
+        from . import motor_install_dialog
+        d = getattr(self, "_motor_dlg", None)
+        try:
+            if d is not None and d.isVisible():
+                d.raise_()
+                d.activateWindow()
+                return d
+        except RuntimeError:
+            pass
+        self._motor_dlg = motor_install_dialog.abrir(self, reparar=reparar)
+        return self._motor_dlg
 
     def _check_motor_soon(self):
         """Al arrancar (sin prisa): si hay motor y tarjeta NVIDIA o AMD pero la IA no la ve, se avisa."""
         import threading
         from ..core import motor_ia
-        if not motor_ia.PYTHON.exists() or os.environ.get("EDITORIA_DATOS"):
+        if not motor_ia.PYTHON.exists() or os.environ.get("EDITORIA_DATOS"):    # (las pruebas no lo revisan)
             return
 
         def work():
@@ -3042,6 +3357,8 @@ class MainWindow(QMainWindow):
 
     def new_from_template(self, path: str):
         """Proyecto nuevo con la configuración de una plantilla (en la pestaña de su tipo). Sin clips ni medios."""
+        if not self._antes_de_vaciar():
+            return
         from ..core import project_templates as pt
         try:
             tpl = pt.load(path)
@@ -3061,6 +3378,7 @@ class MainWindow(QMainWindow):
         if self.ctrl._edit(f"Plantilla «{name}»", lambda p: pt.apply(p, tpl)) is None:
             self.statusBar().showMessage("No se pudo aplicar la plantilla.", 6000)
             return
+        self.limpiar_interfaz()
         self.statusBar().showMessage(f"📋 Proyecto nuevo desde la plantilla «{name}».", 6000)
 
     def save_as_template(self):
@@ -3147,9 +3465,13 @@ class MainWindow(QMainWindow):
     def reset_project(self):
         """🔄 Reinicio de proyecto: esta pestaña vuelve a estar vacía (línea de tiempo, Medios, subtítulos, marcadores).
         Antes se guarda una copia de seguridad de cómo estaba; el archivo .eia (si tiene) y tus videos no se tocan."""
+        if not self._antes_de_vaciar():
+            return
         p = self.ctrl.project
         if not p.clips and not p.media:
-            self.statusBar().showMessage("El proyecto ya está vacío.", 5000)
+            self.workspaces.reset_here()              # (aunque ya esté vacío: marcadores, nombre, ajustes… de cero)
+            self.limpiar_interfaz()
+            self.statusBar().showMessage("🔄 Proyecto vacío: no queda nada a la vista.", 5000)
             return
         r = QMessageBox.question(
             self, "🔄 Reinicio de proyecto",
@@ -3161,6 +3483,7 @@ class MainWindow(QMainWindow):
         if r != QMessageBox.Yes:
             return
         backup = self.workspaces.reset_here()
+        self.limpiar_interfaz()
         self.statusBar().showMessage("🔄 Proyecto vacío. Copia de lo anterior: " + (backup or "—"), 12000)
 
     def _maybe_align(self, media_id: str):
@@ -3347,6 +3670,108 @@ class MainWindow(QMainWindow):
         if not mid:
             return
         ed.open(mid, list(indices), clicked, rect)
+
+    def export_xml(self, path: str | None = None):
+        """⇄ La línea de tiempo en XML (xmeml 5) para DaVinci Resolve / Premiere / Final Cut 7."""
+        import os as _os
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from ..export.xml_export import export_xml
+        if not self.ctrl.project.clips:
+            self.ctrl.message.emit("La línea de tiempo está vacía: no hay nada que llevar.")
+            return None
+        if path is None:
+            base = _os.path.splitext(self.ctrl.path)[0] if self.ctrl.path else (self.ctrl.project.name or "Reclaimer")
+            path, _ = QFileDialog.getSaveFileName(self, "Llevar a DaVinci Resolve / Premiere", base + ".xml",
+                                                  "XML de línea de tiempo (*.xml)")
+            if not path:
+                return None
+        try:
+            res = export_xml(self.ctrl.project, path)
+        except OSError as ex:
+            QMessageBox.warning(self, "XML", f"No se pudo guardar: {ex}")
+            return None
+        msg = f"⇄ Guardado {_os.path.basename(path)} ({res['clips']} clips): en DaVinci, Archivo → Importar → "               "Línea de tiempo; en Premiere, Archivo → Importar."
+        self.ctrl.message.emit(msg + (" Ojo: " + " ".join(res["notes"]) if res["notes"] else ""))
+        return res
+
+    def _titles_menu(self, parent):
+        """🅣 El menú de plantillas de título (se rehace al abrirlo: así salen las ★ que acabas de guardar)."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(parent)
+
+        def fill():
+            from ..core import title_templates as TT
+            menu.clear()
+            mine = []
+            for key, name in TT.all_templates():
+                if key.startswith("★") and not mine:
+                    menu.addSeparator()
+                if key.startswith("★"):
+                    mine.append(key)
+                menu.addAction(name, lambda k=key: self.ctrl.add_text_template(k, self.engine.time))
+            if mine:
+                dm = menu.addMenu("🗑 Borrar una plantilla mía")
+                for key in mine:
+                    dm.addAction(key[1:], lambda k=key: TT.delete_user(k))
+        menu.aboutToShow.connect(fill)
+        fill()
+        return menu
+
+    def _tema_menu(self, parent):
+        """🎨 Ventana → Tema: gris (bordes visibles) u oscuro (el de antes). Se aplica al volver a abrir Reclaimer."""
+        from PySide6.QtGui import QActionGroup
+        from PySide6.QtCore import QSettings
+        from . import tema as TM
+        sm = parent.addMenu("🎨 Tema")
+        sm.setToolTipsVisible(True)
+        grupo = QActionGroup(sm)
+        for t in TM.TEMAS:
+            a = sm.addAction(TM.NOMBRES[t])
+            a.setCheckable(True)
+            a.setChecked(t == TM.nombre())
+            a.setToolTip("Gris: fondos más claros y bordes marcados para ver dónde empieza y termina cada panel, "
+                         "botón y pista. Oscuro: el de antes, estilo DaVinci. Se aplica al volver a abrir Reclaimer.")
+            grupo.addAction(a)
+
+            def elegir(_on=False, tt=t):
+                QSettings("EditorIA", "EditorIA").setValue(TM.KEY, tt)
+                self.statusBar().showMessage(f"🎨 Tema: {TM.NOMBRES[tt]}. Se aplica al volver a abrir Reclaimer.",
+                                             8000)
+            a.triggered.connect(elegir)
+        self.tema_menu = sm
+        return sm
+
+    def _ui_scale_menu(self, parent):
+        """🔍 Ventana → Escala de la interfaz (se aplica al volver a abrir Reclaimer)."""
+        from PySide6.QtGui import QActionGroup
+        from PySide6.QtCore import QSettings
+        from . import ui_scale as US
+        sm = parent.addMenu("🔍 Escala de la interfaz")
+        sm.setToolTipsVisible(True)
+        grupo = QActionGroup(sm)
+        actual = US.setting()
+        for op in US.OPCIONES:
+            a = sm.addAction(US.NOMBRES[op])
+            a.setCheckable(True)
+            a.setChecked(op == actual)
+            a.setToolTip("Agranda TODO (botones, iconos, letras y línea de tiempo), como la escala de Windows pero "
+                         "solo en Reclaimer. Automática: en pantallas 2K con Windows al 100 % se ve al 125 %; en 4K, "
+                         "al 150 %. Se aplica al volver a abrir Reclaimer.")
+            grupo.addAction(a)
+
+            def elegir(_on=False, o=op):
+                QSettings("EditorIA", "EditorIA").setValue(US.KEY, o)
+                self.statusBar().showMessage(f"🔍 Escala de la interfaz: {US.NOMBRES[o]}. Se aplica al volver a abrir "
+                                             "Reclaimer.", 8000)
+            a.triggered.connect(elegir)
+        self.ui_scale_menu = sm
+        return sm
+
+    def _alt_t(self):
+        """Alt+T: disolver en el corte (⏱ con duración automática si está puesta en el panel Efectos)."""
+        from ..core import transitions as TR
+        ids = self.ctrl.transition_targets(sorted(self.timeline.selected), self.engine.time)
+        self.ctrl.set_transition(ids, "fade", None if TR.auto_on() else 0.5)
 
     def closeEvent(self, e):
         win = getattr(self, "_second", None)

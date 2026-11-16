@@ -17,6 +17,10 @@ class ProxyManager(QObject):
 
     def __init__(self, ctrl, parent=None):
         super().__init__(parent)
+        try:
+            proxies.clean_leftovers()        # (copias a medias de la última vez: fuera)
+        except Exception:  # noqa: BLE001
+            pass
         self.ctrl = ctrl
         self.settings = QSettings("EditorIA", "EditorIA")
         self.job: BackgroundJob | None = None

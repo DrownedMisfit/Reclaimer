@@ -249,6 +249,7 @@ class LibraryPanel(QWidget):
     keywords_requested = Signal(list)          # 🔑 buscar palabras clave en estos archivos
     obs_marks_requested = Signal(list)         # 🔖 leer las marcas de OBS (capítulos) de estos archivos
     add_moment_requested = Signal(str, float)
+    anim_requested = Signal(str)                # 🎞 «Animar imagen» con este medio
     example_requested = Signal(str, object)     # 🎯 usar como ejemplo de lo que busco (media_id, segundo o None)  # media id + mejor momento (búsqueda IA)
 
     def __init__(self, ctrl, analyzer, parent=None):
@@ -353,7 +354,10 @@ class LibraryPanel(QWidget):
         self._rebuild_timer.setInterval(150)
         self._rebuild_timer.timeout.connect(self._rebuild)
         ctrl.media_changed.connect(self._rebuild_timer.start)
+        self._kw_recientes: set[str] = set()       # palabras clave creadas en este proyecto (se ven aunque no las digas)
         ctrl.project_replaced.connect(self._clear_results)
+        if getattr(ctrl, "transcript_changed", None) is not None:       # (las palabras dichas dependen del texto)
+            ctrl.transcript_changed.connect(lambda _m=None: self._rebuild_timer.start(1200))
         analyzer.status_changed.connect(lambda _t: self._update_footer())
         analyzer.busy_changed.connect(lambda busy: self.btn_analyze.setText("⏹" if busy else "◈"))
         self._on_mode(False)
@@ -511,12 +515,21 @@ class LibraryPanel(QWidget):
     def _build_keywords(self, bold: QFont, abierta: bool = True):
         """«🔑 Palabras clave»: una palabra por nodo (su carpeta propia + enlaces del PC) y, dentro, sus archivos.
         Los archivos que vienen de una carpeta enlazada llevan 🔗. Nada se copia ni se importa al pintar."""
+        pr = self.ctrl.project
+        if not pr.media and not pr.transcripts and not getattr(self, "_kw_recientes", None):
+            self._kw_items_ruta, self._kw_sin_mini = {}, []
+            return                                   # (proyecto vacío: ni se leen las carpetas)
         try:
             folders = KF.list_folders(_kw_root())
         except Exception:  # noqa: BLE001 - una carpeta rara no debe romper Medios
             folders = []
         media = self.ctrl.project.media
         by_path = {os.path.normcase(os.path.abspath(m.path)): m for m in media.values()}
+        total = len(folders)
+        folders = self._kw_del_proyecto(folders, by_path)      # (proyecto nuevo o vacío: ninguna)
+        if not folders:
+            self._kw_items_ruta, self._kw_sin_mini = {}, []
+            return
         self._kw_sin_mini: list[str] = []
         self._kw_items_ruta: dict[str, QTreeWidgetItem] = {}
         self._kw_construyendo = True              # (los «expandir» de aquí no son clics del usuario)
@@ -524,8 +537,9 @@ class LibraryPanel(QWidget):
             self._kw_iconos: dict[str, QIcon] = {}          # ruta del archivo → su miniatura (no se relee al repintar)
             self._kw_mini_fallidas: set[str] = set()         # sin miniatura posible (video roto): no se reintenta
         sec = QTreeWidgetItem([f"🔑 Palabras clave  ({len(folders)})"])
-        sec.setToolTip(0, "Tus carpetas de palabras clave: están en tu disco y valen para todos tus proyectos (por eso "
-                          "no se borran al reiniciar el proyecto). Para borrar lo descargado: pestaña 🗂 Carpetas.")
+        sec.setToolTip(0, f"Las palabras clave de este proyecto: las que dices en la narración o cuyo material ya usas "
+                          f"({len(folders)} de tus {total} carpetas). Las carpetas están en tu disco; las demás no se "
+                          "enseñan aquí.")
         sec.setData(0, ROLE_CATEGORY, KW_SECTION)
         sec.setFont(0, bold)
         sec.setFlags(Qt.ItemIsEnabled)
@@ -645,6 +659,37 @@ class LibraryPanel(QWidget):
         self._kw_mini_job, self._kw_mini_rutas = job, rutas
         job.start()
 
+    def _kw_del_proyecto(self, folders: list[dict], by_path: dict) -> list[dict]:
+        """Las carpetas que tienen que ver con este proyecto: las palabras que dices en la narración, las que tienen
+        material ya en el proyecto y las que creaste o llenaste en este proyecto. Proyecto vacío: ninguna."""
+        p = self.ctrl.project
+        recientes_t = getattr(self, "_kw_recientes", set())
+        if not folders or (not p.media and not p.transcripts and not recientes_t):
+            return []
+        firma = (getattr(self.ctrl, "proj_seq", id(p)),
+                 tuple((mid, id(tr), len(tr.get("words") or [])) for mid, tr in p.transcripts.items()),
+                 tuple(f["label"] for f in folders), repr(KG.load().get("no")))
+        if getattr(self, "_kw_dichas_memo", (None,))[0] != firma:
+            dichas: set[str] = set()
+            if p.transcripts:
+                try:
+                    for m in find_mentions(p, extra_terms=KF.terms(folders), glossary=KG.load()):
+                        car = KF.match(m["term"], folders)
+                        if car:
+                            dichas.add(os.path.normcase(car["path"]))
+                except Exception:  # noqa: BLE001 - sin menciones: solo lo usado
+                    pass
+            self._kw_dichas_memo = (firma, dichas)
+        dichas = self._kw_dichas_memo[1]
+        out = []
+        for f in folders:
+            usada = any(os.path.normcase(os.path.abspath(r)) in by_path for r in f["files"])
+            reciente = any(KF.match(x.strip(), [f]) for t in recientes_t for x in t.split(",") if x.strip())
+            # (con alias o plural: «Fortnite, fortnait»)
+            if usada or os.path.normcase(f["path"]) in dichas or reciente:
+                out.append(f)
+        return out
+
     def _kw_file_item(self, path: str, term: str, linked: bool, by_path: dict, cargar: bool = True) -> QTreeWidgetItem:
         m = by_path.get(os.path.normcase(os.path.abspath(path)))
         if m is not None:
@@ -743,9 +788,32 @@ class LibraryPanel(QWidget):
         self._apply_filter()
 
     def _clear_results(self):
+        self._kw_dichas_memo = (None, set())
+        tab = getattr(getattr(self.window(), "workspaces", None), "current", "")       # (las recién creadas, por
+        por = self.__dict__.setdefault("_kw_recientes_por", {})                        #  pestaña)
+        anterior = self.__dict__.get("_kw_tab")
+        if anterior is not None:
+            por[anterior] = self._kw_recientes
+        self._kw_tab = tab
+        self._kw_recientes = por.get(tab, set())
         if self._results is not None:
             self._results = None
             self._rebuild()
+
+    def limpiar(self):
+        """Proyecto nuevo o reinicio: nada de lo anterior a la vista (búsqueda incluida)."""
+        if self.search.text():
+            self.search.blockSignals(True)
+            self.search.clear()
+            self.search.blockSignals(False)
+        self._kw_recientes = set()
+        self.__dict__.get("_kw_recientes_por", {}).pop(self.__dict__.get("_kw_tab"), None)
+        job = getattr(self, "_kw_mini_job", None)
+        if job is not None:
+            job.cancel()
+            self._kw_mini_job = self._kw_mini_rutas = None
+        self._clear_results()
+        self._rebuild()
 
     def _on_search_enter(self):
         if self.btn_ai_search.isChecked():
@@ -836,6 +904,10 @@ class LibraryPanel(QWidget):
         menu.addAction("Añadir a la timeline (en el cabezal)", lambda: self.add_requested.emit(ids))
         self._keyword_actions(menu, lambda: ids)
         m0 = self.ctrl.project.media.get(ids[0])
+        if len(ids) == 1 and m0 is not None and m0.kind == "image" and ids[0] not in self.ctrl.missing:
+            a = menu.addAction("🎞 Animar imagen…", lambda: self.anim_requested.emit(ids[0]))
+            a.setToolTip("Ponerla con una animación sencilla (disparar, morir, entrar deslizando…): eliges dónde va "
+                         "con una vista previa, cuánto dura y si va en el cabezal o donde dices una palabra clave.")
         if len(ids) == 1 and m0 is not None and m0.kind != "audio":
             menu.addAction("🎯 Usar como ejemplo de lo que busco (aprende con ✓/✗)…",
                            lambda: self.example_requested.emit(ids[0], None if moment is None else float(moment)))
@@ -1195,6 +1267,7 @@ class LibraryPanel(QWidget):
     def _kw_create(self, term: str) -> bool:
         try:
             KF.create_folder(_kw_root(), term)
+            self._kw_recientes.add(term)                 # (se ve en Medios aunque aún no la digas)
         except OSError as exc:
             QMessageBox.warning(self, "Palabra clave", f"No pude crear la carpeta: {exc}")
             return False
@@ -1236,6 +1309,7 @@ class LibraryPanel(QWidget):
             self._kw_link(term, carpeta)
 
     def _kw_link(self, term: str, carpeta: str) -> bool:
+        self._kw_recientes.add(term)
         try:
             KF.link_folder(_kw_root(), term, carpeta)
         except ValueError as exc:
@@ -1251,6 +1325,7 @@ class LibraryPanel(QWidget):
 
     def _kw_link_files(self, term: str, rutas: list[str]) -> bool:
         """Enlaza archivos del PC a la palabra (no los copia). Devuelve si enlazó alguno."""
+        self._kw_recientes.add(term)
         root = _kw_root()
         enlazados, errores = 0, []
         for r in rutas:
@@ -1289,6 +1364,7 @@ class LibraryPanel(QWidget):
     def _kw_drop(self, rutas: list, term: str):
         """Soltar sobre una palabra: las CARPETAS se enlazan (no se copian); los ARCHIVOS se enlazan o se copian
         (pregunta una vez, o lo que se recordó)."""
+        self._kw_recientes.add(term)
         root = _kw_root()
         enlazadas, copiados, errores = 0, [], []
         for c in (r for r in rutas if os.path.isdir(r)):

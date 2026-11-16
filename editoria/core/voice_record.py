@@ -14,13 +14,13 @@ import wave
 
 import numpy as np
 
-from .paths import PROGRAM_DIR
+from .paths import user_dir
 
 FOLDER = "Grabaciones de voz"
 
 
 def takes_dir(project_path: str | None) -> str:
-    base = os.path.dirname(project_path) if project_path else str(PROGRAM_DIR)
+    base = os.path.dirname(project_path) if project_path else str(user_dir())
     d = os.path.join(base, FOLDER)
     os.makedirs(d, exist_ok=True)
     return d

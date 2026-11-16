@@ -262,10 +262,12 @@ class InspectorPanel(QWidget):
         for name in transform.LAYOUTS:
             self.layout_combo.addItem(name)
         self.layout_combo.currentTextChanged.connect(self._on_layout)
+        self.curve_zoom = self._curve_combo("zoom")
         fl.addRow("Zoom", self.zoom)
         fl.addRow("Centro", center)
         fl.addRow(kb)
         fl.addRow(self.kf_label, self.btn_reset_zoom)
+        fl.addRow("Curva", self.curve_zoom)
         lay_row = QHBoxLayout()
         lay_row.addWidget(self.layout_combo, 1)
         self.btn_unstretch = QPushButton("Sin deformar")
@@ -298,10 +300,12 @@ class InspectorPanel(QWidget):
             lambda: self._clip() and self.ctrl.remove_layout_key(self._clip().id, self._now()))
         self.btn_clear_lk.clicked.connect(
             lambda: self._clip() and self.ctrl.clear_layout_animation(self._clip().id, self._now()))
+        self.curve_lk = self._curve_combo("layout")
         self.lk_label = QLabel()
         self.lk_label.setObjectName("dim")
         fl.addRow("Posición y tamaño", lk)
         fl.addRow(self.lk_label, self.btn_clear_lk)
+        fl.addRow("Curva", self.curve_lk)
         self.btn_track = QPushButton("🎯 Seguir personaje u objeto…")
         self.btn_track.setToolTip("Marca algo en el fotograma y la IA crea un zoom que lo sigue.")
         self.btn_track.clicked.connect(lambda: self._ids and self.track_requested.emit(self._ids[0]))
@@ -398,6 +402,11 @@ class InspectorPanel(QWidget):
         lay.setContentsMargins(0, 6, 0, 0)
         self.color_box = QGroupBox("Corrección de color")
         form = QFormLayout(self.color_box)
+        from .color_wheels import wheel_box
+        wbox, self.color_wheels = wheel_box(self.color_box)      # 🎨 Lift / Gamma / Gain, como en Resolve
+        for k_, wh in self.color_wheels.items():
+            wh.changed.connect(lambda v, kk=k_: self._on_color_wheel(kk, v))
+        form.addRow(wbox)
         self.color_sliders: dict[str, QSlider] = {}
         self.color_values: dict[str, QLabel] = {}
         for k in C.KEYS:
@@ -492,6 +501,17 @@ class InspectorPanel(QWidget):
         from ..core import color as C
         self.ctrl.set_color(self._ids, col, "Color: " + C.LABELS[key].split(" (")[0].lower())
 
+    def _on_color_wheel(self, key: str, v: list):
+        if self._loading or not self._ids:
+            return
+        from ..core import color as C
+        col = self._color_now()
+        if max(abs(float(x)) for x in v) < 1e-4:
+            col.pop(key, None)
+        else:
+            col[key] = [round(float(x), 3) for x in v]
+        self.ctrl.set_color(self._ids, col, "Color: rueda de " + C.WHEEL_LABELS[key].lower())
+
     def _set_color_field(self, **kv):
         if not self._ids:
             return
@@ -534,6 +554,8 @@ class InspectorPanel(QWidget):
             v = int(round(float(col.get(k, 0) or 0) * 100))
             sl.setValue(v)
             self.color_values[k].setText(f"{v / 100:+.2f}" if v else "0")
+        for k, wh in self.color_wheels.items():
+            wh.set_values(*C.wheel(col, k))
         lut = col.get("lut")
         self.lut_name.setText(os.path.basename(lut) if lut else "sin LUT")
         self.lut_name.setToolTip(lut or "")
@@ -1080,6 +1102,19 @@ class InspectorPanel(QWidget):
         rr.addWidget(b_mine)
         rr.addWidget(b_fac)
         lay.addLayout(rr)
+        tr_ = QHBoxLayout()                      # 🅣 plantillas de título
+        self.text_template = QComboBox()
+        self.text_template.setToolTip("Pone en este texto el estilo de una plantilla (lo que has escrito se queda).\n"
+                                      "Las ★ son las tuyas.")
+        self.text_template.activated.connect(self._apply_text_template)
+        self.btn_save_template = QPushButton("★ Guardar como plantilla")
+        self.btn_save_template.setToolTip("Guarda el estilo de este texto (fuente, colores, caja, posición, fundido) "
+                                          "como plantilla tuya: sale con ★ en el botón 🅣 y aquí.")
+        self.btn_save_template.clicked.connect(lambda: self.save_text_template())
+        tr_.addWidget(self.text_template, 1)
+        tr_.addWidget(self.btn_save_template)
+        lay.addLayout(tr_)
+        self._fill_templates()
         lay.addStretch()
         return outer
 
@@ -1090,6 +1125,41 @@ class InspectorPanel(QWidget):
     def _cur_text(self) -> dict:
         c = self.ctrl.project.clips.get(self._ids[0]) if len(self._ids) == 1 else None
         return dict(c.text) if c is not None and c.text else {}
+
+    def _fill_templates(self):
+        from ..core import title_templates as TT
+        self.text_template.blockSignals(True)
+        self.text_template.clear()
+        self.text_template.addItem("🅣 Plantilla…", None)
+        for key, name in TT.all_templates():
+            self.text_template.addItem(name, key)
+        self.text_template.setCurrentIndex(0)
+        self.text_template.blockSignals(False)
+
+    def _apply_text_template(self, i: int):
+        key = self.text_template.itemData(i)
+        self.text_template.setCurrentIndex(0)
+        if key and self._ids:
+            self.ctrl.apply_text_template(list(self._ids), key)
+
+    def save_text_template(self, name: str | None = None):
+        from PySide6.QtWidgets import QInputDialog
+        from ..core import title_templates as TT
+        c = self.ctrl.project.clips.get(self._ids[0]) if len(self._ids) == 1 else None
+        if c is None or c.text is None:
+            return None
+        if name is None:
+            name, ok = QInputDialog.getText(self, "Guardar como plantilla", "Nombre de la plantilla:")
+            if not ok:
+                return None
+        try:
+            key = TT.save_user(name, c.text, c.duration)
+        except ValueError as ex:
+            self.ctrl.message.emit(str(ex))
+            return None
+        self._fill_templates()
+        self.ctrl.message.emit(f"★ Plantilla «{key[1:]}» guardada: está en el botón 🅣 y en «Plantilla…».")
+        return key
 
     def _apply_my_text_style(self):
         from ..core.title_render import my_style
@@ -1543,6 +1613,42 @@ class InspectorPanel(QWidget):
             self.ctrl.set_clip_props(self._targets(), "Bloquear clip" if on else "Desbloquear clip", locked=on)
 
     # ------------------------------------------------------------ encuadre
+    # ------------------------------------------------------------ 〰 curvas de movimiento
+    def _curve_combo(self, which: str) -> QComboBox:
+        cb = QComboBox()
+        for kind, name in transform.CURVES.items():
+            cb.addItem(name, kind)
+        cb.setToolTip("〰 Cómo se mueve entre la clave anterior al cabezal y la siguiente: suave, acelerando, "
+                      "frenando al llegar, a velocidad fija, con rebote o saltando de golpe. Se ve igual al "
+                      "exportar. Ctrl+Z lo deshace. (El zoom nunca baja de 100 %: al volver a 100 % no rebota.)")
+        cb.setEnabled(False)
+        cb.activated.connect(lambda _i, w=which, b=cb: self._set_curve(w, b.currentData()))
+        return cb
+
+    def _layout_s(self, c) -> float:
+        m = self.ctrl.project.media_of(c)
+        local = self._now() - c.start
+        return local if (m is not None and m.kind == "image") else self.ctrl.clip_source_time(c.id, self._now())
+
+    def _show_curve(self, cb: QComboBox, kf: list, s: float):
+        cb.blockSignals(True)
+        cb.setEnabled(len(kf) >= 2)
+        kind = None
+        if len(kf) >= 2:
+            pts = sorted(kf, key=lambda k: k["t"])
+            prev = [k for k in pts[:-1] if k["t"] <= s + 1e-3]
+            kind = (prev[-1] if prev else pts[0]).get("i")
+        i = cb.findData(kind)
+        cb.setCurrentIndex(max(0, i))
+        cb.blockSignals(False)
+
+    def _set_curve(self, which: str, kind):
+        c = self._clip()
+        if c is None or self._loading:
+            return
+        s = self.ctrl.clip_source_time(c.id, self._now()) if which == "zoom" else self._layout_s(c)
+        self.ctrl.set_kf_curve(c.id, which, s, kind)
+
     def _clip(self):
         if len(self._ids) != 1:
             return None
@@ -1583,6 +1689,8 @@ class InspectorPanel(QWidget):
             self.btn_prev_lk.setEnabled(bool(times))
             self.btn_next_lk.setEnabled(bool(times))
             self.btn_clear_lk.setEnabled(bool(nl))
+            self._show_curve(self.curve_zoom, c.zoom_kf, src)
+            self._show_curve(self.curve_lk, c.layout_kf or [], self._layout_s(c))
         finally:
             self._loading = was
 

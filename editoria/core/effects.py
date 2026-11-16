@@ -123,11 +123,19 @@ def rgb_px(v: float, w: int) -> int:
     return max(1, int(round(w * 0.004 * (0.5 + 1.5 * v))))
 
 
+def _tt(fx: dict, var: str = "t") -> str:
+    """El tiempo del clip en una expresión de FFmpeg. Con «_t0» (un trozo que empieza a mitad del clip: el pre-render
+    del visor) se le suma, así lo que va «al empezar el clip» o con su propio ritmo sigue donde tocaba."""
+    t0 = float(fx.get("_t0", 0) or 0)
+    return f"({var}+{t0:.4f})" if t0 > 0 else var
+
+
 def look_filters(fx: dict | None, w: int = 1920, h: int = 1080) -> list[str]:
     """Filtros de FFmpeg de los efectos de imagen."""
     fx = fx or {}
     out = []
     v = lambda k: float(fx.get(k, 0) or 0)   # noqa: E731
+    tt, TT = _tt(fx), _tt(fx, "T")
     if v("motionblur") > 0:      # estela: mezcla con los fotogramas anteriores
         nf = 2 + int(round(3 * min(1.0, v("motionblur"))))
         out.append(f"tmix=frames={nf}")
@@ -156,9 +164,9 @@ def look_filters(fx: dict | None, w: int = 1920, h: int = 1080) -> list[str]:
         out.append(f"vignette=angle={0.25 + 0.6 * v('vignette'):.2f}:dither=0")
     if v("glitch") > 0:
         d = v("glitch")
-        out.append(f"rgbashift=rh=-10:bh=10:rv=3:bv=-3:enable='lt(t,{d:.3f})'")
+        out.append(f"rgbashift=rh=-10:bh=10:rv=3:bv=-3:enable='lt({tt},{d:.3f})'")
     if v("invert") > 0:
-        out.append(f"negate=enable='lt(t,{v('invert'):.3f})'")
+        out.append(f"negate=enable='lt({tt},{v('invert'):.3f})'")
     if v("rgbsplit") > 0:
         px = rgb_px(min(1.0, v("rgbsplit")), w)
         out.append(f"rgbashift=rh=-{px}:bh={px}")
@@ -170,10 +178,10 @@ def look_filters(fx: dict | None, w: int = 1920, h: int = 1080) -> list[str]:
                 f"drawgrid=w=iw:h={max(3, h // 270)}:t=1:c=black@{0.12 + 0.2 * q:.2f}"]
     if v("flicker") > 0:          # la luz parpadea (sube y baja a saltos)
         a = 0.16 * min(1.0, v("flicker"))
-        out.append(f"eq=brightness='{a:.3f}*(2*lt(mod(t*{FLICKER_HZ * 2:.1f}\\,2)\\,1)-1)':eval=frame")
+        out.append(f"eq=brightness='{a:.3f}*(2*lt(mod({tt}*{FLICKER_HZ * 2:.1f}\\,2)\\,1)-1)':eval=frame")
     if v("lightleak") > 0:        # una mancha de luz cálida que cruza despacio
         a = min(1.0, v("lightleak"))
-        blob = f"{255 * a:.1f}*exp(-(pow(X-W*(0.15+0.7*(0.5+0.5*sin(T*0.6))),2)+pow(Y-H*0.35,2))/(W*W*0.09))"
+        blob = f"{255 * a:.1f}*exp(-(pow(X-W*(0.15+0.7*(0.5+0.5*sin({TT}*0.6))),2)+pow(Y-H*0.35,2))/(W*W*0.09))"
         out += ["format=rgb24", f"geq=r='min(255,r(X,Y)+{blob})':g='min(255,g(X,Y)+0.55*{blob})'"
                                 f":b='min(255,b(X,Y)+0.15*{blob})'"]
     if v("letterbox") > 0:
@@ -237,11 +245,12 @@ def ffmpeg_filters(fx: dict | None, dur: float, w: int, h: int) -> list[str]:
     if not is_active(fx):
         return []
     out = look_filters(fx, w, h)
+    tt = _tt(fx)
     r = float(fx.get("roll", 0) or 0)
     if r > 0:                    # giro de cámara: ampliar, girar y recortar (sin esquinas negras)
         k = 1.22
         sw, sh = 2 * round(w * k / 2), 2 * round(h * k / 2)
-        out += [f"scale={sw}:{sh}", f"rotate=a='{ROLL_AMP}*sin(t*{ROLL_F})*max(0\\,1-t/{r:.3f})':c=black",
+        out += [f"scale={sw}:{sh}", f"rotate=a='{ROLL_AMP}*sin({tt}*{ROLL_F})*max(0\\,1-{tt}/{r:.3f})':c=black",
                 f"crop={w}:{h}"]
     s = float(fx.get("shake", 0))
     if s > 0:
@@ -249,10 +258,10 @@ def ffmpeg_filters(fx: dict | None, dur: float, w: int, h: int) -> list[str]:
         # Ampliar un poco y mover la ventana de recorte: la imagen tiembla sin mostrar bordes
         k = 1 + 2.2 * a
         sw, sh = 2 * round(w * k / 2), 2 * round(h * k / 2)
-        decay = f"max(0\\,1-t/{s:.3f})"
+        decay = f"max(0\\,1-{tt}/{s:.3f})"
         out += [f"scale={sw}:{sh}",
-                f"crop={w}:{h}:x='({sw}-{w})/2+{a * w:.2f}*sin(t*{SHAKE_FX})*{decay}'"
-                f":y='({sh}-{h})/2+{a * h:.2f}*cos(t*{SHAKE_FY})*{decay}'"]
+                f"crop={w}:{h}:x='({sw}-{w})/2+{a * w:.2f}*sin({tt}*{SHAKE_FX})*{decay}'"
+                f":y='({sh}-{h})/2+{a * h:.2f}*cos({tt}*{SHAKE_FY})*{decay}'"]
     flash = float(fx.get("flash", 0))
     fin = float(fx.get("fade_in", 0))
     if flash > 0:

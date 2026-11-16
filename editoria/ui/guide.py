@@ -88,8 +88,8 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
           "w:effects.trans_list", None),
          ("También con <b>clic derecho</b> sobre un clip → «⧉ Transición», o <b>Alt+T</b> (disolver). En la línea "
           "de tiempo aparece una pajarita sobre el corte.", "w:timeline", None),
-         ("El visor la muestra como un fundido. <b>«▶ Ver la transición»</b> prepara en unos segundos cómo queda "
-          "exactamente.", "w:effects.b_view", None),
+         ("El visor la enseña tal cual queda unos segundos después de ponerla (se prepara sola en segundo plano). "
+          "<b>«▶ Ver la transición»</b> la repite en bucle.", "w:effects.b_view", None),
      ]),
     ("recortes", "⇿ Recortes avanzados (ripple, roll, slip, slide)", "recortar ripple roll slip slide mover corte trim",
      [

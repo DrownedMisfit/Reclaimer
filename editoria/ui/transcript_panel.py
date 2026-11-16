@@ -306,7 +306,7 @@ class TranscriptPanel(QWidget):
             self.btn_cut.setEnabled(False)
             self.btn_cut.setText("✂ Cortar")
             self.view.setHtml("<p style='color:#71747d; margin-top:18px' align='center'>Sin transcripción<br>"
-                              "<span style='font-size:9pt'>Transcríbela en «Limpieza»</span></p>")
+                              "<span style='font-size:9pt'>Transcríbela en «IA ✨» → «🎙 Transcribir»</span></p>")
             return
         words = tr.get("words", [])
         index = mapping.SourceIndex(p, self.media_id)
@@ -690,7 +690,8 @@ class TranscriptPanel(QWidget):
             self.ctrl.message.emit("Ya estoy escuchando otra palabra; un momento.")
             return
         from .jobs import BackgroundJob
-        path, model, lang, old = m.path, tr.get("model") or "large-v3-turbo", tr.get("language") or "es", words[idx][2]
+        model = (tr.get("model") or "large-v3-turbo").split(" (")[0]     # (antes se guardaba «… (tarjeta)»)
+        path, lang, old = m.path, tr.get("language") or "es", words[idx][2]
         self._fix_job = BackgroundJob(lambda progress, cancelled: word_fix.alternatives(
             path, words, idx, model, lang, progress, cancelled), self)
         self._fix_job.done.connect(lambda alts: self._show_alternatives(idx, old, alts, gpos))

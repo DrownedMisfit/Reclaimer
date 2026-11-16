@@ -175,8 +175,11 @@ class GuidedPanel(QWidget):
 
     def _aplicar_todas(self):
         """La misma acción que «✓ Aplicar todas las sugerencias» del panel de cortes (sin mostrar ese panel)."""
-        from .cut_fix import CutFixPanel
-        if self.win.cut_fix is None:
-            self.win.cut_fix = CutFixPanel(self.win)
-        self.win.cut_fix._apply_all()
+        if hasattr(self.win, "cut_fix_panel"):
+            self.win.cut_fix_panel()._apply_all()      # (acoplado a la derecha, como siempre)
+        else:
+            from .cut_fix import CutFixPanel
+            if self.win.cut_fix is None:
+                self.win.cut_fix = CutFixPanel(self.win)
+            self.win.cut_fix._apply_all()
         self._actualizar()

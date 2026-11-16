@@ -763,7 +763,8 @@ class ClipsPanel(InternetMixin, QWidget):
             self._casillas = []
             self._marcas()
             self._pintar_carpeta()
-            self._aviso("No encuentro nombres ni palabras de tu vocabulario en la narración.")
+            self._aviso("No encuentro nombres ni palabras de tu vocabulario en la narración."
+                        if self.ctrl.project.transcripts else "")
             self._avisar_ventana()
             return
         self._elegir_mencion(self.lista_menciones.currentRow(), buscar=False)
@@ -771,13 +772,33 @@ class ClipsPanel(InternetMixin, QWidget):
         self._verificar_si_toca()
         self._avisar_ventana()
 
+    def limpiar(self):
+        """Proyecto nuevo o reinicio: nada de lo anterior (palabra elegida, momentos, búsqueda y resultados)."""
+        self.mencion = None
+        self.menciones = []
+        self._desmarcados = set()
+        self._firma_ultima = None
+        self.lista_menciones.clear()
+        self.lista_momentos.clear()
+        self._casillas = []
+        self._marcas()
+        self._pintar_carpeta()
+        self._aviso("")
+        if HAY_INTERNET and hasattr(self, "limpiar_internet"):
+            self.limpiar_internet()
+        self._pendiente = True
+        self._programar()
+
     def _avisar_ventana(self):
         for w in (getattr(self, "_ventana_amplia", None), getattr(self, "carpetas_dock", None)):
             if w is not None:
                 w.al_dia()
 
     def _no_dichas(self, dichas: list[dict]) -> list[dict]:
-        """Tus carpetas de palabras que no salen en la narración (sin momentos), para verlas y darles 👍/👎."""
+        """Tus carpetas de palabras que no salen en la narración (sin momentos), para verlas y darles 👍/👎. Solo si el
+        proyecto tiene narración: un proyecto nuevo o vacío no enseña ninguna palabra clave."""
+        if not self.ctrl.project.transcripts:
+            return []
         usadas = set()
         for m in dichas:
             car = self._carpeta_de(m["term"])

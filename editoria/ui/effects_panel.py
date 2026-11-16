@@ -64,6 +64,17 @@ LOOKS = [  # (clave, texto, valor, ayuda)
 ]
 
 
+
+VOLUMEN_SONIDOS = 0.5     # 🔊 los efectos de sonido entran a la mitad (el usuario: «suenan muy fuertes»)
+
+def _hay_sonidos_internet() -> bool:
+    """¿Está la parte solo local de 🌐 buscar sonidos? (en la versión publicada no viene)."""
+    try:
+        from . import sounds_internet  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 class _SoundTree(QTreeWidget):
     """Lista de sonidos que se puede arrastrar a la timeline."""
 
@@ -132,6 +143,7 @@ class EffectsPanel(QWidget):
         self.settings = QSettings("EditorIA", "EditorIA")
         self.player = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
+        self.audio_out.setVolume(0.5)                     # 🔊 al escuchar, a la mitad (suenan muy fuertes)
         self.player.setAudioOutput(self.audio_out)
         content = QWidget()
         lay = QVBoxLayout(content)
@@ -242,6 +254,12 @@ class EffectsPanel(QWidget):
         b_dir.clicked.connect(self._choose_folder)
         row.addWidget(b_add)
         row.addWidget(b_dir)
+        if _hay_sonidos_internet():
+            b_web = QPushButton("🌐 Buscar en internet…")
+            b_web.setToolTip("Busca un sonido concreto («warthog de Halo 1», «disparo de tanque de Gears of War 2») "
+                             "en YouTube y Myinstants, lo escuchas y lo guardas o lo pones en el cabezal.")
+            b_web.clicked.connect(self.open_sound_search)
+            row.addWidget(b_web)
         v1.addLayout(row)
         self.tree.setToolTip("Clic = escuchar · doble clic = poner en el cabezal · o arrástralo a la línea de tiempo.")
         lay.addWidget(set_help(g1, "efectos_sonido"))
@@ -391,6 +409,21 @@ class EffectsPanel(QWidget):
         self.trans_dur.setValue(0.5)
         self.trans_dur.setSuffix(" s")
         row.addWidget(self.trans_dur)
+        from PySide6.QtWidgets import QCheckBox
+        from PySide6.QtCore import QSettings as _QSt
+        self.trans_auto = QCheckBox("⏱ Auto")
+        self.trans_auto.setToolTip("Duración automática en cada corte: la típica de cada transición (un latigazo es "
+                                   "rápido, un fundido a negro más pausado) y, si suena música con su ritmo "
+                                   "reconocido, ajustada a ½, 1 o 2 golpes para que acabe a ritmo.")
+        self.trans_auto.setChecked(str(_QSt("EditorIA", "EditorIA").value("transiciones/auto", "true")).lower()
+                                   == "true")
+        self.trans_dur.setEnabled(not self.trans_auto.isChecked())
+
+        def _auto(on):
+            self.trans_dur.setEnabled(not on)
+            _QSt("EditorIA", "EditorIA").setValue("transiciones/auto", "true" if on else "false")
+        self.trans_auto.toggled.connect(_auto)
+        row.addWidget(self.trans_auto)
         row.addStretch()
         vt.addLayout(row)
         row2 = QHBoxLayout()
@@ -407,8 +440,8 @@ class EffectsPanel(QWidget):
         row2.addWidget(self.b_view)
         vt.addLayout(row2)
         self.trans_status = QLabel("")                # (para avisos; la explicación, al pasar el ratón)
-        gt.setToolTip("Doble clic = poner. En el visor se ve como un fundido; «▶ Ver la transición» muestra el "
-                      "resultado exacto.")
+        gt.setToolTip("Doble clic = poner. El visor la enseña tal cual queda unos segundos después (se prepara "
+                      "sola); «▶ Ver la transición» la repite en bucle.")
         self.trans_status.setObjectName("hint")
         self.trans_status.setWordWrap(True)
         vt.addWidget(self.trans_status)
@@ -747,6 +780,16 @@ class EffectsPanel(QWidget):
             it.setData(0, Qt.UserRole, "sfx:" + key)
             it.setToolTip(1, desc)
             group("Reclaimer · " + cat).addChild(it)
+        from ..core.paths import user_dir
+        web = str(user_dir() / "Sonidos de internet")       # (lo guardado con 🌐 Buscar en internet)
+        if os.path.isdir(web):
+            for root, _dirs, files in os.walk(web):
+                for f in sorted(files):
+                    if f.lower().endswith(AUDIO_EXT):
+                        rel = os.path.relpath(root, web)
+                        it = QTreeWidgetItem([os.path.splitext(f)[0].rsplit(" [", 1)[0], "" if rel == "." else rel])
+                        it.setData(0, Qt.UserRole, "file:" + os.path.join(root, f))
+                        group("🌐 De internet").addChild(it)
         folder = str(self.settings.value("efectos/carpeta", ""))
         if folder and os.path.isdir(folder):
             n = 0
@@ -818,9 +861,14 @@ class EffectsPanel(QWidget):
             QTimer.singleShot(400, lambda: self.add_at_playhead(it))
             return
         tid = self.ctrl.ensure_role_track("efectos")     # su propia pista (nunca encima de tu voz)
-        created = self.ctrl.add_media([mid], tid, self.engine.time)
+        created = self.ctrl.add_media([mid], tid, self.engine.time)   # (entra a la mitad: lo hace add_media)
         if isinstance(created, list):
             self.timeline.set_selection(created)
+
+    def open_sound_search(self, texto: str = ""):
+        """🌐 Buscar un sonido en internet (parte solo local: ui/sounds_internet.py)."""
+        from . import sounds_internet
+        self._sound_dlg = sounds_internet.abrir(self, texto or self.search.text().strip())
 
     def _choose_folder(self):
         d = QFileDialog.getExistingDirectory(self, "Carpeta de tus efectos de sonido",
@@ -1063,7 +1111,8 @@ class EffectsPanel(QWidget):
         ids = self.ctrl.transition_targets(sorted(self.timeline.selected), self.engine.time)
         it = self.trans_list.currentItem()
         key = None if remove else (it.data(Qt.UserRole) if it else "fade")
-        n = self.ctrl.set_transition(ids, key, self.trans_dur.value())
+        dur = None if (self.trans_auto.isChecked() and not remove) else self.trans_dur.value()
+        n = self.ctrl.set_transition(ids, key, dur)
         if isinstance(n, int):
             self.trans_status.setText(("✓ Quitada" if remove else f"✓ «{it.text()}» puesta") +
                                       (f" en {n} cortes." if n > 1 else "."))

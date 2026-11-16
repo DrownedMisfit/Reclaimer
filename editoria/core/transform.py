@@ -67,6 +67,44 @@ def smooth(u: float) -> float:
     return u * u * (3 - 2 * u)
 
 
+# 〰 Curvas de movimiento entre dos claves (como los «presets» de OpenShot / el Bézier de Resolve). La clave guarda la
+# curva del tramo que EMPIEZA en ella: k["i"]. None = suave al salir y al llegar (lo de siempre).
+CURVES = {None: "Suave (entra y sale suave)", "in": "Entrar suave (acelera)", "out": "Salir suave (frena al llegar)",
+          "linear": "Lineal (velocidad fija)", "bounce": "Rebote (se pasa un poco y vuelve)",
+          "hold": "Mantener (salta en la clave siguiente)"}
+
+
+def ease(u: float, kind: str | None) -> float:
+    """0–1 → 0–1 según la curva (rebote puede pasar de 1)."""
+    u = min(max(u, 0.0), 1.0)
+    if kind == "linear":
+        return u
+    if kind == "in":
+        return u * u * u
+    if kind == "out":
+        return 1 - (1 - u) ** 3
+    if kind == "bounce":
+        return 1 + 2.70158 * (u - 1) ** 3 + 1.70158 * (u - 1) ** 2
+    if kind == "hold":
+        return 1.0 if u >= 1.0 else 0.0
+    return u * u * (3 - 2 * u)
+
+
+def ease_expr(u: str, kind: str | None) -> str:
+    """La misma curva como expresión de FFmpeg (u = expresión entre 0 y 1): lo que ves es lo que se exporta."""
+    if kind == "linear":
+        return u
+    if kind == "in":
+        return f"({u}*{u}*{u})"
+    if kind == "out":
+        return f"(1-pow(1-{u},3))"
+    if kind == "bounce":
+        return f"(1+2.70158*pow({u}-1,3)+1.70158*pow({u}-1,2))"
+    if kind == "hold":
+        return "0"
+    return f"({u}*{u}*(3-2*{u}))"
+
+
 def sorted_kf(kf: list[dict]) -> list[dict]:
     return sorted(kf, key=lambda k: k["t"])
 
@@ -84,8 +122,7 @@ def value_at(kf: list[dict], t: float) -> tuple[float, float, float]:
         return k["z"], k["x"], k["y"]
     for a, b in zip(kf, kf[1:]):
         if a["t"] <= t <= b["t"]:
-            u = (t - a["t"]) / max(b["t"] - a["t"], 1e-6)
-            u = u if a.get("i") == "linear" else smooth(u)
+            u = ease((t - a["t"]) / max(b["t"] - a["t"], 1e-6), a.get("i"))
             return tuple(a[k] + (b[k] - a[k]) * u for k in ("z", "x", "y"))  # type: ignore[return-value]
     k = kf[-1]
     return k["z"], k["x"], k["y"]
@@ -108,9 +145,26 @@ def upsert(kf: list[dict], t: float, z: float, x: float, y: float, tol: float = 
     # (las claves que pone el usuario a mano usan paso suave)
     """Pone (o cambia) un fotograma clave en el momento t."""
     out = [dict(k) for k in kf if abs(k["t"] - t) > tol]
-    out.append({"t": round(t, 3), "z": round(min(max(z, 1.0), MAX_ZOOM), 4),
-                "x": round(min(max(x, 0.0), 1.0), 4), "y": round(min(max(y, 0.0), 1.0), 4)})
+    nueva = {"t": round(t, 3), "z": round(min(max(z, 1.0), MAX_ZOOM), 4),
+             "x": round(min(max(x, 0.0), 1.0), 4), "y": round(min(max(y, 0.0), 1.0), 4)}
+    i = _curva_heredada(kf, t, tol)
+    if i is not None:
+        nueva["i"] = i
+    out.append(nueva)
     return sorted_kf(out)
+
+
+def _curva_heredada(kf: list[dict], t: float, tol: float):
+    """〰 La curva que debe llevar una clave puesta (o retocada) en t: la de la clave que reemplaza; si es nueva en
+    medio de un tramo, la del tramo (así las dos mitades siguen con la misma curva)."""
+    for k in kf:
+        if abs(k["t"] - t) <= tol:
+            return k.get("i")
+    antes = [k for k in kf if k["t"] < t]
+    despues = [k for k in kf if k["t"] > t]
+    if antes and despues:
+        return max(antes, key=lambda k: k["t"]).get("i")
+    return None
 
 
 def simplify(kf: list[dict], tol: float = 0.01) -> list[dict]:
@@ -150,7 +204,7 @@ def ffmpeg_expr(kf: list[dict], key: str, tvar: str) -> str:
             terms.append(f"gte({tvar},{_num(a['t'])})*lt({tvar},{_num(b['t'])})*{_num(va)}")
             continue
         u = f"(({tvar}-{_num(a['t'])})/{_num(b['t'] - a['t'])})"
-        curve = u if a.get("i") == "linear" else f"{u}*{u}*(3-2*{u})"
+        curve = ease_expr(u, a.get("i"))
         terms.append(f"gte({tvar},{_num(a['t'])})*lt({tvar},{_num(b['t'])})*"
                      f"({_num(va)}+{_num(dv)}*{curve})")
     return "+".join(terms)
@@ -194,8 +248,7 @@ LAYOUT_KEYS = ("x", "y", "w", "h")
 
 
 def _ease(u: float, kind: str | None) -> float:
-    u = min(max(u, 0.0), 1.0)
-    return u if kind == "linear" else u * u * (3 - 2 * u)      # por defecto: suave al salir y al llegar
+    return ease(u, kind)                                       # por defecto: suave al salir y al llegar
 
 
 def layout_value_at(kf: list[dict], s: float) -> dict:
@@ -206,7 +259,9 @@ def layout_value_at(kf: list[dict], s: float) -> dict:
     for a, b in zip(pts, pts[1:]):
         if s <= b["t"]:
             u = _ease((s - a["t"]) / max(b["t"] - a["t"], 1e-9), a.get("i"))
-            return {k: float(a[k]) + (float(b[k]) - float(a[k])) * u for k in LAYOUT_KEYS}
+            out = {k: float(a[k]) + (float(b[k]) - float(a[k])) * u for k in LAYOUT_KEYS}
+            out["w"], out["h"] = max(0.002, out["w"]), max(0.002, out["h"])   # (el rebote no da tamaños negativos)
+            return out
     return {k: float(pts[-1][k]) for k in LAYOUT_KEYS}
 
 
@@ -269,7 +324,11 @@ def layout_at(c, local: float, is_image: bool = False) -> dict | None:
 
 def layout_upsert(kf: list[dict], s: float, box: dict, tol: float = 0.02) -> list[dict]:
     out = [dict(k) for k in kf if abs(k["t"] - s) > tol]
-    out.append({"t": round(s, 4), **{k: round(float(box.get(k, FULL[k])), 4) for k in LAYOUT_KEYS}})
+    nueva = {"t": round(s, 4), **{k: round(float(box.get(k, FULL[k])), 4) for k in LAYOUT_KEYS}}
+    i = _curva_heredada(kf, s, tol)
+    if i is not None:
+        nueva["i"] = i
+    out.append(nueva)
     return sorted(out, key=lambda k: k["t"])
 
 
@@ -293,7 +352,8 @@ def layout_expr(kf: list[dict], key: str, s_expr: str) -> str:
     for a, b in reversed(list(zip(pts, pts[1:]))):
         va, vb = float(a[key]), float(b[key])
         u = f"(({s_expr}-{_n(a['t'])})/{_n(max(b['t'] - a['t'], 1e-6))})"
-        e = u if a.get("i") == "linear" else f"({u}*{u}*(3-2*{u}))"
+        e = ease_expr(u, a.get("i"))
         expr = f"if(lt({s_expr},{_n(b['t'])}),{_n(va)}+({_n(vb - va)})*{e},{expr})"
-    return f"if(lt({s_expr},{_n(pts[0]['t'])}),{_n(float(pts[0][key]))},{expr})"
+    out = f"if(lt({s_expr},{_n(pts[0]['t'])}),{_n(float(pts[0][key]))},{expr})"
+    return f"max(0.002,{out})" if key in ("w", "h") else out      # (igual que en el visor)
 

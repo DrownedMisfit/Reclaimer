@@ -156,7 +156,29 @@ def run(argv: list[str]) -> int:
             pass
     from PySide6.QtCore import QCoreApplication, Qt as _Qt
     QCoreApplication.setAttribute(_Qt.AA_ShareOpenGLContexts)   # (el buscador de PNG del taller usa un navegador)
+    try:                                       # 🔍 escala de la interfaz (2K/4K con Windows al 100 %: más grande)
+        from .ui.ui_scale import apply_before_app
+        apply_before_app()
+    except Exception:  # noqa: BLE001 - sin esto, la de siempre
+        pass
     app = QApplication(argv)
+    import os as _os
+    _salir = _os.environ.get("RECLAIMER_SALIR_TRAS")          # 📦 prueba de arranque (versión todo en uno): se cierra sola
+    if _salir:
+        from PySide6.QtCore import QTimer as _QT
+
+        def _fin():
+            try:
+                from .core.paths import app_data_dir
+                from PySide6.QtCore import QSettings as _QS
+                from .core import motor_ia as _mi
+                from .core.paths import user_dir
+                (app_data_dir() / "arranque_ok.txt").write_text(      # (lo que comprueba la prueba)
+                    f"ok\ndatos={app_data_dir()}\nmis_cosas={user_dir()}\n"
+                    f"ajustes={_QS('EditorIA', 'EditorIA').fileName()}\nmotor={_mi.DATOS_MOTOR}\n", encoding="utf-8")
+            finally:
+                app.quit()
+        _QT.singleShot(int(float(_salir) * 1000), _fin)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("EditorIA")   # (nombre interno: conserva tus ajustes guardados)

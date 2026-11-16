@@ -93,7 +93,7 @@ def test_subtitles_no_analysis():
     calls = {"fillers": [], "analyze": 0}
     orig_t, orig_a = T.transcribe, voice_cleanup.analyze
 
-    def fake_transcribe(samples, model, lang, progress=None, cancelled=None, fillers=True):
+    def fake_transcribe(samples, model, lang, progress=None, cancelled=None, fillers=True, **_k):
         calls["fillers"].append(fillers)
         return json.loads(json.dumps(tr))
 

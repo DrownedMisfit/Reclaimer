@@ -130,14 +130,32 @@ def _quiet_distance(arr: np.ndarray, thr: float, out: float, inn: float, side: s
     a, b = int(round(out * R)), int(round(inn * R))     # el hueco, en muestras
     lim = int(round(QUIET_SEARCH * R))
     if side == "antes":
-        for s in range(a, min(b - m, a + lim) + 1):
-            if _edge_peak(arr, s, s + m) < thr:
-                return (s - a) / R
-    else:
-        for s in range(b - m, max(a, b - lim) - 1, -1):
-            if _edge_peak(arr, s, s + m) < thr:
-                return (b - s) / R
-    return None
+        s = _first_quiet(arr, thr, m, a, min(b - m, a + lim), 1)
+        return None if s is None else (s - a) / R
+    s = _first_quiet(arr, thr, m, b - m, max(a, b - lim), -1)
+    return None if s is None else (b - s) / R
+
+
+def _first_quiet(arr: np.ndarray, thr: float, m: int, s0: int, s1: int, step: int) -> int | None:
+    """⚡ El primer inicio s (de s0 a s1, en ese sentido) cuya ventana [s, s+m) tiene su pico bajo thr. Igual que
+    recorrer con _edge_peak muestra a muestra, pero de una vez con numpy (antes: cientos de miles de llamadas)."""
+    if (s1 - s0) * step < 0:
+        return None
+    lo, hi = min(s0, s1), max(s0, s1)
+    n = len(arr)
+    picos = np.empty(hi - lo + 1, dtype=np.float64)     # (float64: compara con thr igual que el bucle de antes)
+    a0, a1 = max(lo, 0), min(hi, n - m)                  # ventanas enteras dentro del audio
+    if a1 >= a0:
+        from numpy.lib.stride_tricks import sliding_window_view
+        picos[a0 - lo:a1 - lo + 1] = sliding_window_view(arr[a0:a1 + m], m).max(axis=1)
+    for k in range(lo, hi + 1):                          # (los bordes: como _edge_peak)
+        if not (a0 <= k <= a1):
+            picos[k - lo] = _edge_peak(arr, k, k + m)
+    orden = picos if step > 0 else picos[::-1]
+    idx = np.flatnonzero(orden < thr)
+    if not len(idx):
+        return None
+    return lo + int(idx[0]) if step > 0 else hi - int(idx[0])
 
 
 def _judge(j: dict, ctx: _Ctx):

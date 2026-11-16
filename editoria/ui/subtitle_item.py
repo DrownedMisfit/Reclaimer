@@ -224,7 +224,10 @@ def paint_title(p: QPainter, text: dict, t_in_clip: float, duration: float, W: i
             _TITLE_CACHE.clear()
         hit = _TITLE_CACHE[key] = title_render.render(text, W, H)
     img, pos = hit
-    fade = 0.15
+    try:
+        fade = max(0.001, min(float(text.get("fade", 0.15)), duration / 3 if duration > 0 else 0.15))
+    except (TypeError, ValueError):
+        fade = 0.15
     p.save()
     p.setOpacity(max(0.0, min(1.0, t_in_clip / fade, (duration - t_in_clip) / fade)))
     p.drawImage(pos, img)

@@ -5,6 +5,8 @@ Instala (o repara) el MOTOR DE IA de Reclaimer en esta carpeta (F:\\Reclaimer\\m
   · SAM 2.1 (recortar sujetos) y Demucs (separar diálogos), con las versiones que se sabe que funcionan;
   · los modelos (SAM 2.1 grande ~900 MB y Demucs ~330 MB) en motor_ia\\modelos.
 Se puede volver a ejecutar cuando quieras: lo que ya está, no se repite.
+Desde Reclaimer (ventana «◈ Motor de IA», sin consolas): RECLAIMER_UI=1 → nada abre ventanas negras (PowerShell,
+pip) y el progreso sale en líneas «PASO n total texto» y «PROGRESO % hechos_MB total_MB» que la ventana lee.
 Registro: motor_ia\\instalar.log
 """
 from __future__ import annotations
@@ -17,11 +19,15 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VENV = ROOT / ".venv"
+DATOS = Path(os.environ.get("RECLAIMER_MOTOR_DATOS") or ROOT)    # (📦 todo en uno: fuera de app\, sobrevive a actualizar)
+DATOS.mkdir(parents=True, exist_ok=True)
+VENV = DATOS / ".venv"
 PY = VENV / "Scripts" / "python.exe"
-MODELS = ROOT / "modelos"
-LOG = ROOT / "instalar.log"
-CACHE = ROOT / "pip_cache"
+MODELS = DATOS / "modelos"
+LOG = DATOS / "instalar.log"
+CACHE = DATOS / "pip_cache"
+UI = os.environ.get("RECLAIMER_UI") == "1"                       # (lo lanza la ventana de Reclaimer)
+SIN_VENTANA = getattr(subprocess, "CREATE_NO_WINDOW", 0)          # (ni PowerShell ni pip abren consolas)
 ROCM = "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1"
 ROCM_SDK = [f"{ROCM}/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl", f"{ROCM}/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
             f"{ROCM}/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl", f"{ROCM}/rocm-7.2.1.tar.gz"]
@@ -32,7 +38,8 @@ CUDA_TORCH = ["torch==2.9.1", "torchvision==0.24.1", "torchaudio==2.9.1", "--ind
               "https://download.pytorch.org/whl/cu128"]      # NVIDIA (controlador 570 o más nuevo)
 CPU_TORCH = ["torch==2.9.1", "torchvision==0.24.1", "torchaudio==2.9.1", "--index-url",
              "https://download.pytorch.org/whl/cpu"]
-SAM2 = "git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4"
+# (el código de esa versión como .zip: no hace falta tener Git instalado)
+SAM2 = "https://github.com/facebookresearch/sam2/archive/2b90b9f5ceec907a1c18123530e92e794ad901a4.zip"
 SAM_MODEL = ("https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt",
              MODELS / "sam2.1_hiera_large.pt")
 SAM_FAST = ("https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt",
@@ -41,6 +48,11 @@ SAM_FAST = ("https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hie
 
 def say(msg: str):
     print(msg, flush=True)
+    if UI:                                     # «1/5 · Creando…» → la ventana mueve su barra de pasos
+        import re
+        m = re.match(r"\s*(\d+)/(\d+)\s*·\s*(.*)", msg)
+        if m:
+            print(f"PASO {m.group(1)} {m.group(2)} {m.group(3)}", flush=True)
     with open(LOG, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
 
@@ -48,7 +60,7 @@ def say(msg: str):
 def run(args: list[str], env: dict | None = None) -> bool:
     say("  $ " + " ".join(str(a) for a in args)[:200])
     with open(LOG, "a", encoding="utf-8") as f:
-        r = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, env=env)
+        r = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, env=env, creationflags=SIN_VENTANA)
     return r.returncode == 0
 
 
@@ -56,7 +68,8 @@ def gpu_vendor() -> str:
     """«nvidia», «amd» o "" según las tarjetas del PC (con las dos, NVIDIA: suele ser la potente)."""
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "(Get-CimInstance Win32_VideoController).Name"], capture_output=True, text=True, timeout=60)
+                            "(Get-CimInstance Win32_VideoController).Name"], capture_output=True, text=True, timeout=60,
+                           creationflags=SIN_VENTANA)
     except (OSError, subprocess.SubprocessError):
         return ""
     if "NVIDIA" in r.stdout:
@@ -71,7 +84,8 @@ def has_amd() -> bool:
 
 
 def py_ok(code: str) -> bool:
-    return PY.exists() and subprocess.run([str(PY), "-c", code], capture_output=True).returncode == 0
+    return PY.exists() and subprocess.run([str(PY), "-c", code], capture_output=True,
+                                          creationflags=SIN_VENTANA).returncode == 0
 
 
 def download(url: str, dest: Path):
@@ -81,7 +95,7 @@ def download(url: str, dest: Path):
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".parcial")
     say(f"⬇ Descargando {dest.name}…")
-    with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
+    with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
         while True:
@@ -90,9 +104,15 @@ def download(url: str, dest: Path):
                 break
             f.write(chunk)
             done += len(chunk)
-            if total:
+            if total and UI:
+                pct = int(done * 100 / total)
+                if pct != getattr(download, "_ult", -1):
+                    download._ult = pct
+                    print(f"PROGRESO {pct} {done >> 20} {total >> 20}", flush=True)
+            elif total:
                 print(f"\r   {done / total * 100:5.1f} %  ({done >> 20} de {total >> 20} MB)", end="", flush=True)
     print()
+    download._ult = -1
     os.replace(tmp, dest)
 
 
@@ -109,6 +129,7 @@ def main() -> int:
     if not PY.exists():
         say("1/5 · Creando el Python del motor…")
         if not run([sys.executable, "-m", "venv", str(VENV)]):
+            shutil.rmtree(VENV, ignore_errors=True)       # (a medias, el siguiente intento lo daría por hecho)
             return 1
     run([str(PY), "-m", "pip", "install", "--upgrade", "pip"], env)
     vendor = gpu_vendor()
@@ -150,7 +171,7 @@ def main() -> int:
     say("5/5 · Comprobando la tarjeta gráfica…")
     r = subprocess.run([str(PY), "-c", "import torch;print(torch.__version__);print(torch.cuda.is_available());"
                                        "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, creationflags=SIN_VENTANA)
     lines = (r.stdout or "").split("\n")
     if len(lines) > 1 and lines[1].strip() == "True":
         say(f"✓ Listo: la IA usará tu {lines[2].strip()}.")
@@ -168,6 +189,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     code = main()
-    if "--sin-pausa" not in sys.argv:
+    if "--sin-pausa" not in sys.argv and not UI:
         input("\nPulsa Intro para cerrar…")
     sys.exit(code)

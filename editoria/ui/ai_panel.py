@@ -8,7 +8,7 @@ Panel «Edición IA»:
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QMenu, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout,
                                QGroupBox,
@@ -75,6 +75,69 @@ AI_CARDS = [
 class AIPanel(QWidget):
     action_requested = Signal(str)   # tarjeta del mapa de la IA (lo atiende la ventana principal)
 
+    def set_transcriber(self, voz):
+        """🎙 El transcriptor vive aquí (el usuario: «el transcriptor podría ir en la opción de IA»): la subpestaña
+        «🎙 Transcribir» recibe el bloque de «Limpieza» (modelo, idioma, escucha literal y el botón) y enseña su
+        progreso y su estado. «Limpieza» se queda con limpiar la voz y las sugerencias."""
+        self._voz = voz
+        pagina = QWidget()
+        v = QVBoxLayout(pagina)
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(6)
+        v.addWidget(voz.sec1)
+        fila = QHBoxLayout()
+        self.tr_progress = QProgressBar()
+        self.tr_progress.setRange(0, 1000)
+        self.tr_progress.setVisible(False)
+        self.tr_cancel = QPushButton("Cancelar")
+        self.tr_cancel.setVisible(False)
+        self.tr_cancel.clicked.connect(voz._cancel)
+        fila.addWidget(self.tr_progress, 1)
+        fila.addWidget(self.tr_cancel)
+        v.addLayout(fila)
+        self.tr_status = _dim()
+        self.tr_status.setWordWrap(True)
+        v.addWidget(self.tr_status)
+        v.addStretch()
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QScrollArea.NoFrame)
+        sc.setWidget(pagina)
+        self.tabs.insertTab(0, sc, "🎙 Transcribir")
+        self.tabs.setTabToolTip(0, "Transcribir la narración (hace falta para casi todo lo de la IA).")
+        self._tab_of = {k: i + 1 for k, i in self._tab_of.items()}
+        for i in range(voz.tabs.count()):            # (en «Limpieza» ya no hace falta su pestaña vacía)
+            if voz.tabs.tabText(i) == "Transcribir":
+                voz.tabs.removeTab(i)
+                break
+        self._tr_timer = QTimer(self)
+        self._tr_timer.setInterval(400)
+        self._tr_timer.timeout.connect(self._tr_espejo)
+        self._tr_timer.start()
+        self._tr_espejo()
+        self.tabs.setCurrentIndex(1 if self.narration() is not None else 0)
+
+    def _tr_espejo(self):
+        """El progreso y el estado del transcriptor, también aquí (los lleva «Limpieza»)."""
+        voz = self._voz
+        if voz is None or not self.isVisible():
+            return
+        try:
+            vis = voz.progress.isVisibleTo(voz) if voz.progress.parent() else False
+            self.tr_progress.setVisible(vis)
+            self.tr_progress.setValue(voz.progress.value())
+            self.tr_cancel.setVisible(voz.btn_cancel.isVisibleTo(voz))
+            txt = voz.status.text()
+            if self.tr_status.text() != txt:
+                self.tr_status.setText(txt)
+        except RuntimeError:
+            self._tr_timer.stop()
+
+    def set_more_menu(self, menu):
+        """El menú de «✨ Más funciones de IA» (lo pone la ventana principal con las acciones de siempre)."""
+        self.btn_more.setMenu(menu)
+        self.btn_more.setEnabled(True)
+
     def __init__(self, ctrl, engine, timeline, preferred_media, parent=None):
         super().__init__(parent)
         self.ctrl = ctrl
@@ -116,6 +179,17 @@ class AIPanel(QWidget):
             grid.addWidget(btn, k // 2, k % 2)
             self.cards[key] = (btn, st)
         self._mapbox = set_help(mapbox, "mapa_ia")
+        from PySide6.QtWidgets import QToolButton
+        self.btn_more = QToolButton()             # ✨ Más: lo que antes estaba en el menú «IA ✨» de arriba
+        self.btn_more.setText("✨ Más")
+        self.btn_more.setToolTip("Más funciones de IA: todo lo demás de la IA: analizar los clips, entender tu biblioteca a fondo, buscar "
+                                 "momentos, comparación, edit musical, avisos, revisión guiada, Shorts desde este "
+                                 "video, primera versión automática, montaje desde el guion… (con sus atajos)")
+        self.btn_more.setPopupMode(QToolButton.InstantPopup)
+        self.btn_more.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_more.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_more.setEnabled(False)
+        lay.addWidget(self.btn_more)
         lay.addWidget(self.progress)
         lay.addWidget(self.status)
 
@@ -343,6 +417,7 @@ class AIPanel(QWidget):
         outer.addWidget(content)
         outer.addWidget(self.tabs, 1)
 
+        self._voz = None                       # 🎙 el transcriptor (lo trae set_transcriber desde «Limpieza»)
         self._load_settings()
         from .common import lazy_refresh
         self._lazy = lazy_refresh(self, self.refresh)      # oculto: no se rehace en cada edición
@@ -491,7 +566,7 @@ class AIPanel(QWidget):
         self.btn_propose.setEnabled(has_narr and not busy)
         if not busy and not self.status.text().startswith("✓"):
             if not has_narr:
-                self.status.setText("Primero transcribe tu narración (pestaña «Limpieza»).")
+                self.status.setText("Primero transcribe tu narración (subpestaña «🎙 Transcribir»).")
             elif not self.ctrl.clip_vecs:
                 self.status.setText("Para el B-roll, la IA tiene que analizar tus clips: botón ◈ "
                                     "de la biblioteca.")
@@ -1033,7 +1108,7 @@ class AIPanel(QWidget):
         sustituyendo solo el B-roll de la IA de ese tramo (lo tuyo no se toca)."""
         mid = self.narration()
         if not mid:
-            self.ctrl.message.emit("Primero transcribe tu narración (pestaña «Limpieza»).")
+            self.ctrl.message.emit("Primero transcribe tu narración (pestaña «IA ✨» → «🎙 Transcribir»).")
             return
         if self.job:
             return

@@ -71,19 +71,19 @@ def main():
 
     hl = lambda: highlighter_of(win)  # noqa: E731
 
-    # 1) Desenfoque sin clip seleccionado → resalta la línea de tiempo
+    # 1) Desenfoque sin clip seleccionado → la línea de tiempo NO se resalta (14/11: no le gusta su contorno naranja)
     win.show_panel(win.effects)
     win.effects.add_region("rect")
     pump(app, 0.1)
-    assert hl() is not None and hl().target is win.timeline and hl().isVisible()
+    assert hl() is None or hl().target is not win.timeline or not hl().isVisible()
     # 2) Proponer efectos sin favoritos → resalta «➕ Añadir efecto»
     win.effects.memory = []
     win.effects.propose_effects()
-    assert hl().target is win.effects.b_mem_add, hl().target
-    # 3) Ctrl+C sin selección (mensaje de la barra de estado) → resalta la línea de tiempo
+    assert hl() is not None and hl().target is win.effects.b_mem_add, hl() and hl().target
+    # 3) Ctrl+C sin selección (mensaje de la barra de estado) → tampoco parpadea la línea de tiempo
     hl().clear()
     win._copy(False)
-    assert hl().target is win.timeline
+    assert hl().target is not win.timeline or not hl().isVisible()
     # 4) Buscar en mis archivos sin analizar → abre Medios y resalta el botón ◈
     win.show_panel(win.moments)
     win.moments.source.setCurrentIndex(win.moments.source.findData("local"))
@@ -92,7 +92,7 @@ def main():
     pump(app, 0.1)
     assert hl().target is win.library.btn_analyze and win.library.btn_analyze.isVisible(), hl().target
     win.grab().save(os.path.join(out, "falta_analizar.png"))
-    print("✓ resalta lo que falta: la línea de tiempo (sin selección), «➕ Añadir efecto», y el botón ◈ de "
+    print("✓ resalta lo que falta (nunca la línea de tiempo): «➕ Añadir efecto» y el botón ◈ de "
           "Medios (abriendo esa pestaña) cuando hay que analizar antes")
     # 5) Ventana del ejemplo sin nombre → resalta el campo «¿Qué es?»
     vid = os.path.join(out, "v.mp4")

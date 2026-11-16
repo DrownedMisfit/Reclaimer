@@ -164,7 +164,8 @@ def main():
         cid3 = next(c.id for c in c2.project.clips_on(atr.id) if c.media_id == m3)
         dlg = SilenceDialog(win, [cid3])
         dlg.show()
-        assert dlg.words_cb.isEnabled() and dlg.words_cb.isChecked()
+        assert dlg.words_cb.isEnabled() and not dlg.words_cb.isChecked(), "(15/11: lo extra empieza apagado)"
+        dlg.words_cb.setChecked(True)
         t0 = time.time()
         while not dlg._ready and time.time() - t0 < 60:
             pump(app, 0.1)

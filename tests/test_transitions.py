@@ -130,6 +130,7 @@ def main():
     assert any("Transición" in t for t in titles), titles
     eff = win.effects
     eff.trans_list.setCurrentRow([k for k, *_ in TR.CATALOG].index("hblur"))
+    eff.trans_auto.setChecked(False)            # (duración a mano; «⏱ Auto» se prueba en test_transiciones_visor)
     eff.trans_dur.setValue(0.4)
     eff.apply_transition()
     assert TR.of(p.clips[B.id]) == {"type": "hblur", "dur": 0.4}

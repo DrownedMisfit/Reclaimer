@@ -198,10 +198,12 @@ def main():
     cid = ctrl.project.clips_on(atr.id)[0].id
     from PySide6.QtCore import QSettings
     _qs = QSettings("EditorIA", "EditorIA")             # (como un usuario nuevo: sin último ajuste guardado)
-    for _k in ("silencio/ultimo", "silencio/davinci_visto"):
+    for _k in ("silencio/ultimo", "silencio/davinci_visto", "silencio/basico_v1"):
         _qs.remove(_k)
     dlg = SilenceDialog(win, [cid])
-    assert dlg.mode.currentData() == "hibrido", dlg.mode.currentData()
+    # (15/11: un usuario nuevo empieza con lo más básico, «Solo volumen» como Resolve; el híbrido lo elige él)
+    assert dlg.mode.currentData() == "volumen", dlg.mode.currentData()
+    dlg.mode.setCurrentIndex(dlg.mode.findData("hibrido"))
     assert dlg.protect.isEnabled() and dlg.protect.currentData() == "davinci", dlg.protect.currentData()
     dlg.mode.setCurrentIndex(dlg.mode.findData("voz"))
     assert not dlg.protect.isEnabled()
