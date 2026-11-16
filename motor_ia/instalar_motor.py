@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -125,6 +126,12 @@ def main() -> int:
         say(f"✗ Hace falta Python 3.12 (este es {sys.version.split()[0]}). Instálalo y vuelve a ejecutarlo.")
         return 1
     say("=== Motor de IA de Reclaimer: instalación ===")
+    (DATOS / "instalado.ok").unlink(missing_ok=True)      # (si esta vez falla, no se da por instalado)
+    try:
+        DATOS.mkdir(parents=True, exist_ok=True)
+        (DATOS / "instalando.parcial").write_text("", encoding="utf-8")
+    except OSError:
+        pass
     env = dict(os.environ, PIP_CACHE_DIR=str(CACHE), SAM2_BUILD_CUDA="0", PIP_DISABLE_PIP_VERSION_CHECK="1")
     if not PY.exists():
         say("1/5 · Creando el Python del motor…")
@@ -184,6 +191,14 @@ def main() -> int:
     else:
         say("✓ Listo (irá por el procesador).")
     shutil.rmtree(CACHE, ignore_errors=True)       # la caché de descargas no hace falta guardarla
+    try:                                            # ✓ terminado: Reclaimer ya no ofrece «Reparar»
+        (DATOS / "instalado.ok").write_text(time.strftime("%Y-%m-%d %H:%M"), encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        (DATOS / "instalando.parcial").unlink(missing_ok=True)
+    except OSError:
+        pass
     return 0
 
 

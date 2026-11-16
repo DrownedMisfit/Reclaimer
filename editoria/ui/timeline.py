@@ -1221,6 +1221,32 @@ class TimelineWidget(QWidget):
         """Con la selección vinculada, la imagen y el sonido van juntos (Alt: solo el clip)."""
         return self.ctrl.linked_ids(ids) if (self.linked and not alt) else list(ids)
 
+    def _pista_nueva_en(self, d: dict, y: float) -> str | None:
+        """¿Arrastrando a donde no hay pista? Un video por encima de la pista de video más alta, o un audio por
+        debajo de la última pista: al soltar se crea una pista nueva (como en Resolve). Solo si lo que agarraste
+        (de ese tipo) está todo en una misma pista."""
+        proj = self.ctrl.project
+        kind = d.get("kind0")
+        if kind not in (TRACK_VIDEO, TRACK_AUDIO):
+            return None
+        pistas = {proj.clips[i].track_id for i in d["ids"] if i in proj.clips
+                  and proj.track(proj.clips[i].track_id).kind == kind}
+        if len(pistas) != 1:
+            return None
+        n = len(proj.tracks)
+        if kind == TRACK_VIDEO:
+            first = next((i for i, t in enumerate(proj.tracks) if t.kind == TRACK_VIDEO), None)
+            if first is None:
+                return None
+            # (más fácil de acertar: también la franja de arriba de la pista más alta si el clip ya está en ella)
+            borde = self.track_y(first) + (8 if pistas == {proj.tracks[first].id} else 0)
+            return "arriba" if y < borde else None
+        last_a = max((i for i, t in enumerate(proj.tracks) if t.kind == TRACK_AUDIO), default=None)
+        if last_a is None:
+            return None
+        borde = self.track_y(last_a) + self.track_h(last_a) - (8 if pistas == {proj.tracks[last_a].id} else 0)
+        return "abajo" if y >= borde else None
+
     def _dest_track(self, c, d) -> int:
         """Pista a la que va c al arrastrar: solo cambian de pista los clips del mismo tipo de pista
         que el que agarraste (su sonido vinculado se queda en su pista de audio)."""
@@ -1783,6 +1809,36 @@ class TimelineWidget(QWidget):
                 if c:
                     self._paint_clip(p, c, self.clip_rect(c, c.start + d["dt"], self._dest_track(c, d)),
                                      ghost=not d.get("nudge"))
+            if d.get("nueva"):                                  # ＋ al soltar aquí se crea una pista nueva
+                if d["nueva"] == "arriba":
+                    first = next((i for i, t in enumerate(proj.tracks) if t.kind == TRACK_VIDEO), 0)
+                    y = self.track_y(first) + 1
+                else:
+                    la = max((i for i, t in enumerate(proj.tracks) if t.kind == TRACK_AUDIO), default=0)
+                    y = min(self.track_y(la) + self.track_h(la), H) - 2
+                for cid in d["ids"]:                            # el fantasma, pegado a la línea (donde irá)
+                    c = proj.clips.get(cid)
+                    if c is not None and proj.track(c.track_id).kind == d.get("kind0"):
+                        r0 = self.clip_rect(c, c.start + d["dt"])
+                        h0 = min(r0.height(), 40.0)
+                        r0 = QRectF(r0.x(), y + 2 if d["nueva"] == "arriba" else y - 2 - h0, r0.width(), h0)
+                        self._paint_clip(p, c, r0, ghost=True)
+                p.setPen(QPen(QColor(255, 214, 10, 235), 3))
+                p.drawLine(QLineF(self.HEADER_W, y, W, y))
+                ids_k = [proj.clips[i] for i in d["ids"] if i in proj.clips]
+                x = max(self.HEADER_W + 6, self.x_for(min(c.start for c in ids_k) + d["dt"])) if ids_k else 60
+                txt = "＋ Pista de video nueva" if d["nueva"] == "arriba" else "＋ Pista de audio nueva"
+                f = QFont(p.font())
+                f.setBold(True)
+                p.setFont(f)
+                fm = p.fontMetrics()
+                r = QRectF(x, y + 4 if d["nueva"] == "arriba" else y - fm.height() - 8,
+                           fm.horizontalAdvance(txt) + 14, fm.height() + 4)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 214, 10, 235))
+                p.drawRoundedRect(r, 4, 4)
+                p.setPen(QColor("#1b1600"))
+                p.drawText(r, Qt.AlignCenter, txt)
         if d and d["type"] == "trim" and d.get("active"):
             for cid in [d["clip"]] + d.get("partners", []):
                 c = proj.clips.get(cid)
@@ -3663,6 +3719,9 @@ class TimelineWidget(QWidget):
             dt = max(dt, -min(proj.clips[i].start for i in d["ids"]))
             dtrack = 0
             ti = self.track_index_at(pos.y())
+            d["nueva"] = self._pista_nueva_en(d, pos.y())      # ＋ arriba de todo (video) / debajo de todo (audio)
+            if d["nueva"]:
+                ti = None
             if ti is not None and d["track0"] is not None:
                 dtrack = ti - d["track0"]
                 for cid in d["ids"]:
@@ -3674,7 +3733,8 @@ class TimelineWidget(QWidget):
                             proj.tracks[dst].kind != proj.tracks[src].kind:
                         dtrack = 0
                         break
-            d["dt"], d["dtrack"] = self._safe_dt(d, dt, dtrack), dtrack
+            # Como en Resolve: al soltar encima de otro clip, lo tapa (se recorta o se quita lo de debajo)
+            d["dt"], d["dtrack"] = dt, dtrack
             self._hit(pegado[0] if pegado and abs(d["dt"] - pegado[1]) < 1e-9 else None)   # (si no llegó, sin línea)
             self.setCursor(Qt.ClosedHandCursor)
         elif d["type"] in ("ripple", "roll"):
@@ -3781,11 +3841,14 @@ class TimelineWidget(QWidget):
             self.update()
             return
         proj = self.ctrl.project
-        if d["type"] == "move" and (abs(d["dt"]) > 1e-6 or d["dtrack"]):
+        if d["type"] == "move" and (abs(d["dt"]) > 1e-6 or d["dtrack"] or d.get("nueva")):
             moves = {}
             for cid in d["ids"]:
                 c = proj.clips[cid]
-                moves[cid] = (c.start + d["dt"], proj.tracks[self._dest_track(c, d)].id)
+                if d.get("nueva") and proj.track(c.track_id).kind == d.get("kind0"):
+                    moves[cid] = (c.start + d["dt"], self.ctrl.NUEVA_PISTA)   # (la crea el controlador, mismo Ctrl+Z)
+                else:
+                    moves[cid] = (c.start + d["dt"], proj.tracks[self._dest_track(c, d)].id)
             self.ctrl.move_clips(moves)
         elif d["type"] == "trim":
             t = d["new_start"] if d["edge"] == "left" else d["new_end"]

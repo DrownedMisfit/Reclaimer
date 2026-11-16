@@ -715,7 +715,11 @@ class ProjectController(QObject):
             p.tracks.insert(first, nt)
         else:
             nt = Track(new_id(), kind, f"A{n}" if kind == TRACK_AUDIO else f"T{n}")
-            p.tracks.append(nt)
+            last = max((i for i, t in enumerate(p.tracks) if t.kind == kind), default=None)
+            if last is None:
+                p.tracks.append(nt)
+            else:
+                p.tracks.insert(last + 1, nt)       # (justo debajo de la última de su tipo)
         return nt.id
 
     def add_media(self, media_ids: list[str], track_id: str | None, start: float,
@@ -990,23 +994,43 @@ class ProjectController(QObject):
 
         return self._edit(text, fn)
 
+    NUEVA_PISTA = "__pista_nueva__"     # (destino de move_clips: una pista nueva de su tipo, en el mismo paso)
+
     def move_clips(self, moves: dict[str, tuple[float, str]]):
-        """moves = {clip_id: (nuevo_inicio, nueva_pista)}"""
+        """moves = {clip_id: (nuevo_inicio, nueva_pista)}. Pista NUEVA_PISTA: se crea una de su tipo (video arriba de
+        todo, audio al final) y todos los que van ahí van a la misma; lo que haya debajo se tapa (sobrescribir)."""
         def fn(p: Project):
-            clips = [p.clips[cid] for cid in moves if cid in p.clips]
+            moves_ = dict(moves)
+            nuevas: dict[str, str] = {}
+            for cid, (t, tid) in moves.items():
+                if tid == self.NUEVA_PISTA and cid in p.clips:
+                    kind = p.track(p.clips[cid].track_id).kind
+                    if kind not in nuevas:
+                        nuevas[kind] = self._new_track_for(p, kind)
+                    moves_[cid] = (t, nuevas[kind])
+            clips = [p.clips[cid] for cid in moves_ if cid in p.clips]
             for c in clips:
                 self._check_clip(p, c)
-                dest = self._check_track(p, moves[c.id][1])
+                dest = self._check_track(p, moves_[c.id][1])
                 if dest.kind != p.track(c.track_id).kind:
                     raise EditError("Un clip de audio no puede ir a una pista de video (ni al revés).")
             for c in clips:
                 del p.clips[c.id]
+            relink: dict = {}                   # (si se parte por el medio un video Y su sonido: cada mitad, su vínculo)
+            antes = set(p.clips)
             for c in clips:
-                new_start, new_track = moves[c.id]
+                new_start, new_track = moves_[c.id]
                 new_start = max(0.0, new_start)
-                self._clear_range(p, new_track, new_start, new_start + c.duration)
+                self._clear_range(p, new_track, new_start, new_start + c.duration, relink=relink)
                 c.start, c.track_id = new_start, new_track
                 p.clips[c.id] = c
+            if relink:                          # una mitad derecha sin pareja partida: conserva su vínculo de antes
+                viejo = {nuevo: old for old, nuevo in relink.items()}
+                piezas = [x for cid, x in p.clips.items() if cid not in antes and x.link in viejo]
+                for nuevo in viejo:
+                    suyas = [x for x in piezas if x.link == nuevo]
+                    if len(suyas) == 1:
+                        suyas[0].link = viejo[nuevo]
 
         return self._edit("Mover clip" if len(moves) == 1 else f"Mover {len(moves)} clips", fn)
 

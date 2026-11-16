@@ -3206,19 +3206,27 @@ class MainWindow(QMainWindow):
             text = f"✓ El motor de IA está instalado (irá por el procesador). PyTorch {st['torch']}."
         if st["installed"] and not st["sam"]:
             text += "\n⚠ Falta el modelo SAM 2.1: pulsa «Reparar»."
+        if st["installed"] and not st["completo"]:
+            text = "⚠ La instalación del motor de IA se quedó a medias: pulsa «Continuar la instalación»."
+        # «Reparar» solo cuando hay algo que arreglar (con el motor bien instalado, confunde)
+        problema = (not st["installed"] or not st["completo"] or not st["sam"]
+                    or bool(st["vendor"] and not st["gpu"]))
         box = QMessageBox(self)
         box.setWindowTitle("◈ Motor de IA")
         box.setText(text)
-        b_inst = box.addButton("Reparar" if st["installed"] else "Instalar", QMessageBox.AcceptRole)
+        b_inst = None
+        if problema:
+            b_inst = box.addButton("Instalar" if not st["installed"] else "Continuar la instalación"
+                                   if not st["completo"] else "Reparar", QMessageBox.AcceptRole)
         b_dir = box.addButton("Abrir la carpeta", QMessageBox.ActionRole)
         box.addButton("Cerrar", QMessageBox.RejectRole)
         box.exec()
-        if box.clickedButton() is b_inst:                      # (una ventana de Reclaimer, sin consolas)
-            self.abrir_motor_instalador(reparar=st["installed"])
+        if b_inst is not None and box.clickedButton() is b_inst:   # (una ventana de Reclaimer, sin consolas)
+            self.abrir_motor_instalador(reparar=st["installed"], forzar=st["completo"])   # (⚠ con todo instalado)
         elif box.clickedButton() is b_dir:
             os.startfile(str(motor_ia.DATOS_MOTOR if motor_ia.DATOS_MOTOR.is_dir() else motor_ia.ROOT))    # noqa: S606
 
-    def abrir_motor_instalador(self, reparar: bool = False):
+    def abrir_motor_instalador(self, reparar: bool = False, forzar: bool = False):
         """◈ La ventana de instalar el motor (una sola: si ya está abierta, se trae delante)."""
         from . import motor_install_dialog
         d = getattr(self, "_motor_dlg", None)
@@ -3229,7 +3237,7 @@ class MainWindow(QMainWindow):
                 return d
         except RuntimeError:
             pass
-        self._motor_dlg = motor_install_dialog.abrir(self, reparar=reparar)
+        self._motor_dlg = motor_install_dialog.abrir(self, reparar=reparar, forzar=forzar)
         return self._motor_dlg
 
     def _check_motor_soon(self):

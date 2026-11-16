@@ -47,7 +47,7 @@ def matar_arbol(pid: int):
 
 
 class MotorInstallDialog(QDialog):
-    def __init__(self, win, reparar: bool = False):
+    def __init__(self, win, reparar: bool = False, forzar: bool = False):
         super().__init__(win)
         self.win = win
         self.setWindowTitle("◈ Motor de IA")
@@ -64,7 +64,12 @@ class MotorInstallDialog(QDialog):
         cuanto.setObjectName("dim")
         cuanto.setWordWrap(True)
         lay.addWidget(cuanto)
-        self.paso = QLabel("Listo para empezar." if not reparar else "Listo para reparar.")
+        from ..core import motor_ia
+        # bien instalado: nada que hacer, solo «Cerrar» (salvo «forzar»: hay un aviso ⚠ y se pidió reparar)
+        self._ya = motor_ia.completo() and not forzar
+        self.paso = QLabel("✓ El motor de IA ya está instalado y funciona." if self._ya else
+                           "Listo para reparar." if forzar else
+                           "Listo para continuar la instalación." if reparar else "Listo para empezar.")
         self.paso.setWordWrap(True)
         lay.addWidget(self.paso)
         self.barra = QProgressBar()
@@ -92,7 +97,7 @@ class MotorInstallDialog(QDialog):
         fila.addStretch(1)
         self.b_cancelar = QPushButton("Cerrar")
         self.b_cancelar.clicked.connect(self._cancelar_o_cerrar)
-        self.b_ir = QPushButton("Reparar" if reparar else "Instalar")
+        self.b_ir = QPushButton("Reparar" if forzar else "Continuar la instalación" if reparar else "Instalar")
         self.b_ir.setObjectName("primary")
         self.b_ir.setToolTip("Descarga e instala lo que falte (lo que ya está no se repite). Puedes seguir editando "
                              "mientras tanto.")
@@ -100,6 +105,9 @@ class MotorInstallDialog(QDialog):
         fila.addWidget(self.b_cancelar)
         fila.addWidget(self.b_ir)
         lay.addLayout(fila)
+        self.b_ir.setVisible(not self._ya)
+        if self._ya:
+            self.barra.setValue(1000)
         self._paso_n, self._pasos = 0, 5
         self._log_timer = QTimer(self)                 # (lo que va escribiendo pip en instalar.log, como detalle)
         self._log_timer.setInterval(1500)
@@ -194,11 +202,12 @@ class MotorInstallDialog(QDialog):
             self.ok = True
             self.barra.setValue(1000)
             self.paso.setText("✓ Listo: el motor de IA está instalado.")
-            self.b_ir.setText("Reparar")
+            self.b_ir.setVisible(False)                    # (instalado: ya no hay nada que repetir)
             ult = [x for x in self.log.toPlainText().splitlines() if x.startswith(("✓", "⚠"))]
             self.detalle.setText(ult[-1] if ult else "")
         else:
             self.ok = False
+            self.b_ir.setVisible(True)                     # (se puede volver a intentar)
             self.paso.setText("✗ No se terminó de instalar." if error is None or "cancel" not in error.lower()
                               else "Cancelado.")
             self.detalle.setText((error or "Abre «▸ Ver detalles» para ver qué pasó. Puedes volver a intentarlo: lo "
@@ -221,8 +230,8 @@ class MotorInstallDialog(QDialog):
         super().done(r)
 
 
-def abrir(win, reparar: bool = False):
-    d = MotorInstallDialog(win, reparar)
+def abrir(win, reparar: bool = False, forzar: bool = False):
+    d = MotorInstallDialog(win, reparar, forzar)
     d.setAttribute(Qt.WA_DeleteOnClose)
     d.show()
     return d

@@ -101,17 +101,18 @@ def main():
     ctrl.undo_stack.undo()
     ctrl.undo_stack.undo()
 
-    # --- 4) Arrastrar un clip encima de otro: se detiene al tocarlo
+    # --- 4) Arrastrar un clip encima de otro: lo tapa (como en Resolve, lo de debajo se recorta)
     tl.set_selection([])
     bp = pt(6.5, v1.id)
     QTest.mousePress(tl, Qt.LeftButton, Qt.NoModifier, bp)
     QTest.mouseMove(tl, bp - QPoint(10, 0))
     QTest.mouseMove(tl, bp - QPoint(int(4.5 * tl.pps), 0))
     QTest.mouseRelease(tl, Qt.LeftButton, Qt.NoModifier, bp - QPoint(int(4.5 * tl.pps), 0))
-    assert abs(p.clips[b].start - 3.0) < 0.06 and abs(p.clips[a].duration - 3.0) < 0.05, \
+    assert abs(p.clips[b].start - 0.5) < 0.06 and abs(p.clips[a].duration - 0.5) < 0.06, \
         (p.clips[b].start, p.clips[a].duration)
-    print("✓ arrastrar un clip sobre otro: se detiene pegado a él, sin taparlo")
+    print("✓ arrastrar un clip sobre otro: lo tapa y lo de debajo se recorta (como en Resolve)")
     ctrl.undo_stack.undo()
+    assert abs(p.clips[a].duration - 3.0) < 0.05
 
     # --- 5) Rectángulo de selección
     tl.set_selection([])

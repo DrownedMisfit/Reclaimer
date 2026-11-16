@@ -69,6 +69,36 @@ def main():
     MD.orden_instalador = lambda: [sys.executable, falso]
 
     win = QWidget()
+    # ✓ bien instalado: lo dice y solo hay «Cerrar» (un «Reparar» sin nada que reparar confunde)
+    from editoria.core import motor_ia
+    from pathlib import Path
+    falso_motor = Path(_TMP) / "motor"
+    (falso_motor / ".venv" / "Scripts").mkdir(parents=True)
+    motor_ia.PYTHON = falso_motor / ".venv" / "Scripts" / "python.exe"
+    motor_ia.LISTO = falso_motor / "instalado.ok"
+    motor_ia.SAM_MODEL = falso_motor / "modelos" / "sam.pt"
+    motor_ia.PYTHON.write_text("")
+    d0 = MD.MotorInstallDialog(win, reparar=True)          # a medias (su Python, sin marca ni SAM): continuar
+    assert d0.b_ir.isVisibleTo(d0) and d0.b_ir.text() == "Continuar la instalación", d0.b_ir.text()
+    d0.reject()
+    motor_ia.LISTO.write_text("ok")
+    d0 = MD.MotorInstallDialog(win, reparar=True)          # completo: nada que hacer
+    assert not d0.b_ir.isVisibleTo(d0) and "ya está instalado" in d0.paso.text(), d0.paso.text()
+    d0.reject()
+    d0 = MD.MotorInstallDialog(win, reparar=True, forzar=True)   # completo pero con aviso ⚠ y pidió «Reparar»
+    assert d0.b_ir.isVisibleTo(d0) and d0.b_ir.text() == "Reparar", d0.b_ir.text()
+    d0.reject()
+    motor_ia.PARCIAL = falso_motor / "instalando.parcial"
+    motor_ia.PARCIAL.write_text("")                         # una reparación cortada a medias no cuenta
+    assert not motor_ia.completo()
+    motor_ia.PARCIAL.unlink()
+    motor_ia.LISTO.unlink()
+    motor_ia.PYTHON.unlink()
+    print("✓ bien instalado: solo «Cerrar»; a medias: «Continuar la instalación»; nunca «Reparar» sin motivo")
+    src_i = open(os.path.join(ROOT, "motor_ia", "instalar_motor.py"), encoding="utf-8").read()
+    assert 'instalado.ok").write_text' in src_i and 'instalado.ok").unlink' in src_i
+    assert 'instalando.parcial").write_text' in src_i and 'instalando.parcial").unlink' in src_i
+
     d = MD.MotorInstallDialog(win)
     assert d.b_ir.text() == "Instalar" and d.b_cancelar.text() == "Cerrar"
     d.empezar()
@@ -79,6 +109,7 @@ def main():
         vistos.add(d.barra.value())
     assert d.ok is True, d.paso.text()
     assert d.barra.value() == 1000 and "Listo" in d.paso.text() and "AMD" in d.detalle.text()
+    assert not d.b_ir.isVisibleTo(d), "tras instalar bien no debe quedar «Reparar»"
     assert len({v for v in vistos if 0 < v < 1000}) >= 2, f"la barra no avanzó por pasos ({sorted(vistos)})"
     assert "PASO" not in d.log.toPlainText() and "PROGRESO" not in d.log.toPlainText(), "las líneas de control no "\
         "salen en los detalles"
@@ -90,7 +121,7 @@ def main():
     t0 = time.time()
     while d._job is not None and time.time() - t0 < 30:
         pump(app, 0.05)
-    assert d.ok is False and "No se terminó" in d.paso.text() and d.b_ir.isEnabled()
+    assert d.ok is False and "No se terminó" in d.paso.text() and d.b_ir.isEnabled() and d.b_ir.isVisibleTo(d)
     os.environ.pop("FALSO_CODIGO")
     print("✓ si falla, lo dice y se puede volver a intentar")
 

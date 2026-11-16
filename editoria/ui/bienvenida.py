@@ -87,9 +87,12 @@ class Bienvenida(QDialog):
     def _estado_motor(self):
         """¿Ya está el motor? ¿Qué tarjeta hay? (en segundo plano: mirarlo tarda un par de segundos)."""
         from ..core import motor_ia
-        if motor_ia.PYTHON.exists():
-            self.b_motor.setText("Reparar")
+        if motor_ia.completo():
+            self.b_motor.setText("✓ Instalado")
+            self.b_motor.setEnabled(False)
             self._poner_texto("✓ Ya está instalado. " + self.motor_txt)
+        elif motor_ia.PYTHON.exists():
+            self.b_motor.setText("Continuar la instalación")
         if os.environ.get("EDITORIA_DATOS"):
             return                                         # (en pruebas no se mira la tarjeta)
 
@@ -101,7 +104,7 @@ class Bienvenida(QDialog):
             nombre = {"nvidia": "NVIDIA", "amd": "AMD"}.get(st.get("vendor") or "", "")
             extra = f" Tu tarjeta: {nombre}." if nombre else " No veo tarjeta NVIDIA ni AMD: iría por el procesador."
             try:
-                self._texto_motor.emit(("✓ Ya está instalado. " if st.get("installed") else "") + self.motor_txt
+                self._texto_motor.emit(("✓ Ya está instalado. " if st.get("completo") else "") + self.motor_txt
                                        + extra)
             except RuntimeError:                           # (la ventana ya se cerró)
                 pass

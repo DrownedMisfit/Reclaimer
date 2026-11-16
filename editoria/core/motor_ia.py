@@ -26,6 +26,8 @@ PYTHON = DATOS_MOTOR / ".venv" / "Scripts" / "python.exe"
 JOBS = ROOT / "trabajos"
 MODELS = DATOS_MOTOR / "modelos"
 SAM_MODEL = MODELS / "sam2.1_hiera_large.pt"
+LISTO = DATOS_MOTOR / "instalado.ok"        # (la deja el instalador cuando termina bien)
+PARCIAL = DATOS_MOTOR / "instalando.parcial"  # (mientras instala; si se corta, se queda y no cuenta como completo)
 SAM_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM_FAST_MODEL = MODELS / "sam2.1_hiera_base_plus.pt"        # «Rápida»: ~2 veces más rápido, algo menos fino
 SAM_FAST_CONFIG = "configs/sam2.1/sam2.1_hiera_b+.yaml"
@@ -64,11 +66,17 @@ def _reparar_venv():
 _reparar_venv()
 
 
+def completo() -> bool:
+    """¿La instalación terminó bien? (no basta con que exista su Python: pudo quedarse a medias). Las instalaciones
+    de antes de la marca cuentan como completas si ya tienen el modelo SAM, que se baja casi al final."""
+    return PYTHON.exists() and not PARCIAL.exists() and (LISTO.exists() or SAM_MODEL.exists())
+
+
 def status() -> dict:
     """Cómo está el motor: {"installed", "torch", "gpu" (sí/no), "name", "amd" (hay tarjeta AMD en el PC)}.
     Tarda unos segundos (arranca su Python): llamar en segundo plano."""
     out = {"installed": PYTHON.exists(), "torch": "", "gpu": False, "name": "", "amd": False, "nvidia": False,
-           "vendor": "", "sam": SAM_MODEL.exists()}
+           "vendor": "", "sam": SAM_MODEL.exists(), "completo": completo()}
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
                            capture_output=True, text=True, timeout=60,
