@@ -7,3 +7,7 @@ onnxruntime>=1.17
 # un segundo OpenCV encima del de arriba. A mano:
 #   pip install --no-deps "rapidocr-onnxruntime>=1.4"
 #   pip install pyclipper shapely six pyyaml pillow
+kokoro-onnx==0.6.1          # 🗣 Voz IA (voz sintética en tu PC; modelo Kokoro-82M, Apache 2.0)
+phonemizer==3.6.0           # (GPL v3) lo usa kokoro-onnx para pasar el texto a sonidos
+espeakng-loader==0.2.4      # (espeak-ng, GPL v3) idem
+piper-tts==1.8.0            # 🎙 voces de narración Piper (GPL v3; trae su espeak-ng; voces CC0 / CC BY 3.0 / Unlicense)

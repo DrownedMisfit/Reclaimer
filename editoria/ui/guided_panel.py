@@ -30,7 +30,7 @@ class _Paso(QFrame):
         self.num.setStyleSheet(f"font-size: 20pt; font-weight: 700; color: {ACCENT};")
         self.num.setMinimumWidth(30)
         self.num.setAlignment(Qt.AlignCenter)
-        g.addWidget(self.num, 0, 0, 2, 1)
+        g.addWidget(self.num, 0, 0, 3, 1, Qt.AlignTop)
         fila = QHBoxLayout()
         self.titulo = QLabel(titulo)
         self.titulo.setStyleSheet("font-weight: 600;")
@@ -46,9 +46,9 @@ class _Paso(QFrame):
         self.estado.setObjectName("dim")
         self.estado.setWordWrap(True)
         g.addWidget(self.estado, 1, 1)
-        self.botones = QHBoxLayout()
+        self.botones = QHBoxLayout()            # (debajo del estado: así el paso cabe en un panel estrecho)
         self.botones.setSpacing(4)
-        g.addLayout(self.botones, 0, 2, 2, 1)
+        g.addLayout(self.botones, 2, 1)
         g.setColumnStretch(1, 1)
 
     def boton(self, texto: str, tip: str, slot) -> QPushButton:
@@ -101,8 +101,24 @@ class GuidedPanel(QWidget):
         self.p7 = _Paso(7, "🚀 Entrega", "Exporta el video terminado.")
         self.p7.boton("Exportar", "Ve a la página Entrega (exportar).", lambda: win.go_page("deliver"))
         self.pasos = [self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7]
-        for p in self.pasos:
-            lay.addWidget(p)
+        # Escalonado: los pasos en tres partes plegables (clic en su título = abrir o cerrar; se recuerda)
+        from .tabs import Section
+        self.secciones = []
+        for titulo, clave, tip, pasos in (
+                ("📥 Preparar", "preparar", "Pasos 1 a 3: importar, quitar silencios y revisar los cortes",
+                 (self.p1, self.p2, self.p3)),
+                ("🎬 Montar", "montar", "Pasos 4 y 5: clips para lo que dices y revisión guiada", (self.p4, self.p5)),
+                ("🚀 Terminar", "terminar", "Pasos 6 y 7: miniatura y entrega", (self.p6, self.p7))):
+            caja = QWidget()
+            cv = QVBoxLayout(caja)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(6)
+            for p in pasos:
+                cv.addWidget(p)
+            sec = Section(titulo, caja, True, f"secciones/montaje_guiado/{clave}")
+            sec.head.setToolTip(tip)
+            self.secciones.append(sec)
+            lay.addWidget(sec)
         lay.addStretch()
 
         # Se actualiza sola: al cambiar la línea de tiempo o el proyecto, y cada segundo (lo que cambia en

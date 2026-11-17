@@ -167,6 +167,9 @@ class Clip:
     # 🎞 Fotogramas clave de POSICIÓN y TAMAÑO de la capa: [{"t": segundo del archivo (imágenes: desde el inicio del
     # clip), "x", "y", "w", "h", "i"?: "linear"}]; vacío = la disposición fija de «layout» (ver core/transform.py)
     layout_kf: list[dict] = field(default_factory=list)
+    # 🎯 Recorridos de SEGUIMIENTO (por dónde va un objeto dentro del video, en segundos del archivo): se guardan para
+    # usarlos cuando quieras (zoom que sigue, pegar un texto al objeto, desenfocarlo…). Ver core/motion_track.py
+    motion_tracks: list[dict] = field(default_factory=list)
 
     @property
     def is_text(self) -> bool:

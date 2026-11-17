@@ -409,9 +409,13 @@ class AIPanel(QWidget):
         untitle(mapbox, g1, g2, g3, g4, g5)
         from .unused_scenes import UnusedScenes
         self.unused_scenes = UnusedScenes(ctrl)    # 🎬 debajo de las herramientas: las escenas que aún no usas
-        self.tabs = tabbed([("Inicio", [self._mapbox, self.unused_scenes], True), ("Temas", [g1], True),
+        from .autocompletar import Autocompletar   # ✨ rellenar lo vacío con lo no usado de un video (mismas escenas)
+        self.autocompletar = Autocompletar(ctrl, timeline, self.unused_scenes.scenes)
+        self.online = self._fila_online()          # 🌐 buscar videos en internet para tu material (a la vista)
+        self.tabs = tabbed([("Inicio", [self.online, self._mapbox, self.autocompletar, self.unused_scenes], True),
+                            ("Temas", [g1], True),
                             ("B-roll", [g2], True),
-                            ("Zooms", [g3], True), ("Audio", [g4]), ("Director", [g5])])
+                            ("Zooms", [g3], True), ("Audio", [g4]), ("Director", [g5])], clave="ia")
         self._tab_of = {"topics": 1, "broll": 2, "visual": 3, "audio": 4, "director": 5}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1325,3 +1329,56 @@ class AIPanel(QWidget):
                                               volume=self.clip_vol.value() / 100)
             if isinstance(created, list):
                 self.status.setText(f"✓ La IA insertó {len(created)} clips (borde naranja).")
+
+    # ------------------------------------------------------------------ 🌐 material de internet
+    def _fila_online(self):
+        """🌐 Buscar videos en internet (YouTube) para usarlos de material: escribe y Enter → se abre el panel 🔑 con su
+        pestaña 🌐 Internet y los resultados (ahí se escuchan/ven y se descargan). Solo si está la parte local."""
+        from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QPushButton, QWidget
+        w = QWidget()
+        fila = QHBoxLayout(w)
+        fila.setContentsMargins(0, 0, 0, 0)
+        try:
+            from . import clips_panel as _cp
+            hay = bool(getattr(_cp, "HAY_INTERNET", False))
+        except Exception:  # noqa: BLE001
+            hay = False
+        if not hay:
+            w.setVisible(False)
+            return w
+        self.campo_online = QLineEdit()
+        self.campo_online.setClearButtonEnabled(True)
+        self.campo_online.setPlaceholderText("🌐 Buscar videos en internet para tu material…")
+        self.campo_online.setToolTip("Busca en YouTube y descarga clips para usarlos de material (se guardan en "
+                                     "tu carpeta de material y van a Medios). Enter o 🔍.")
+        self.campo_online.returnPressed.connect(self.buscar_online)
+        b = QPushButton("🔍 Buscar")
+        b.setObjectName("primary")
+        b.setToolTip(self.campo_online.toolTip())
+        b.clicked.connect(self.buscar_online)
+        b2 = QPushButton("⬇")
+        b2.setFixedWidth(36)
+        b2.setToolTip("Abrir 🌐 Internet (resultados y descargas) sin buscar")
+        b2.clicked.connect(lambda: self.buscar_online(abrir_solo=True))
+        fila.addWidget(self.campo_online, 1)
+        fila.addWidget(b)
+        fila.addWidget(b2)
+        return w
+
+    def buscar_online(self, texto: str | None = None, abrir_solo: bool = False):
+        from PySide6.QtWidgets import QApplication
+        win = self.window()
+        if not hasattr(win, "clips"):
+            win = next((x for x in QApplication.topLevelWidgets() if hasattr(x, "clips")), None)
+        clips = getattr(win, "clips", None)
+        if clips is None or getattr(clips, "pestanas", None) is None:
+            return False
+        win.show_panel(clips)
+        clips.pestanas.setCurrentIndex(1)                  # 🌐 Internet
+        t = (texto if isinstance(texto, str) else self.campo_online.text()).strip()
+        if t and not abrir_solo:
+            clips.campo.setText(t)
+            clips._buscar_a_mano()
+        else:
+            clips.campo.setFocus()
+        return True

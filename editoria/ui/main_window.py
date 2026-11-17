@@ -125,6 +125,15 @@ class MainWindow(QMainWindow):
         self.transcript = TranscriptPanel(self.ctrl, self.engine)
         self.subtitles = SubtitlesPanel(self.ctrl, lambda: self.voice.media_id() or "")
         # ⚡ subtítulos: solo el texto (sin buscar bostezos, titubeos, respiraciones…)
+        # 🗣 Una narración de la Voz IA ya tiene su texto exacto: 🎙 Transcribir pregunta antes de pisarlo (el botón
+        # del transcriptor, la barra de Vertical, Ctrl+T… todos pasan por voice.transcribe)
+        _transcribir = self.voice.transcribe
+        try:
+            self.voice.btn_transcribe.clicked.disconnect(_transcribir)
+        except (RuntimeError, TypeError):
+            pass
+        self.voice.transcribe = self._transcribir_con_aviso(_transcribir)
+        self.voice.btn_transcribe.clicked.connect(self.voice.transcribe)
         self.subtitles.transcribe_requested.connect(lambda: self.voice.transcribe(analyze=False))
         history = QWidget()
         hl = QVBoxLayout(history)
@@ -169,6 +178,8 @@ class MainWindow(QMainWindow):
         self.clips = ClipsPanel(self.ctrl, self.timeline)
         self.clips.seek_requested.connect(self.engine.user_seek)
         self.clips.hints_changed.connect(lambda m: marcas_set(self.timeline, "clips", m))   # 🎬 marcas de «Dijiste…»
+        self.clips.foco_changed.connect(self.timeline.set_hint_focus)    # 🔑 la elegida, resaltada (📍 Todas)
+        self.timeline.hint_word_clicked.connect(self.clips.elegir_palabra)   # 🔑 clic en la muesca de otra
         self.transcript.search_marks_changed.connect(lambda m: marcas_set(self.timeline, "buscar", m))   # 🔎 Buscar
         self.timeline.moments_requested.connect(self.open_moments)
         self.timeline.gap_ai_requested.connect(self._gap_ai)
@@ -216,6 +227,7 @@ class MainWindow(QMainWindow):
         self._dock("inspector", "Inspector", self.inspector)
         self._dock("voice", "Limpieza", self.voice)
         self.ai_panel.set_transcriber(self.voice)            # 🎙 el transcriptor, en la pestaña «IA ✨»
+        self._acceso_voz_ia_en_transcribir()
         self._dock("transcript", "Texto", self.transcript)
         self._dock("subtitles", "Subtítulos", self.subtitles)
         self._dock("history", "Historial", history)
@@ -238,6 +250,9 @@ class MainWindow(QMainWindow):
         self.edit_panel = EditDialog(self.ctrl, self, embedded=True)
         self._dock("edit_opts", "🎵 Edit musical", self.edit_panel)
         self._dock("edit_clips", "🎞 Clips del edit", self.edit_panel.clips_page)
+        from .voz_ia_panel import VozIAPanel                   # 🗣 Voz IA: pegar el guion y que lo lea una voz sintética
+        self.voz_ia = VozIAPanel(self)
+        self._dock("voz_ia", "🗣 Voz IA", self.voz_ia)
         manager().open_panel.connect(self.open_tasks)
         self.docks["guide"].toggleViewAction().toggled.connect(lambda on: on or self.guide.clear())
         self.right_tabs = _PanelSwitcher(self)   # compatibilidad: right_tabs.setCurrentWidget(panel)
@@ -267,6 +282,12 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.RightDockWidgetArea, self.docks["kw_folders"])
             self.tabifyDockWidget(self.docks["inspector"], self.docks["kw_folders"])
             self.docks["kw_folders"].setVisible(True)
+        if str(self.settings.value("paneles/voz_ia_v1", "false")).lower() != "true":
+            # (una vez: la pestaña nueva «🗣 Voz IA», junto al Inspector, aunque tuvieras una distribución guardada;
+            # se ve o no según la pestaña de trabajo: apply_tab_panels)
+            self.settings.setValue("paneles/voz_ia_v1", "true")
+            self.addDockWidget(Qt.RightDockWidgetArea, self.docks["voz_ia"])
+            self.tabifyDockWidget(self.docks["inspector"], self.docks["voz_ia"])
         QTimer.singleShot(0, self.apply_tab_panels)            # 🗂 los paneles de la pestaña con la que se abre
         QTimer.singleShot(0, self._ajustar_paneles)            # ↔ nada cortado por la derecha en ningún panel
         QTimer.singleShot(0, self.timeline.setFocus)           # (S, Supr, Ctrl+Z… van al editor desde el principio)
@@ -284,6 +305,7 @@ class MainWindow(QMainWindow):
         self.engine.time_changed.connect(lambda t: self.timeline.set_playhead(t, follow=self.engine.playing))
         self.engine.time_changed.connect(lambda t: self.tl_timecode.setText(fmt_tc(t, self.ctrl.project.fps)))
         self.engine.time_changed.connect(self._update_meter)
+        self.engine.time_changed.connect(self.clips.al_cabezal)          # 🧭 más cercana / más lejana
         self.timeline.seek_requested.connect(self.engine.user_seek)
         self.timeline.scrub_requested.connect(self.engine.scrub)      # 🔊 se oye al arrastrar la barra roja
         self.timeline.selection_changed.connect(self.inspector.set_selection)
@@ -727,7 +749,7 @@ class MainWindow(QMainWindow):
     ICONO_PANEL = {"media": "▤", "effects": "✦", "ai": "✧", "moments": "⌕", "clips": "⚷", "kw_folders": "▣",
                    "inspector": "⚙", "voice": "✂", "transcript": "¶", "subtitles": "❞", "history": "↺",
                    "scopes": "▥", "guide": "?", "tasks": "◈", "guided": "⌖", "material": "▦", "edit_opts": "♫",
-                   "edit_clips": "♪", "cortes": "✄"}
+                   "edit_clips": "♪", "cortes": "✄", "voz_ia": "≋"}
 
     def _llenar_menu_paneles(self):
         """☰ Paneles: todos, agrupados por lado; el que eliges se muestra y se pone delante."""
@@ -752,6 +774,23 @@ class MainWindow(QMainWindow):
             for k, d in flot:
                 m.addAction(f"{self.ICONO_PANEL.get(k, '•')}  {self._nombre_panel(d)}",
                             lambda d_=d: (d_.show(), d_.raise_()))
+
+    _ORDEN_VENTANA = ("media", "effects", "ai", "moments", "clips", "kw_folders", "inspector", "voice", "transcript",
+                      "subtitles", "voz_ia", "material", "edit_opts", "edit_clips", "history", "scopes", "guided",
+                      "tasks", "cortes", "guide", "timeline")
+
+    def _llenar_menu_ventana(self):
+        """Menú «Ventana»: cada panel con su casilla (encender o cerrar); ninguno se queda fuera."""
+        m = getattr(self, "_menu_ventana", None)
+        if m is None:
+            return
+        for a in list(m.actions()):
+            if a is self._sep_ventana:
+                break
+            m.removeAction(a)
+        claves = [k for k in self._ORDEN_VENTANA if k in self.docks] + \
+            [k for k in self.docks if k not in self._ORDEN_VENTANA]
+        m.insertActions(self._sep_ventana, [self.docks[k].toggleViewAction() for k in claves])
 
     @staticmethod
     def _nombre_panel(d) -> str:
@@ -803,7 +842,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_t_pestañas"):
             return
         try:
-            self._t_pestañas.start()
+            if not self._t_pestañas.isActive():    # (no reiniciar: al reproducir llegan avisos cada fotograma)
+                self._t_pestañas.start()
         except RuntimeError:                       # (la ventana se está cerrando)
             pass
 
@@ -830,6 +870,7 @@ class MainWindow(QMainWindow):
             self._t_pestañas.setSingleShot(True)
             self._t_pestañas.setInterval(120)
             self._t_pestañas.timeout.connect(self._pestañas_que_caben)
+            self._t_pestañas.timeout.connect(self._que_quepa_en_pantalla)   # (y que la ventana quepa en la pantalla)
             # (Qt vuelve a poner los nombres largos al recolocar paneles sin avisar: un repaso ligero de vez en cuando)
             self._t_pestañas_ciclo = QTimer(self)
             self._t_pestañas_ciclo.setInterval(1500)
@@ -839,13 +880,11 @@ class MainWindow(QMainWindow):
         d.dockLocationChanged.connect(self._pestañas_pronto)
         d.topLevelChanged.connect(self._pestañas_pronto)
         if key != "timeline":
-            # Cada panel puede encogerse (con barra de desplazamiento) en vez de aplastar la línea de tiempo
-            from PySide6.QtWidgets import QScrollArea
-            sc = QScrollArea()
-            sc.setWidgetResizable(True)
-            sc.setFrameShape(QScrollArea.NoFrame)
-            sc.setWidget(widget)
-            d.setWidget(sc)
+            # Cada panel puede encogerse (con barra de desplazamiento VERTICAL) en vez de aplastar la línea de tiempo;
+            # a lo ancho, su contenido se adapta (↔ responsive: nada se corta, esté donde esté el panel)
+            from . import responsive
+            d.setWidget(responsive.ZonaPanel(widget, self.PANEL_MIN if key != "guide" else 0))
+            responsive.adaptar(widget)
         else:
             d.setWidget(widget)
         feats = QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
@@ -860,15 +899,16 @@ class MainWindow(QMainWindow):
     # 🗂 Paneles de cada pestaña (lo de entrada; lo que cambies tú desde Ventana se recuerda por pestaña). YouTube: sin
     # Texto ni Subtítulos (no los usa en las reseñas) y con 🔑 Palabras clave y 🎞 Material del clip; Edits: el edit
     # musical a pantalla completa (opciones a la derecha, clips a la izquierda), sin lo de la voz; Shorts: subtítulos.
+    # 🗣 Voz IA: a la vista en Vertical (Shorts leídos por la IA); en las otras, con «🗣 Que lo lea la IA» o Ventana.
     TAB_PANELS = {
         "youtube": {"material": True, "clips": True, "voice": True, "transcript": False, "subtitles": False,
-                    "edit_opts": False, "edit_clips": False},
+                    "edit_opts": False, "edit_clips": False, "voz_ia": False},
         "edit": {"edit_opts": True, "edit_clips": True, "voice": False, "transcript": False, "subtitles": False,
-                 "material": False, "clips": True},
+                 "material": False, "clips": True, "voz_ia": False},
         "short": {"voice": True, "transcript": True, "subtitles": True, "edit_opts": False, "edit_clips": False,
-                  "material": False, "clips": True},
+                  "material": False, "clips": True, "voz_ia": True},
     }
-    TAB_MANAGED = ("material", "clips", "voice", "transcript", "subtitles", "edit_opts", "edit_clips")
+    TAB_MANAGED = ("material", "clips", "voice", "transcript", "subtitles", "edit_opts", "edit_clips", "voz_ia")
 
     def _remember_tab_panel(self, key: str, on: bool):
         tab = getattr(getattr(self, "workspaces", None), "current", "youtube")
@@ -913,7 +953,7 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(d["media"], d["edit_clips"])
         self.addDockWidget(Qt.RightDockWidgetArea, d["inspector"])
         for k in ("voice", "transcript", "subtitles", "history", "scopes", "clips", "kw_folders", "material",
-                  "edit_opts"):
+                  "edit_opts", "voz_ia"):
             self.tabifyDockWidget(d["inspector"], d[k])
         # 🧭 Montaje guiado: debajo del inspector (a la derecha), así se ve a la vez que 🎬 Clips (a la izquierda)
         self.addDockWidget(Qt.RightDockWidgetArea, d["guided"])
@@ -941,41 +981,63 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
 
-    PANEL_MIN, PANEL_MAX_MIN = 240, 400        # (ancho mínimo de un panel: lo que pide su contenido, entre estos)
+    PANEL_MIN = 200        # (ancho mínimo de entrada de un panel; puede bajar hasta lo que pide su contenido adaptado)
 
     def _ajustar_paneles(self):
-        """↔ Ningún panel corta su contenido por la derecha, por mucho que agrandes el visor: las etiquetas largas pasan
-        a varias líneas, los botones y casillas muy largos se quedan con lo esencial (lo demás, en su tooltip), los
-        desplegables pueden estrecharse, y cada panel no se deja estrechar más de lo que su contenido necesita."""
-        from PySide6.QtWidgets import QAbstractButton, QComboBox, QLabel
+        """↔ Ningún panel corta su contenido, esté donde esté y mida lo que mida (ui/responsive.py): las etiquetas, los
+        botones y las casillas parten su texto en varias líneas, los desplegables se estrechan («…» y el texto entero al
+        pasar el ratón), las filas bajan a la línea siguiente y las rejillas pasan a una columna. Cada panel (su
+        responsive.ZonaPanel) nunca se deja estrechar más de lo que su contenido adaptado necesita (≈150–200 px)."""
+        from . import responsive
         for key, d in self.docks.items():
-            if key in ("timeline", "guide"):
-                continue
             panel = getattr(d, "panel", None)
-            if panel is None:
+            if key == "timeline" or panel is None:
                 continue
-            ancho = 0
-            for w in panel.findChildren(QWidget):
-                try:
-                    if isinstance(w, QLabel) and not w.wordWrap() and w.text() and \
-                            w.minimumSizeHint().width() > self.PANEL_MIN:
-                        w.setWordWrap(True)
-                    elif isinstance(w, QAbstractButton) and w.minimumSizeHint().width() > 280 and " (" in w.text():
-                        completo = w.text()
-                        w.setText(completo.split(" (", 1)[0])
-                        tip = w.toolTip()
-                        w.setToolTip(completo + ("\n" + tip if tip and tip != completo else ""))
-                    elif isinstance(w, QComboBox):          # (se puede estrechar; con sitio, se ve entero)
-                        if w.minimumSizeHint().width() > 200:
-                            w.setMinimumWidth(90)
-                            if not w.toolTip():
-                                w.setToolTip(w.currentText())
-                    if isinstance(w, (QAbstractButton, QComboBox)) or (isinstance(w, QLabel) and not w.wordWrap()):
-                        ancho = max(ancho, w.minimumSizeHint().width())
-                except RuntimeError:
-                    pass
-            ancho = max(ancho + 40, panel.minimumSizeHint().width() + 20)
-            d.setMinimumWidth(int(min(self.PANEL_MAX_MIN, max(self.PANEL_MIN, ancho))))
+            responsive.adaptar_una_vez(panel)
+            if d.minimumWidth() > 0:
+                d.setMinimumWidth(0)                  # (el mínimo lo da su zona: lo que pide el contenido)
+        self._que_quepa_en_pantalla()
+
+    def _que_quepa_en_pantalla(self):
+        """↔ La ventana nunca pide más ancho que la pantalla: si los paneles de los lados (más el visor) no caben, su
+        ancho mínimo de entrada (PANEL_MIN) baja hasta lo que su contenido adaptado necesita (nunca menos: se cortaría).
+        Sin esto, con varios paneles en columnas, Qt cortaba la derecha de Reclaimer y no dejaba soltar paneles allí."""
+        from . import responsive
+        try:
+            pant = (self.screen() or QApplication.primaryScreen()).availableGeometry().width()
+        except Exception:  # noqa: BLE001
+            return
+        if getattr(self, "_cabiendo", False):
+            return
+        self._cabiendo = True
+        try:
+            # (los abiertos aunque estén detrás de otra pestaña: también cuentan para el ancho de su zona)
+            zonas = [d.widget() for k, d in self.docks.items() if k not in ("timeline", "guide")
+                     and d.toggleViewAction().isChecked() and not d.isFloating()
+                     and isinstance(d.widget(), responsive.ZonaPanel)]
+            if not zonas:
+                return
+            lim = pant - 16
+            holgura = lim - self.minimumSizeHint().width()
+            if holgura > 80:                            # sobra sitio: los que bajaron vuelven hacia su mínimo
+                for z in zonas:
+                    if z.preferido < self.PANEL_MIN and holgura > 80:
+                        z.poner_preferido(min(self.PANEL_MIN, z.preferido + holgura - 60))
+                        holgura = lim - self.minimumSizeHint().width()
+            sobra = self.minimumSizeHint().width() - lim
+            for _vuelta in range(40):                    # no cabe: bajan de a poco hasta lo que pide su contenido
+                if sobra <= 0:
+                    break
+                altos = [z for z in zonas if z.preferido > z.necesita()]
+                if not altos:
+                    break
+                paso = max(8, min(40, sobra))
+                for z in altos:
+                    z.poner_preferido(max(z.necesita(), z.preferido - paso))
+                sobra = self.minimumSizeHint().width() - lim
+        finally:
+            self._cabiendo = False
+
 
     def salir_de_paginas(self) -> bool:
         """Antes de cambiar de pestaña o de proyecto, o de cerrar: se sale de 🎬 Escenas (pregunta si hay cambios sin
@@ -1595,6 +1657,10 @@ class MainWindow(QMainWindow):
         m.addMenu(tm)
         act(m, "🟦 Añadir color sólido o degradado…", None, lambda: self.open_generator())
         act(m, "🎨 Añadir capa de ajuste (color y efectos a todo lo de debajo)", None, self.add_adjustment)
+        act(m, "🎯 Seguimiento del clip elegido…", None,
+            lambda: self.timeline.selected and self.open_tracking(sorted(self.timeline.selected)[0]))
+        act(m, "📌 Pegar el clip elegido a un objeto seguido…", None,
+            lambda: self.timeline.selected and self.timeline._pegar(sorted(self.timeline.selected)[0]))
         act(m, "Acercar", "+", lambda: self.timeline.zoom(1.5))
         act(m, "Alejar", "-", lambda: self.timeline.zoom(1 / 1.5))
         a_fit = act(m, "Ajustar a la ventana", "Ctrl+0", self.timeline.fit)
@@ -1657,10 +1723,10 @@ class MainWindow(QMainWindow):
         act(m, "🔓 Desbloquear toda la timeline", None, lambda: self.ctrl.lock_all_tracks(False))
 
         m = mb.addMenu("&Ventana")
-        for key in ("media", "effects", "ai", "moments", "clips", "kw_folders", "inspector", "voice", "transcript",
-                    "subtitles", "history", "scopes", "guided", "guide", "timeline"):
-            m.addAction(self.docks[key].toggleViewAction())
-        m.addSeparator()
+        self._menu_ventana = m                      # (TODOS los paneles, también los que se crean después: ✂ Cortes)
+        self._sep_ventana = m.addSeparator()
+        self._llenar_menu_ventana()
+        m.aboutToShow.connect(self._llenar_menu_ventana)
         act(m, "Restablecer la distribución de paneles", None, self.reset_layout)
         m.addSeparator()
         act(m, "🔠 Tamaño de letra…", "Ctrl+Alt+=", self.open_font_size)
@@ -2532,6 +2598,30 @@ class MainWindow(QMainWindow):
             return
         if n:
             self.statusBar().showMessage(f"⚡ Ráfaga: {n} cortes al ritmo de la canción. Ctrl+Z la deshace.", 7000)
+
+    def open_voz_ia(self):
+        """🗣 El panel «Voz IA» a la vista (y se queda en esta pestaña de trabajo), con el cursor en el guion."""
+        d = self.docks.get("voz_ia")
+        if d is None:
+            return
+        d.show()
+        d.raise_()
+        self._remember_tab_panel("voz_ia", True)
+        self.voz_ia.texto.setFocus()
+
+    def _acceso_voz_ia_en_transcribir(self):
+        """🗣 «Que lo lea la IA» en la pestaña «🎙 Transcribir» del panel IA (debajo del estado de la transcripción)."""
+        st = getattr(self.ai_panel, "tr_status", None)
+        lay = st.parentWidget().layout() if st is not None and st.parentWidget() is not None else None
+        if lay is None:
+            return
+        b = QPushButton("🗣 Que lo lea la IA")
+        b.setObjectName("flat")
+        b.setToolTip("¿No quieres hablar? Pega tu guion y una voz sintética lo lee. Sale ya transcrito: subtítulos y "
+                     "palabras clave al momento, sin esperar a Whisper.")
+        b.clicked.connect(lambda: self.open_voz_ia())
+        lay.insertWidget(lay.indexOf(st) + 1, b)
+        self._btn_voz_ia_tr = b
 
     def open_voice_record(self):
         """🎙 Grabar la voz en off mientras ves el video (la toma cae en la pista de voz, en el cabezal)."""
@@ -3443,6 +3533,8 @@ class MainWindow(QMainWindow):
             return b
         boton("🎙 Transcribir", "Transcribe la narración (para subtítulos, palabras clave y quitar silencios)",
               lambda: (self.show_panel(self.ai_panel), self.ai_panel.tabs.setCurrentIndex(0), self.voice.transcribe()))
+        boton("🗣 Que lo lea la IA", "¿No quieres hablar? Pega tu guion y una voz sintética lo lee (ya transcrito: "
+                                    "subtítulos y palabras clave al momento)", lambda: self.open_voz_ia())
         boton("💬 Subtítulos", "Subtítulos grandes para Short (después de transcribir)",
               lambda: (self.show_panel(self.subtitles), self.subtitles.btn_quick.click()))
         boton("🔑 Palabras clave", "Crea una carpeta por cada cosa que dices (después de transcribir) para poner su "
@@ -3834,7 +3926,10 @@ class MainWindow(QMainWindow):
         silencios sin comerse palabras, para los subtítulos y para verlas sobre la onda. Empieza a los 3 s y solo si
         Reclaimer sigue abierto (cargar el modelo no se puede interrumpir: no se empieza justo al cerrar)."""
         from ..ai import align
-        if align.needs(self.ctrl.project.transcripts.get(media_id)) and media_id not in self._aligning:
+        tr = self.ctrl.project.transcripts.get(media_id)
+        if tr and (tr.get("estimada") or tr.get("voz_ia")):   # 🗣 Voz IA: ya sabe cada palabra (y no es tu voz)
+            return
+        if align.needs(tr) and media_id not in self._aligning:
             QTimer.singleShot(3000, self, lambda mid=media_id: self._start_align(mid) if self.isVisible() else None)
 
     def _start_align(self, media_id: str):
@@ -3867,6 +3962,30 @@ class MainWindow(QMainWindow):
         from .task_window import manager
         manager().start(f"🎯 Afinar palabras de «{m.name}»", work, done, fail)
 
+    def _es_voz_ia(self, media_id: str | None) -> bool:
+        from ..ai import tts
+        p = self.ctrl.project
+        m = p.media.get(media_id) if media_id else None
+        tr = p.transcripts.get(media_id) if media_id else None
+        return bool((m is not None and tts.ETIQUETA in (m.tags or [])) or (tr and tr.get("voz_ia")))
+
+    def _transcribir_con_aviso(self, transcribir):
+        """🎙 Transcribir, pero si la narración elegida es de la Voz IA (ya tiene su texto exacto) se pregunta antes."""
+        def envoltura(analyze: bool = True):
+            mid = self.voice.media_id()
+            if self._es_voz_ia(mid) and (self.ctrl.project.transcripts.get(mid) or {}).get("words"):
+                r = QMessageBox.question(
+                    self, "🗣 Narración de la Voz IA",
+                    "Esta narración la leyó la Voz IA y ya tiene su transcripción EXACTA (el texto de tu guion).\n\n"
+                    "Si la transcribes con Whisper, ese texto se cambia por lo que entienda Whisper (puede equivocarse "
+                    "en nombres y signos). ¿Transcribirla igualmente?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if r != QMessageBox.Yes:
+                    self.statusBar().showMessage("🗣 La narración de la Voz IA sigue con su texto exacto.", 6000)
+                    return None
+            return transcribir(analyze)
+        return envoltura
+
     def learn_voice(self, media_id: str, words: list):
         """◈ Palabras recién afinadas: la grabación solo se APUNTA para aprender tu voz (instantáneo, sin gastar nada).
         Se aprende cuando se usa: al abrir «✂ Eliminar silencio» (learn_voice_pending) o con Voz → Entrenar."""
@@ -3875,6 +3994,8 @@ class MainWindow(QMainWindow):
             return
         m = self.ctrl.project.media.get(media_id)
         if m is None or not os.path.exists(m.path):
+            return
+        if self._es_voz_ia(media_id):              # 🗣 una narración de la Voz IA NUNCA enseña «tu voz»
             return
         from ..ai import voice_model as VM
         try:
@@ -4198,6 +4319,7 @@ class MainWindow(QMainWindow):
         from .task_window import stop_all
         stop_all()                       # trabajos en segundo plano: se paran y se espera un momento
         self.voice.shutdown()
+        self.voz_ia.shutdown()
         self.audio_monitor.stop()
         self.analyzer.shutdown()
         self._pool_idle = self.ctrl.shutdown(3000)   # análisis de archivos (miniatura, forma de onda) a medias
@@ -4218,5 +4340,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._ensure_timeline_size)
         QTimer.singleShot(400, self._ensure_timeline_size)
         QTimer.singleShot(0, self._ensure_side_widths)
+        wh = self.windowHandle()
+        if wh is not None and not getattr(self, "_vigila_pantalla", False):
+            self._vigila_pantalla = True                 # (al pasar la ventana a otra pantalla, que quepa en ella)
+            wh.screenChanged.connect(lambda _s: self._pestañas_pronto())
         QTimer.singleShot(400, self._ensure_side_widths)
         QTimer.singleShot(0, self.timeline.fit)

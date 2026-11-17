@@ -96,6 +96,80 @@ class _SoundTree(QTreeWidget):
         return md
 
 
+def filtrar_arbol(tree, text: str):
+    """Deja a la vista solo los sonidos cuyo nombre o descripción contienen el texto (y sus grupos)."""
+    t = text.lower().strip()
+    for i in range(tree.topLevelItemCount()):
+        g = tree.topLevelItem(i)
+        visible = 0
+        for k in range(g.childCount()):
+            it = g.child(k)
+            show = not t or t in (it.text(0) + " " + it.text(1)).lower()
+            it.setHidden(not show)
+            visible += show
+        g.setHidden(visible == 0)
+
+
+class SoundBrowser(QWidget):
+    """🔊 Sonidos a mano en Medios: los mismos que en «Efectos» (los de Reclaimer, los guardados de internet y tu
+    carpeta), con su buscador, 🌐 buscar en internet y ➕ poner en el cabezal. Usa el panel de efectos por dentro."""
+
+    def __init__(self, fx, parent=None):
+        super().__init__(parent)
+        self.fx = fx
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 4, 0, 0)
+        self.search = QLineEdit()
+        self.search.setClearButtonEnabled(True)
+        self.search.setPlaceholderText("🔎 Buscar sonido (whoosh, golpe, aplausos…)")
+        self.search.setToolTip("Busca en tus sonidos. Intro o «🌐» lo busca en internet si no está.")
+        v.addWidget(self.search)
+        self.tree = _SoundTree(fx)
+        self.tree.setHeaderLabels(["Sonido", "Para qué"])
+        self.tree.setColumnWidth(0, 170)
+        self.tree.setToolTip("Clic = escuchar · doble clic = poner en el cabezal · o arrástralo a la línea de tiempo.")
+        self.tree.itemClicked.connect(fx._preview)
+        self.tree.itemDoubleClicked.connect(lambda it, _c: fx.add_at_playhead(it) if it is not None and
+                                            it.data(0, Qt.UserRole) else None)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._menu)
+        v.addWidget(self.tree, 1)
+        fila = QHBoxLayout()
+        b_add = QPushButton("➕ Al cabezal")
+        b_add.setToolTip("Pone el sonido elegido donde está el cabezal (en su pista de efectos, a la mitad de volumen).")
+        b_add.clicked.connect(lambda: fx.add_at_playhead(self.tree.currentItem()))
+        fila.addWidget(b_add)
+        self.b_web = None
+        if _hay_sonidos_internet():
+            self.b_web = QPushButton("🌐 Internet")
+            self.b_web.setToolTip("Busca un sonido concreto en internet («motor de coche», «puerta que cruje»), "
+                                  "lo escuchas y lo guardas en tus sonidos o lo pones en el cabezal.")
+            self.b_web.clicked.connect(lambda: fx.open_sound_search(self.search.text().strip()))
+            fila.addWidget(self.b_web)
+        b_dir = QPushButton("📁")
+        b_dir.setFixedWidth(34)
+        b_dir.setToolTip("Elige la carpeta donde guardas tus efectos de sonido descargados.")
+        b_dir.clicked.connect(fx._choose_folder)
+        fila.addWidget(b_dir)
+        v.addLayout(fila)
+        self.search.textChanged.connect(lambda t: filtrar_arbol(self.tree, t))
+        self.search.returnPressed.connect(self._intro)
+        self.tree._buscador = self.search          # (al refrescar la lista, el filtro escrito se mantiene)
+        fx.registrar_arbol(self.tree)
+
+    def _intro(self):
+        """Intro: si no hay ningún sonido con ese nombre, se busca en internet."""
+        hay = any(not self.tree.topLevelItem(i).isHidden() for i in range(self.tree.topLevelItemCount()))
+        if not hay and self.b_web is not None and self.search.text().strip():
+            self.fx.open_sound_search(self.search.text().strip())
+
+    def _menu(self, pos):
+        it = self.tree.itemAt(pos)
+        ref = it.data(0, Qt.UserRole) if it else None
+        if ref:
+            self.fx._star_menu(ref, self.tree.viewport().mapToGlobal(pos))
+
+
 class _FxList(QListWidget):
     """Lista de efectos (⭐ mis efectos, transiciones) que se arrastra encima de un clip de la timeline."""
 
@@ -467,9 +541,11 @@ class EffectsPanel(QWidget):
         self._trans_job = None
         # Limpio, como Resolve: cada cosa en su pestaña y las explicaciones en la ayuda emergente
         from .tabs import tabbed, untitle
-        untitle(g0, g1, g2, gt)
+        g4 = self._build_context_group()
+        timeline.context_fx_requested.connect(self.propose_context_fx)
+        untitle(g0, g1, g2, gt, g4)
         self.tabs = tabbed([("Imagen", [g2]), ("Transiciones", [gt]), ("Sonidos", [g1, g3]),
-                            ("⭐ Para la IA", [g0])])
+                            ("⭐ Para la IA", [g0]), ("✨ Lo que dices", [g4])], clave="efectos")
         self.tabs.setToolTip("")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -767,16 +843,352 @@ class EffectsPanel(QWidget):
         self.look_status.setText(done)
         return True
 
+    # ------------------------------------------------------- ✨ efectos según lo que dices
+    def _build_context_group(self) -> QGroupBox:
+        """✨ Efectos según lo que dices: 🖤 gris en lo triste, 🔍 zoom a la cara en las fotos (ai/context_effects.py)."""
+        from PySide6.QtWidgets import QCheckBox, QProgressBar
+        self.ctx_props: list[dict] = []
+        self._ctx_job = None
+        st = self.settings
+
+        def flag(key, default):
+            return str(st.value("efectos/" + key, "true" if default else "false")).lower() == "true"
+
+        g = QGroupBox("✨ Efectos según lo que dices")
+        g.setToolTip("Mira lo que dices durante los clips ELEGIDOS en la línea de tiempo (sin elegir ninguno, toda la "
+                     "línea de tiempo), y un poco antes, y te propone efectos con su motivo.\n"
+                     "También: clic derecho en la selección → «✨ Efectos según lo que digo…».")
+        v = QVBoxLayout(g)
+        r = QHBoxLayout()
+        lab = QLabel("🖤 Tono triste:")
+        r.addWidget(lab)
+        self.ctx_mode = QComboBox()
+        self.ctx_mode.addItem("🖤 Blanco y negro", "bw")
+        self.ctx_mode.addItem("🩶 Desaturado suave", "desat")
+        self.ctx_mode.setCurrentIndex(max(0, self.ctx_mode.findData(str(st.value("efectos/ctx_modo", "bw")))))
+        self.ctx_mode.setToolTip("Qué se pone cuando lo que dices es triste, una noticia fuerte o un tema difícil "
+                                 "(«falleció», «tragedia», «despidos», «cancelado», «accidente», «polémica»…; "
+                                 "«no murió» no cuenta).\nEn un clip largo, solo el tramo de esa frase.")
+        lab.setToolTip(self.ctx_mode.toolTip())
+        self.ctx_mode.currentIndexChanged.connect(
+            lambda _i: st.setValue("efectos/ctx_modo", self.ctx_mode.currentData()))
+        r.addWidget(self.ctx_mode, 1)
+        b_words = QPushButton("📝 Mis palabras…")
+        b_words.setToolTip("Añade tus palabras o frases tristes (o las que no deben contar nunca) en un archivo de "
+                           "texto: una por línea.")
+        b_words.clicked.connect(self._ctx_open_lexicon)
+        r.addWidget(b_words)
+        v.addLayout(r)
+        self.ctx_name = QCheckBox("👤 Solo cuando nombro a alguien / una palabra clave")
+        self.ctx_name.setToolTip("El gris solo si en esa frase (o muy cerca) dices el nombre de alguien, un nombre "
+                                 "propio o una de tus palabras clave 🔑 / del glosario 📖.")
+        self.ctx_zoom = QCheckBox("🔍 Zoom a la cara en las fotos")
+        self.ctx_zoom.setToolTip("En las IMÁGENES con una cara o una persona: zoom dinámico suave hacia ella.\n"
+                                 "Cada foto se mira una sola vez, pequeña y en segundo plano (se recuerda); "
+                                 "los videos no se analizan.")
+        self.ctx_star = QCheckBox("⭐ Y mis efectos para la IA")
+        self.ctx_star.setToolTip("También tus ⭐ efectos favoritos donde los pide lo que dices («fíjense», «hace "
+                                 "años», «desastre», «increíble»…), solo en estos clips.")
+        self.ctx_direct = QCheckBox("⚡ Aplicar sin preguntar")
+        self.ctx_direct.setToolTip("Pone todas las propuestas en cuanto las encuentra, sin revisarlas (un Ctrl+Z "
+                                   "las quita todas).")
+        for cb, key, default in ((self.ctx_name, "ctx_nombre", False), (self.ctx_zoom, "ctx_zoom", True),
+                                 (self.ctx_star, "ctx_star", True), (self.ctx_direct, "ctx_directo", False)):
+            cb.setChecked(flag(key, default))
+            cb.toggled.connect(lambda on, k=key: st.setValue("efectos/" + k, "true" if on else "false"))
+        grid = QGridLayout()
+        grid.addWidget(self.ctx_name, 0, 0, 1, 2)
+        grid.addWidget(self.ctx_zoom, 1, 0)
+        grid.addWidget(self.ctx_star, 1, 1)
+        v.addLayout(grid)
+        r2 = QHBoxLayout()
+        self.b_ctx = QPushButton("✨ Proponer en los clips elegidos")
+        self.b_ctx.setObjectName("primary")
+        self.b_ctx.setToolTip("Sin clips elegidos: en toda la línea de tiempo.")
+        self.b_ctx.clicked.connect(lambda: self.propose_context_fx())
+        r2.addWidget(self.b_ctx, 1)
+        r2.addWidget(self.ctx_direct)
+        self.b_ctx_cancel = QPushButton("✕ Cancelar")
+        self.b_ctx_cancel.setToolTip("Para de buscar caras (lo encontrado hasta ahora se queda).")
+        self.b_ctx_cancel.setEnabled(False)
+        self.b_ctx_cancel.clicked.connect(self._ctx_cancel)
+        r2.addWidget(self.b_ctx_cancel)
+        v.addLayout(r2)
+        self.ctx_bar = QProgressBar()
+        self.ctx_bar.setRange(0, 100)
+        self.ctx_bar.setTextVisible(False)
+        self.ctx_bar.setMaximumHeight(6)
+        self.ctx_bar.hide()
+        v.addWidget(self.ctx_bar)
+        self.ctx_tree = QTreeWidget()
+        self.ctx_tree.setHeaderLabels(["Momento", "Efecto", "Por qué"])
+        self.ctx_tree.setRootIsDecorated(False)
+        self.ctx_tree.setColumnWidth(0, 80)
+        self.ctx_tree.setColumnWidth(1, 140)
+        self.ctx_tree.setMinimumHeight(170)
+        self.ctx_tree.setToolTip("Marca las que quieres · clic = ir ahí.")
+        self.ctx_tree.currentItemChanged.connect(lambda it, _p: self._ctx_focus(it))
+        v.addWidget(self.ctx_tree)
+        r3 = QHBoxLayout()
+        b_ok = QPushButton("✓ Aplicar las marcadas")
+        b_ok.setToolTip("Todas a la vez, en un solo paso de deshacer (Ctrl+Z).")
+        b_ok.clicked.connect(lambda: self.ctx_apply())
+        b_all = QPushButton("☑")
+        b_all.setToolTip("Marcar todas")
+        b_all.setFixedWidth(34)
+        b_all.clicked.connect(lambda: self._ctx_check_all(True))
+        b_none = QPushButton("☐")
+        b_none.setToolTip("Desmarcar todas")
+        b_none.setFixedWidth(34)
+        b_none.clicked.connect(lambda: self._ctx_check_all(False))
+        b_rej = QPushButton("✗ Descartar")
+        b_rej.setToolTip("Quita de la lista las marcadas (si no hay ninguna marcada, todas).")
+        b_rej.clicked.connect(self.ctx_reject)
+        for w in (b_ok, b_all, b_none, b_rej):
+            r3.addWidget(w)
+        v.addLayout(r3)
+        self.ctx_status = QLabel("")
+        self.ctx_status.setObjectName("dim")
+        self.ctx_status.setWordWrap(True)
+        v.addWidget(self.ctx_status)
+        return g
+
+    def _ctx_open_lexicon(self):
+        from ..ai import context_effects as CE
+        path = CE.user_lexicon_path()
+        if not os.path.exists(path):
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(CE.USER_TEMPLATE)
+            except OSError as exc:
+                self.ctx_status.setText(f"✗ No pude crear {path}: {exc}")
+                return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _ctx_busy(self, on: bool):
+        self.b_ctx.setEnabled(not on)
+        self.b_ctx_cancel.setEnabled(on)
+        self.ctx_bar.setVisible(on)
+        self.ctx_bar.setValue(0)
+
+    def _ctx_cancel(self):
+        if self._ctx_job is not None:
+            self._ctx_job.cancel()
+            self.ctx_status.setText("✕ Parando…")
+
+    def _show_ctx_tab(self):
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i).startswith("✨"):
+                self.tabs.setCurrentIndex(i)
+        win = self.window()
+        if hasattr(win, "show_panel"):
+            win.show_panel(self)
+
+    def propose_context_fx(self, ids=None):
+        """✨ Propuestas para los clips elegidos (ids; None = la selección; sin selección, toda la línea de tiempo):
+        el léxico es instantáneo; las caras de las fotos, en segundo plano (con caché, progreso y cancelar)."""
+        from ..ai import context_effects as CE
+        from ..core.model import Project
+        from .jobs import BackgroundJob
+        from .nudge import nudge_for
+        self._show_ctx_tab()
+        if self._ctx_job is not None:
+            self.ctx_status.setText("Ya estoy en ello…")
+            return
+        p = self.ctrl.project
+        if ids is None:
+            ids = [i for i in self.timeline.selected if i in p.clips]
+        clips = CE.scope_clips(p, ids) if ids else []
+        if ids and not clips:                       # (elegiste solo textos o sonido: no se mira todo)
+            self.ctx_status.setText("Elige clips de video o imagen (o ninguno, para toda la línea de tiempo).")
+            nudge_for(self.ctx_status.text())
+            return
+        donde = (f"{len(clips)} clip{'s' if len(clips) != 1 else ''} elegido{'s' if len(clips) != 1 else ''}"
+                 if clips else "toda la línea de tiempo")
+        if not clips:
+            clips = CE.scope_clips(p)
+        if not clips:
+            self.ctx_status.setText("No hay clips de video o imagen en la línea de tiempo.")
+            nudge_for(self.ctx_status.text())
+            return
+        has_words = any(mid in p.media and (tr or {}).get("words") for mid, tr in p.transcripts.items())
+        imgs = CE.image_clips_for_zoom(p, clips) if self.ctx_zoom.isChecked() else []
+        if not has_words and not imgs:
+            self.ctx_status.setText("Primero transcribe tu narración (IA ✨ → 🎙 Transcribir): así sé lo que dices.")
+            nudge_for(self.ctx_status.text())
+            return
+        snap = Project.from_dict(json.loads(json.dumps(p.to_dict())))
+        scope_ids = [c.id for c in clips]
+        mode, need = self.ctx_mode.currentData(), self.ctx_name.isChecked()
+        keys = list(self.memory) if self.ctx_star.isChecked() else []
+        freq = self.fx_freq.currentData()
+        root = None
+        if need:
+            try:
+                from .clips_panel import _raiz_guardada
+                root = _raiz_guardada()
+            except Exception:  # noqa: BLE001 - sin carpetas de palabras clave: nombres propios y glosario
+                root = None
+        paths = list(dict.fromkeys(snap.media[c.media_id].path for c in imgs if c.media_id in snap.media))
+
+        def work(progress, cancelled):
+            progress(0.02, "✨ Leyendo lo que dices…")
+            sc = CE.scope_clips(snap, scope_ids)
+            words = CE.timeline_words(snap)
+            names = []
+            if need and words:
+                extra = glos = None
+                try:
+                    from ..core import keyword_folders as KF
+                    extra = KF.terms(KF.list_folders(root)) if root and os.path.isdir(root) else None
+                except Exception:  # noqa: BLE001
+                    extra = None
+                try:
+                    from ..ai import keyword_glossary as KG
+                    glos = KG.load()
+                except Exception:  # noqa: BLE001
+                    glos = None
+                names = CE.mention_names(snap, extra, glos)
+            tone = CE.tone_proposals(snap, sc, words, mode=mode, need_name=need, names=names) if words else []
+            star = []
+            if keys and words:
+                try:
+                    star = CE.star_proposals(snap, sc, keys, freq)
+                except Exception:  # noqa: BLE001 - las ⭐ son un extra: sin ellas sigue lo demás
+                    star = []
+            faces, stopped = {}, False
+            for k, path in enumerate(paths):
+                if cancelled():
+                    stopped = True
+                    break
+                progress(0.1 + 0.9 * k / max(1, len(paths)), f"🔍 Buscando caras en las fotos ({k + 1}/{len(paths)})…")
+                faces[path] = CE.image_face(path)
+            return CE.merge(tone, CE.zoom_proposals(snap, sc, faces), star), stopped
+
+        self._ctx_busy(True)
+        self.ctx_status.setText(f"✨ Mirando lo que dices en {donde}…")
+        job = self._ctx_job = BackgroundJob(work, self)
+        job.title = "✨ Efectos según lo que dices"
+        job.progress.connect(lambda f, t: (self.ctx_bar.setValue(int(f * 100)), self.ctx_status.setText(t)))
+
+        def done(res):
+            self._ctx_job = None
+            self._ctx_busy(False)
+            props, stopped = res
+            self.ctx_props = [x for x in props if x["clip_id"] in self.ctrl.project.clips]
+            extra = " (paré de buscar caras: lo encontrado hasta ahí)" if stopped else ""
+            if not self.ctx_props:
+                self._ctx_fill()
+                self.ctx_status.setText(f"No encontré nada triste ni caras en {donde}{extra}." +
+                                        (" Prueba sin «👤 Solo cuando nombro…»." if need else ""))
+                return
+            self._ctx_fill()                        # (la lista al día también si aplicar falla)
+            if self.ctx_direct.isChecked():
+                self.ctx_apply(list(range(len(self.ctx_props))))
+                return
+            self.ctx_status.setText(f"✨ {len(self.ctx_props)} propuesta(s) en {donde}{extra}. Marca las que quieres "
+                                    "y «✓ Aplicar las marcadas».")
+
+        def failed(msg):
+            self._ctx_job = None
+            self._ctx_busy(False)
+            self.ctx_status.setText("✗ " + msg)
+        job.done.connect(done)
+        job.failed.connect(failed)
+        job.start()
+
+    def _ctx_fill(self):
+        from .common import fmt_time
+        self.ctx_tree.clear()
+        for x in self.ctx_props:
+            it = QTreeWidgetItem([fmt_time(x["t"], False), x["name"], x["reason"]])
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(0, Qt.Checked)
+            for col in range(3):
+                it.setToolTip(col, f"{x['name']} — {x['reason']}")
+            self.ctx_tree.addTopLevelItem(it)
+
+    def _ctx_rows(self, checked: bool = True) -> list[int]:
+        return [i for i in range(self.ctx_tree.topLevelItemCount())
+                if (self.ctx_tree.topLevelItem(i).checkState(0) == Qt.Checked) == checked]
+
+    def _ctx_check_all(self, on: bool):
+        for i in range(self.ctx_tree.topLevelItemCount()):
+            self.ctx_tree.topLevelItem(i).setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+
+    def _ctx_focus(self, it):
+        i = self.ctx_tree.indexOfTopLevelItem(it) if it else -1
+        if not (0 <= i < len(self.ctx_props)):
+            return
+        x = self.ctx_props[i]
+        self.engine.seek(x["t"])
+        if x["clip_id"] in self.ctrl.project.clips:
+            self.timeline.set_selection([x["clip_id"]])
+
+    def _ctx_drop(self, items):
+        ids = {x["id"] for x in items}
+        self.ctx_props = [x for x in self.ctx_props if x["id"] not in ids]
+        self._ctx_fill()
+
+    def ctx_apply(self, rows: list[int] | None = None):
+        """Pone las propuestas marcadas (o esas filas) en UN solo paso de deshacer."""
+        from ..ai import effect_memory as EM
+        rows = self._ctx_rows(True) if rows is None else rows
+        items = [self.ctx_props[i] for i in sorted(set(rows)) if 0 <= i < len(self.ctx_props)]
+        if not items:
+            self.ctx_status.setText("Marca antes alguna propuesta.")
+            return
+        stars = [x for x in items if x["kind"] == "star"]
+        res = self.ctrl.apply_context_effects(items, self._sound_media({x["effect"] for x in stars}))
+        if res is None:
+            return
+        for x in stars:
+            EM.learn(x["effect"], x.get("star_kind", "elegido"), x.get("vec"), True)
+        self._ctx_drop(items)
+        self.ctx_status.setText(f"✓ Puesto{'s' if res != 1 else ''} {res} efecto{'s' if res != 1 else ''} "
+                                "(un solo Ctrl+Z para deshacer).")
+
+    def ctx_reject(self):
+        from ..ai import effect_memory as EM
+        rows = self._ctx_rows(True) or list(range(len(self.ctx_props)))
+        items = [self.ctx_props[i] for i in rows if 0 <= i < len(self.ctx_props)]
+        for x in items:
+            if x["kind"] == "star":
+                EM.learn(x["effect"], x.get("star_kind", "elegido"), x.get("vec"), False)
+        self._ctx_drop(items)
+        if items:
+            self.ctx_status.setText(f"✗ {len(items)} descartada(s).")
+
     # ------------------------------------------------------------ sonidos
     def reload(self):
-        self.tree.clear()
+        """Rellena la lista de sonidos de este panel y la de 🔊 Sonidos en Medios (si está abierta)."""
+        vivos = []
+        for tree in [self.tree] + list(getattr(self, "_otros_arboles", [])):
+            try:
+                self._llenar(tree)
+                buscador = self.search if tree is self.tree else getattr(tree, "_buscador", None)
+                if buscador is not None and buscador.text().strip():
+                    filtrar_arbol(tree, buscador.text())
+                if tree is not self.tree:
+                    vivos.append(tree)
+            except RuntimeError:                       # (una lista ya cerrada)
+                pass
+        self._otros_arboles = vivos
+
+    def registrar_arbol(self, tree):
+        """Otra lista de sonidos (p. ej. 🔊 Sonidos en Medios) que se llena y se actualiza igual que esta."""
+        self._otros_arboles = list(getattr(self, "_otros_arboles", [])) + [tree]
+        self._llenar(tree)
+
+    def _llenar(self, tree):
+        tree.clear()
         groups: dict[str, QTreeWidgetItem] = {}
 
         def group(name):
             if name not in groups:
                 it = QTreeWidgetItem([name, ""])
                 it.setFlags(it.flags() & ~Qt.ItemIsDragEnabled)
-                self.tree.addTopLevelItem(it)
+                tree.addTopLevelItem(it)
                 it.setExpanded(True)
                 groups[name] = it
             return groups[name]
@@ -810,16 +1222,7 @@ class EffectsPanel(QWidget):
                             return
 
     def _filter(self, text: str):
-        t = text.lower().strip()
-        for i in range(self.tree.topLevelItemCount()):
-            g = self.tree.topLevelItem(i)
-            visible = 0
-            for k in range(g.childCount()):
-                it = g.child(k)
-                show = not t or t in (it.text(0) + " " + it.text(1)).lower()
-                it.setHidden(not show)
-                visible += show
-            g.setHidden(visible == 0)
+        filtrar_arbol(self.tree, text)
 
     def _path(self, ref: str) -> str:
         return sfx.path_for(ref[4:]) if ref.startswith("sfx:") else ref[5:]

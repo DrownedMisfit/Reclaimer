@@ -43,6 +43,11 @@ class _Worker(QObject):
         self._clock0 = 0.0
         self.listo = threading.Event()   # init() terminó (con o sin tarjeta)
         self._devices = None
+        self.pedidos = 0             # arranques pedidos (los pone LiveAudio antes de avisar)
+        self.atendidos = 0           # arranques atendidos: si llegan varios seguidos (scrub), solo el último
+        self.t_pedido = 0.0          # cuándo se pidió el último (para compensar lo que tarda en arrancar)
+        self._rampa = False          # fundido de ~5 ms en el primer bloque tras arrancar (sin chasquido)
+        self._oido = (0.0, 0.0)      # (segundo que suena, cuándo se midió): lo lee la interfaz sin tocar la tarjeta
 
     @Slot()
     def init(self):
@@ -97,13 +102,23 @@ class _Worker(QObject):
 
     @Slot(float)
     def start(self, t: float):
+        self.atendidos += 1
+        if self.atendidos < self.pedidos:      # (ya hay otro arranque más nuevo en cola: este sobra)
+            return
         self.mixer.reset()
-        self.pos = self.t_start = t
         self.written = 0
         self.playing = True
-        self._clock0 = time.perf_counter()
         if self.sink is not None:
+            # 🔊 Parar antes de arrancar otra vez: si ya sonaba (clic en la línea de tiempo mientras se reproduce),
+            # QAudioSink.start() sin stop() deja la salida en reposo y el audio se queda mudo hasta darle a Espacio.
+            self.sink.stop()
             self.dev = self.sink.start()
+        # (lo que tardó en llegar aquí y en arrancar la tarjeta: el cabezal ya avanzó eso)
+        dt = max(0.0, min(0.5, time.perf_counter() - self.t_pedido)) if self.t_pedido else 0.0
+        self.pos = self.t_start = t + dt
+        self._clock0 = time.perf_counter()
+        self._oido = (self.t_start, self._clock0)
+        self._rampa = True
         self._pump()
         self.timer.start()
 
@@ -137,17 +152,27 @@ class _Worker(QObject):
             return
         per = n * (8 if self.fmt_float else 4)
         while self.sink.bytesFree() >= per:
-            self.dev.write(self._bytes(self.mixer.render(self.pos, n)))
+            bloque = self.mixer.render(self.pos, n)
+            if self._rampa:                    # (entra en ~5 ms: sin chasquido al saltar o al hacer scrub)
+                self._rampa = False
+                k = min(len(bloque), max(1, int(LM.SR * 0.005)))
+                bloque = np.array(bloque, dtype=np.float32, copy=True)
+                bloque[:k] *= np.linspace(0.0, 1.0, k, dtype=np.float32)[:, None] if bloque.ndim == 2 else \
+                    np.linspace(0.0, 1.0, k, dtype=np.float32)
+            self.dev.write(self._bytes(bloque))
             self.pos += n / LM.SR
             self.written += n
+        queued = (self.sink.bufferSize() - self.sink.bytesFree()) / (8 if self.fmt_float else 4)
+        self._oido = (self.t_start + (self.written - queued) / LM.SR, time.perf_counter())
         self.mixer.prefetch(self.pos)
 
     def heard(self) -> float:
-        """Segundo que suena ahora: lo escrito menos lo que aún espera en la tarjeta."""
+        """Segundo que suena ahora: lo escrito menos lo que aún espera en la tarjeta. Desde el hilo de la interfaz
+        solo se lee lo que midió el hilo del audio (más lo que pasó desde entonces): no se toca la tarjeta."""
         if self.sink is None:
             return self.t_start + (time.perf_counter() - self._clock0)
-        queued = (self.sink.bufferSize() - self.sink.bytesFree()) / (8 if self.fmt_float else 4)
-        return self.t_start + (self.written - queued) / LM.SR
+        oido, cuando = self._oido
+        return oido + max(0.0, min(0.1, time.perf_counter() - cuando))
 
 
 class LiveAudio(QObject):
@@ -195,6 +220,8 @@ class LiveAudio(QObject):
 
     def start(self, t: float):
         self.playing = True
+        self._w.t_pedido = time.perf_counter()     # (para compensar lo que tarde en arrancar)
+        self._w.pedidos += 1                       # (si llegan varios seguidos, el hilo del audio salta a este)
         self._start.emit(float(t))
 
     def stop(self):

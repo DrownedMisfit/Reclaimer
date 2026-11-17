@@ -169,6 +169,8 @@ def main():
     res, txt = tool("guardar")
     assert res["isError"] and ".eia" in txt
     eia = os.path.join(out, "prueba.eia")
+    if os.path.exists(eia):                       # (de una pasada anterior: «nunca pisa» se comprueba luego)
+        os.remove(eia)
     res, txt = tool("guardar", {"ruta": eia})
     assert not res["isError"] and os.path.exists(eia), txt
     print("✓ guardar: pide ruta si no hay archivo y nunca pisa uno existente")

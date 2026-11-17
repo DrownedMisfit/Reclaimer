@@ -58,6 +58,7 @@ class TimelineWidget(QWidget):
     example_requested = Signal(str)       # 🎯 usar este clip como ejemplo de lo que busco
     effect_mark_clicked = Signal(int)     # ⭐ clic en una propuesta de «Mis efectos para la IA»          # buscar momentos parecidos a este clip
     impact_requested = Signal(list)          # dar más impacto visual a estos clips
+    context_fx_requested = Signal(list)      # ✨ efectos según lo que digo en estos clips (los hace el panel Efectos)
     broll_range_requested = Signal(float, float)   # rehacer el B-roll de este tramo
     selection_changed = Signal(list)
     compound_requested = Signal(list)     # ⧉ cocinar estos clips en uno (lo hace la ventana principal)
@@ -68,6 +69,7 @@ class TimelineWidget(QWidget):
     kw_kind_requested = Signal(list, str)  # ⚡ palabras clave: claves de mención y tipo ("" = volver a lo sugerido)
     kw_arrange_requested = Signal()       # ⚡ acomodar todas las menciones
     kw_toggled = Signal(bool)             # 🔑 enseñar / ocultar la fila de palabras clave
+    hint_word_clicked = Signal(str)       # 🔑 clic en la muesca de otra palabra (📍 Todas): «Dijiste…» pasa a esa
 
     NEW_ZONE = 26   # franja de abajo: suelta ahí algo y se crea una pista nueva
     HEADER_W = 170
@@ -285,6 +287,28 @@ class TimelineWidget(QWidget):
         if (self.hint_marks, self.hint_selected) != antes:     # (⚡ las mismas: no se redibuja todo)
             self.update()
 
+    def set_hint_focus(self, palabra: str):
+        """🔑 La palabra elegida en «Dijiste…»: sus banderitas resaltadas; las de las demás, atenuadas (con «📍 Todas»)."""
+        palabra = str(palabra or "")
+        if palabra != getattr(self, "hint_focus", ""):
+            self.hint_focus = palabra
+            self.update()
+
+    def _hint_dim(self, label: str) -> bool:
+        """Atenuada: una marca 🎬 de otra palabra (con «📍 Todas»). Las de 🔎 Buscar nunca se atenúan."""
+        foco = getattr(self, "hint_focus", "")
+        return (bool(foco) and str(label).lstrip().startswith("🎬")
+                and self.hint_word(label).casefold() != foco.casefold())
+
+    def _hint_notch(self, i: int) -> bool:
+        """La marca i se dibuja como muesca (atenuada y no elegida)."""
+        return i != self.hint_selected and self._hint_dim(self.hint_marks[i][1])
+
+    @staticmethod
+    def _notch_rect(r: QRectF) -> QRectF:
+        """La muesca que se dibuja para una marca atenuada (r = el rectángulo de su texto, que no se ve)."""
+        return QRectF(r.left(), r.top() + r.height() * 0.45, 6, r.height() * 0.55)
+
     def select_hint(self, i: int):
         """🔑 Elige la banderita i (clic en ella): la biblioteca puede «Añadir en la palabra clave seleccionada»."""
         self.hint_selected = i if 0 <= i < len(self.hint_marks) else -1
@@ -307,9 +331,10 @@ class TimelineWidget(QWidget):
         if not (0 <= i < len(self.hint_marks)):
             i = -1
             if playhead is not None and self.hint_marks:
-                j = min(range(len(self.hint_marks)), key=lambda k: abs(self.hint_marks[k][0] - playhead))
-                if abs(self.hint_marks[j][0] - playhead) <= near:
-                    i = j
+                cerca = [k for k in range(len(self.hint_marks)) if abs(self.hint_marks[k][0] - playhead) <= near]
+                if cerca:           # (📍 Todas: mejor la de la palabra elegida que una atenuada)
+                    i = min(cerca, key=lambda k: (self._hint_dim(self.hint_marks[k][1]),
+                                                  abs(self.hint_marks[k][0] - playhead)))
         if i < 0:
             return None
         t, label = self.hint_marks[i]
@@ -564,10 +589,21 @@ class TimelineWidget(QWidget):
     def hint_mark_at(self, pos: QPointF) -> int:
         if not self.hint_marks or not (self.TOPIC_H <= pos.y() <= self.TOPIC_H + 16 * self.ui_k):
             return -1
+        # (primero las que se ven enteras; las atenuadas solo por su muesca: no tapan ni se comen clics)
+        muescas = []
         for i in range(len(self.hint_marks)):
+            if self._hint_notch(i):
+                muescas.append(i)
+                continue
             r = self._hint_rect(i)
             if r is not None and r.contains(pos):
                 return i
+        for i in muescas:
+            r = self._hint_rect(i)
+            if r is not None:
+                n = self._notch_rect(r)
+                if QRectF(n.left() - 1, r.top(), 8, r.height()).contains(pos):
+                    return i
         return -1
 
     def set_preview_regions(self, regions, voice=None, tracks=None):
@@ -2098,7 +2134,8 @@ class TimelineWidget(QWidget):
             x = self.x_for(t)
             if x < self._vis[0] or x > self._vis[1]:
                 continue
-            p.setPen(QPen(QColor(64, 200, 230, 170), 1, Qt.DashLine))
+            tenue = self._hint_dim(_label)          # (con «📍 Todas»: las de otras palabras, casi invisibles)
+            p.setPen(QPen(QColor(64, 200, 230, 55 if tenue else 170), 1, Qt.DashLine))
             p.drawLine(QLineF(x, self.RULER_H, x, H))
         # Tramo marcado con I / O: un velo suave sobre las pistas
         rng = proj.marked_range()
@@ -2347,12 +2384,18 @@ class TimelineWidget(QWidget):
             p.drawRoundedRect(r, 3, 3)
             p.setPen(QColor("#101114"))
             p.drawText(r, Qt.AlignCenter, texto)
-        # 🎬 Banderitas de «Dijiste…» (clic = ir ahí)
-        for i in range(len(self.hint_marks)):
+        # 🎬 Banderitas de «Dijiste…» (clic = ir ahí). Primero las muescas atenuadas: las enteras van encima
+        orden = sorted(range(len(self.hint_marks)), key=lambda k: not self._hint_notch(k))
+        for i in orden:
             r = self._hint_rect(i)
             if r is None:
                 continue
             sel = i == self.hint_selected            # 🔑 la elegida: más clara y con borde blanco
+            if self._hint_notch(i):
+                p.setPen(Qt.NoPen)                   # (otra palabra: solo una muesca, sin texto que tape)
+                p.setBrush(QColor(64, 200, 230, 110))
+                p.drawRoundedRect(self._notch_rect(r), 2, 2)
+                continue
             p.setPen(QPen(QColor("#ffffff"), 2) if sel else Qt.NoPen)
             p.setBrush(QColor(150, 235, 255, 255) if sel else QColor(64, 200, 230, 235))
             p.drawRoundedRect(r, 3, 3)
@@ -2779,7 +2822,7 @@ class TimelineWidget(QWidget):
         p.setFont(f)
         p.setPen(QColor("white"))
         linked = bool(c.link) and getattr(self, "_links", {}).get(c.link, 0) > 1
-        badges = ("🔗 " if linked else "") + ("🔒 " if c.locked else "") + ("📝 " if c.note else "") +             ("🔍 " if transform.is_zoomed(c.zoom_kf) else "") + ("🎞 " if c.layout_kf else ("◫ " if c.layout else "")) +             (("❄ " if c.speed <= 0 else f"{c.speed * 100:g}% ") if c.speed != 1.0 else "") + ("◀ " if c.reverse else "")
+        badges = ("🔗 " if linked else "") + ("🔒 " if c.locked else "") + ("📝 " if c.note else "") +             ("🔍 " if transform.is_zoomed(c.zoom_kf) else "") + ("🎞 " if c.layout_kf else ("◫ " if c.layout else "")) +             (("❄ " if c.speed <= 0 else f"{c.speed * 100:g}% ") if c.speed != 1.0 else "") + ("◀ " if c.reverse else "") + ("🎯 " if c.motion_tracks else "") +             ("📌 " if self.ctrl.pinned_info(c) else "")
         if c.text:
             name = "T  " + str(c.text.get("content", "")).replace("\n", " ")
         else:
@@ -3159,7 +3202,7 @@ class TimelineWidget(QWidget):
         pts += [(m.time, "marcador") for m in self.ctrl.project.markers]
         if self.kw_visible:
             pts += [(float(m["t"]), "palabra clave") for m in self.kw_marks]
-        pts += [(float(t), "marca") for t, _l in self.hint_marks]
+        pts += [(float(t), "marca") for t, _l in self.hint_marks if not self._hint_dim(_l)]   # (sin las atenuadas)
         if self.snap_rhythm and self.ctrl.rhythm:
             rex = set() if keep_rhythm else set(exclude)
             key = frozenset(rex)
@@ -3305,8 +3348,12 @@ class TimelineWidget(QWidget):
             return
         h = self.hint_mark_at(pos) if e.button() == Qt.LeftButton else -1
         if h >= 0:                  # 🎬 banderita de «Dijiste…»: el cabezal va ahí (y queda elegida 🔑)
+            otra = self._hint_notch(h)
+            t_h, l_h = self.hint_marks[h]
             self.select_hint(h)     # (va encima de los chips ⚡: se pinta encima y se pulsa antes)
-            self.seek_requested.emit(max(0.0, self.hint_marks[h][0]))
+            self.seek_requested.emit(max(0.0, t_h))
+            if otra:                # (muesca de otra palabra: «Dijiste…» pasa a esa palabra)
+                self.hint_word_clicked.emit(self.hint_word(l_h))
             return
         kwi = self.kw_mark_at(pos) if e.button() in (Qt.LeftButton, Qt.RightButton) else -1
         if kwi >= 0:                # ⚡ chip de palabra clave: clic (sin arrastrar) = el tipo siguiente; derecho = menú
@@ -3942,8 +3989,21 @@ class TimelineWidget(QWidget):
                    ("Verde azulado", "#3c9a94"), ("Azul", "#3f6fb5"), ("Morado", "#7a5bb8"), ("Rosa", "#c4598f"),
                    ("Marrón", "#8a5a3c"), ("Gris", "#6b6f78")]
 
+    def _pegar(self, clip_id: str):
+        """📌 Pegar este clip a un objeto seguido (elige el recorrido o abre el seguimiento del video de debajo)."""
+        from .pegar_dialog import abrir
+        win = self.window()
+        eng = getattr(win, "engine", None)
+        if eng is not None and hasattr(eng, "pause"):
+            eng.pause()
+        abrir(self.ctrl, clip_id, self.playhead, win)
+
     def _clip_menu(self, clip, global_pos):
         """Clic derecho en un clip: ordenado y limpio como el de DaVinci Resolve (y lo nuestro al final)."""
+        help_ui.exec_menu(self.build_clip_menu(clip, global_pos), global_pos)
+
+    def build_clip_menu(self, clip, global_pos) -> QMenu:
+        """Arma el menú de clic derecho (sin enseñarlo: las pruebas leen sus acciones)."""
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
         if clip and clip.id not in self.selected:
@@ -4104,9 +4164,30 @@ class TimelineWidget(QWidget):
                 tm.addSeparator()
                 back = tm.addAction("Volver al original", lambda: self.ctrl.restore_original(vis_ids))
                 back.setEnabled(any((proj.clips[i].fx or {}).get("orig") for i in vis_ids))
-            if m_ is not None and m_.kind != KIND_AUDIO and clip.text is None:
-                menu.addAction("Seguir personaje u objeto…", lambda: self.track_requested.emit(clip.id))
+            if m_ is not None and m_.kind == KIND_VIDEO and clip.text is None and                     proj.track(clip.track_id).kind == TRACK_VIDEO:
+                a = menu.addAction("🎯 Seguimiento…", lambda: self.track_requested.emit(clip.id))
+                a.setToolTip("Sigue un personaje u objeto (solo o a mano) y úsalo: zoom que lo sigue, encuadre "
+                             "vertical, desenfocarlo/pixelarlo o pegarle un texto o una imagen")
+                if (clip.fx or {}).get("tracked_blur"):
+                    menu.addAction("🙈 Quitar lo tapado con seguimiento",
+                                   lambda: self.ctrl.remove_track_blur(clip.id))
+            if len(ids) == 1 and (clip.text is not None or (m_ is not None and m_.kind != KIND_AUDIO and
+                                                            proj.track(clip.track_id).kind == TRACK_VIDEO)):
+                from .pegar_dialog import video_under
+                if self.ctrl.tracked_under(clip.id) or video_under(self.ctrl, clip.id, self.playhead):
+                    a = menu.addAction("📌 Pegar a un objeto seguido…", lambda: self._pegar(clip.id))
+                    a.setToolTip("Que este clip siga a un objeto del video de debajo (conserva el desfase)")
+                if self.ctrl.pinned_info(clip):
+                    menu.addAction("📌 Despegar del objeto", lambda: self.ctrl.unpin(clip.id, self.playhead))
             self._rhythm_menu(menu, sel_c)
+            vis_ctx = [i for i in ids if i in proj.clips and proj.clips[i].text is None
+                       and proj.track(proj.clips[i].track_id).kind == TRACK_VIDEO]
+            if vis_ctx:
+                a = menu.addAction("✨ Efectos según lo que digo…", lambda v=vis_ctx: self.context_fx_requested.emit(v))
+                a.setToolTip("Mira lo que dices durante estos clips (y un poco antes) y propone: 🖤 gris si el tono es "
+                             "triste, una noticia fuerte o difícil, y 🔍 zoom hacia la cara en las fotos.\n"
+                             "Se revisan en Efectos → «✨ Lo que dices» (o se aplican solos con «⚡ Aplicar sin "
+                             "preguntar»). Un Ctrl+Z.")
             ai = menu.addMenu("✨ IA")
             if m_ is not None and m_.kind == KIND_VIDEO and clip.text is None and                     proj.track(clip.track_id).kind == TRACK_VIDEO:
                 ai.addAction("✂ Recortar sujeto / quitar el fondo…", lambda: self.cutout_requested.emit(clip.id))
@@ -4171,7 +4252,7 @@ class TimelineWidget(QWidget):
             menu.addAction("Añadir marcador aquí", lambda: self.ctrl.add_marker(t_here))
             menu.addAction("T Añadir texto aquí", lambda: self._add_text_here(t_here))
         add_help_action(menu, "timeline", self.window())
-        help_ui.exec_menu(menu, global_pos)
+        return menu
 
     def _rhythm_menu(self, menu, sel):
         """🥁 Ritmo de las canciones seleccionadas (clips de sonido)."""

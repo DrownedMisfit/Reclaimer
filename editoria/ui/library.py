@@ -344,10 +344,27 @@ class LibraryPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 6)
         lay.addLayout(top)
-        lay.addLayout(srow)
-        lay.addLayout(kw_row)
-        lay.addWidget(self.tree, 1)
-        lay.addWidget(self.footer)
+        # 🎞 Medios / 🔊 Sonidos (los de «Efectos», con 🌐 buscar en internet: a mano en cada pestaña de edición)
+        from PySide6.QtWidgets import QTabWidget
+        self.pestanas = QTabWidget()
+        self.pestanas.setDocumentMode(True)
+        pag = QWidget()
+        pl = QVBoxLayout(pag)
+        pl.setContentsMargins(0, 4, 0, 0)
+        pl.addLayout(srow)
+        pl.addLayout(kw_row)
+        pl.addWidget(self.tree, 1)
+        pl.addWidget(self.footer)
+        self.pestanas.addTab(pag, "🎞 Medios")
+        self.pestanas.setTabToolTip(0, "Tus videos, imágenes y audios del proyecto, y tus palabras clave.")
+        self._pag_sonidos = QWidget()
+        QVBoxLayout(self._pag_sonidos).setContentsMargins(0, 0, 0, 0)
+        self.pestanas.addTab(self._pag_sonidos, "🔊 Sonidos")
+        self.pestanas.setTabToolTip(1, "Efectos de sonido: los de Reclaimer, los que guardaste de internet y tu "
+                                       "carpeta. Busca, escucha, arrástralos o 🌐 búscalos en internet.")
+        self.sonidos = None
+        self.pestanas.currentChanged.connect(self._al_cambiar_pestana)
+        lay.addWidget(self.pestanas, 1)
 
         self._rebuild_timer = QTimer(self)
         self._rebuild_timer.setSingleShot(True)
@@ -512,6 +529,26 @@ class LibraryPanel(QWidget):
         self._apply_filter()
 
     # ------------------------------------------------------ 🔑 palabras clave (Medios)
+    def _al_cambiar_pestana(self, i: int):
+        """🔊 Sonidos se monta la primera vez que se abre (usa el panel de efectos de la ventana)."""
+        if i != 1 or self.sonidos is not None:
+            return
+        from PySide6.QtWidgets import QApplication
+        fx = getattr(self.window(), "effects", None)
+        if fx is None:                             # (Medios flotante: la ventana principal es otra)
+            fx = next((getattr(w, "effects") for w in QApplication.topLevelWidgets() if hasattr(w, "effects")), None)
+        if fx is None:
+            return
+        from .effects_panel import SoundBrowser
+        self.sonidos = SoundBrowser(fx, self._pag_sonidos)
+        self._pag_sonidos.layout().addWidget(self.sonidos)
+
+    def ver_sonidos(self, texto: str = ""):
+        """Abre 🔊 Sonidos (y busca, si se da un texto)."""
+        self.pestanas.setCurrentIndex(1)
+        if self.sonidos is not None and texto:
+            self.sonidos.search.setText(texto)
+
     def _build_keywords(self, bold: QFont, abierta: bool = True):
         """«🔑 Palabras clave»: una palabra por nodo (su carpeta propia + enlaces del PC) y, dentro, sus archivos.
         Los archivos que vienen de una carpeta enlazada llevan 🔗. Nada se copia ni se importa al pintar."""

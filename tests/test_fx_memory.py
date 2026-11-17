@@ -320,7 +320,12 @@ def main():
         st.setValue("efectos/memoria", saved_mem)
     for k in ("ventana/paneles", "guia/colocada"):
         st.remove(k)
+    from editoria.ui.task_window import stop_all
+    pendiente = stop_all(15000)                  # (los trabajos de fondo, parados antes de salir)
     print("TODO OK — capturas en", out)
+    if pendiente:                                # (como Reclaimer al cerrar: un hilo de la IA que no paró a tiempo
+        sys.stdout.flush()                       #  no se destruye a medias)
+        os._exit(0)
 
 
 if __name__ == "__main__":

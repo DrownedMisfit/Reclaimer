@@ -13,6 +13,7 @@ Nada bloquea la ventana: las miniaturas y las caras van en segundo plano (Backgr
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import os
 
@@ -254,6 +255,7 @@ class _FilaLike(QStyledItemDelegate):
 class ClipsPanel(InternetMixin, QWidget):
     seek_requested = Signal(float)
     hints_changed = Signal(list)      # [(segundo, texto)] → marcas de la línea de tiempo
+    foco_changed = Signal(str)        # 🔑 la palabra elegida: sus marcas resaltadas, las demás atenuadas ("" = ninguna)
 
     def __init__(self, ctrl, timeline=None, parent=None):
         super().__init__(parent)
@@ -272,6 +274,10 @@ class ClipsPanel(InternetMixin, QWidget):
         self._tok_carpeta = 0
         self._job_carpeta = None
         self._marcas_quitadas = False     # ✕: no mostrar marcas hasta elegir otra mención
+        self.cabezal = 0.0                # (dónde está el cabezal: para «◀ ▶», más cercana y más lejana)
+        self._ts_cache = None             # (🧭 los momentos a recorrer, ya ordenados: se rehacen en _marcas())
+        self._nav_estado = None           # (🧭 lo último pintado en ◀ ▶ y más cercana / lejana)
+        self._aviso_tope = False          # (el aviso de «demasiadas marcas» es nuestro: se borra al dejar de serlo)
         self._desmarcados: set = set()    # momentos que el usuario desmarcó (término, segundo del archivo)
         self._casillas: list[tuple[QCheckBox, dict]] = []
         self.pestanas = None              # solo con la parte opcional: dos pestañas (ver _construir_pestanas)
@@ -325,7 +331,7 @@ class ClipsPanel(InternetMixin, QWidget):
         self.btn_recalc.clicked.connect(self.recalcular)
         self.btn_quitar = QPushButton("✕")
         self.btn_quitar.setFixedWidth(34)
-        self.btn_quitar.setToolTip("Quitar de la línea de tiempo las marcas de esta palabra")
+        self.btn_quitar.setToolTip("Quitar de la línea de tiempo las marcas de las palabras clave")
         self.btn_quitar.clicked.connect(self._quitar_marcas)
         self.btn_glosario = QPushButton("📖 Glosario…")
         self.btn_glosario.setToolTip("Palabras que sí son palabras clave y palabras que no. Lo que confirmas aquí "
@@ -341,8 +347,15 @@ class ClipsPanel(InternetMixin, QWidget):
                                    "la palabra elegida, con lo descargado y lo de tu computadora por separado (y para "
                                    "borrarlo fácil)")
         self.btn_amplia.clicked.connect(self.abrir_ventana)
+        self.btn_todas = QPushButton("📍 Todas")
+        self.btn_todas.setCheckable(True)
+        self.btn_todas.setChecked(str(_ajustes().value("clips/todas_en_linea", "false")).lower() == "true")
+        self.btn_todas.setToolTip("Muestra en la línea de tiempo dónde dices TODAS las palabras clave (no solo la "
+                                  "elegida). Al elegir una en la lista, sus marcas se resaltan y las demás se atenúan.")
+        self.btn_todas.toggled.connect(self._cambio_todas)
         cab.addWidget(titulo)
         cab.addStretch(1)
+        cab.addWidget(self.btn_todas)
         cab.addWidget(self.btn_todo)
         cab.addWidget(self.btn_amplia)
         cab.addWidget(self.btn_glosario)
@@ -370,6 +383,31 @@ class ClipsPanel(InternetMixin, QWidget):
         self.lista_menciones.currentRowChanged.connect(lambda fila: self._elegir_mencion(fila, buscar=True))
         self.lista_menciones.soltado.connect(self._soltar_archivos)
         v.addWidget(self.lista_menciones)
+        # 🧭 recorrer dónde se dice: la palabra elegida (o todas, sin elegir ninguna)
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        self.btn_ant = QPushButton("◀")
+        self.btn_ant.setFixedWidth(34)
+        self.btn_ant.setToolTip("Ir a la vez anterior (antes del cabezal) en que dices la palabra elegida")
+        self.btn_ant.clicked.connect(lambda: self._ir_vecina(-1))
+        self.btn_sig = QPushButton("▶")
+        self.btn_sig.setFixedWidth(34)
+        self.btn_sig.setToolTip("Ir a la vez siguiente (después del cabezal) en que dices la palabra elegida")
+        self.btn_sig.clicked.connect(lambda: self._ir_vecina(1))
+        self.btn_cerca = QPushButton("⇢ Más cercana")
+        ancho = self.btn_cerca.fontMetrics().horizontalAdvance("⇢ Más cercana 0:00:00") + 24
+        self.btn_cerca.setMinimumWidth(ancho)     # (que no bailen al reproducir)
+        self.btn_cerca.setToolTip("Ir a la vez más cercana al cabezal en que dices la palabra elegida")
+        self.btn_cerca.clicked.connect(lambda: self._ir_extremo(cerca=True))
+        self.btn_lejos = QPushButton("⇢ Más lejana")
+        self.btn_lejos.setMinimumWidth(ancho)
+        self.btn_lejos.setToolTip("Ir a la vez más lejana del cabezal en que dices la palabra elegida")
+        self.btn_lejos.clicked.connect(lambda: self._ir_extremo(cerca=False))
+        for b in (self.btn_ant, self.btn_sig, self.btn_cerca, self.btn_lejos):
+            nav.addWidget(b)
+        nav.addStretch(1)
+        v.addLayout(nav)
+        self._act_nav()
 
         self.lista_momentos = QListWidget()
         self.lista_momentos.setMaximumHeight(120)
@@ -451,6 +489,7 @@ class ClipsPanel(InternetMixin, QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         self._programar()                 # al mostrarse: relee la narración y las carpetas (lo soltado en el Explorador)
+        self._act_nav()                   # (🧭 el cabezal pudo moverse con el panel oculto)
 
     # ------------------------------------------------------------------ carpeta raíz y carpetas por palabra
     def _pintar_raiz(self):
@@ -907,6 +946,7 @@ class ClipsPanel(InternetMixin, QWidget):
         fila = self.lista_menciones.currentRow()
         if anterior is not None and 0 <= fila < len(self.menciones):
             self.mencion = self.menciones[fila]
+        self._marcas()                               # (las menciones son otras: marcas y 🧭 al día)
 
     def _menu_mencion(self, it: QListWidgetItem) -> QMenu | None:
         """Clic derecho en «Dijiste…»: guardar en el glosario como palabra clave o como «no»."""
@@ -1007,17 +1047,176 @@ class ClipsPanel(InternetMixin, QWidget):
             self.lista_momentos.setItemWidget(it, fila)
             self._casillas.append((cas, h))
 
+    MAX_MARCAS = 800                  # (con «📍 Todas»: como mucho estas marcas, para que la línea siga fluida)
+
     def _marcas(self):
-        """🎬 Las banderitas de la mención elegida en la línea de tiempo (solo los momentos con hora)."""
+        """🎬 Las banderitas en la línea de tiempo (solo los momentos con hora): las de la mención elegida o, con
+        «📍 Todas», las de todas las palabras clave (la elegida, resaltada)."""
+        self._ts_cache = None
+        foco = self.mencion["term"] if self.mencion is not None else ""
+        if getattr(self, "btn_todas", None) is not None and self.btn_todas.isChecked() and not self._marcas_quitadas:
+            self.hints_changed.emit(self._marcas_todas(foco))
+            self.foco_changed.emit(foco)
+            self._act_nav()
+            return
+        self._tope_avisado(False)
+        self.foco_changed.emit("")        # (sin «📍 Todas» no se atenúa nada)
         if self.mencion is None or self._marcas_quitadas:
             self.hints_changed.emit([])
+        else:
+            self.hints_changed.emit([(float(h["tl"]), "🎬 " + self.mencion["term"])
+                                     for h in self.mencion["hits"] if _momento(h) is not None])
+        self._act_nav()
+
+    def _marcas_todas(self, foco: str) -> list[tuple[float, str]]:
+        """Las marcas de todas las palabras. Si pasan de MAX_MARCAS: todas las de la elegida y, con el resto del
+        cupo, las demás repartidas a lo largo de todo el video."""
+        mias, otras = [], []
+        for m in self.menciones:
+            dest = mias if foco and m["term"] == foco else otras
+            dest += [(float(h["tl"]), "🎬 " + m["term"]) for h in m["hits"] if _momento(h) is not None]
+        total = len(mias) + len(otras)
+        if total <= self.MAX_MARCAS:
+            self._tope_avisado(False)
+            return sorted(mias + otras)
+        otras.sort()
+        cupo = max(0, self.MAX_MARCAS - len(mias))
+        if cupo >= len(otras):
+            elegidas = otras
+        elif cupo <= 0:
+            elegidas = []
+        elif cupo == 1:
+            elegidas = [otras[len(otras) // 2]]
+        else:                             # (de la primera a la última, a pasos iguales)
+            paso = (len(otras) - 1) / (cupo - 1)
+            elegidas = [otras[round(k * paso)] for k in range(cupo)]
+        marcas = sorted(mias + elegidas)
+        self._tope_avisado(True, total, len(marcas), foco)
+        return marcas
+
+    def _tope_avisado(self, recortado: bool, total: int = 0, vistas: int = 0, foco: str = ""):
+        if recortado:
+            de = f"todas las de «{foco}» y las demás repartidas" if foco else "repartidas por todo el video"
+            self._aviso(f"📍 Hay {total} marcas: se ven {vistas} ({de}) para que la línea de tiempo siga fluida.")
+            self._aviso_tope = True
+        elif self._aviso_tope:
+            self._aviso_tope = False
+            self._aviso("")
+
+    def _cambio_todas(self, on: bool):
+        _ajustes().setValue("clips/todas_en_linea", bool(on))
+        if on:
+            self._marcas_quitadas = False
+        self._marcas()
+
+    def elegir_palabra(self, term: str):
+        """🔑 Clic en la muesca de otra palabra en la línea de tiempo: «Dijiste…» pasa a esa palabra (sin mover el
+        cabezal: ya fue a la muesca)."""
+        key = str(term or "").casefold()
+        fila = next((i for i, m in enumerate(self.menciones) if m["term"].casefold() == key), -1)
+        if fila < 0 or (self.mencion is not None and self.mencion["term"].casefold() == key):
             return
-        self.hints_changed.emit([(float(h["tl"]), "🎬 " + self.mencion["term"])
-                                 for h in self.mencion["hits"] if _momento(h) is not None])
+        self.lista_menciones.blockSignals(True)
+        self.lista_menciones.setCurrentRow(fila)
+        self.lista_menciones.blockSignals(False)
+        self._elegir_mencion(fila, buscar=False)
+
+    # ------------------------------------------------------------------ 🧭 recorrer dónde se dice
+    def _nav_todas(self) -> bool:
+        """🧭 Se recorren todas las palabras: sin palabra elegida (con «📍 Todas») o si la elegida no tiene momentos
+        con hora."""
+        if self.mencion is not None:
+            return not any(_momento(h) is not None for h in self.mencion["hits"])
+        return getattr(self, "btn_todas", None) is not None and self.btn_todas.isChecked()
+
+    def _tiempos_nav(self) -> list[float]:
+        """Los momentos a recorrer (ordenados): los de la palabra elegida; si no, los de todas (ver _nav_todas)."""
+        clave = (id(self.mencion), id(self.menciones), len(self.menciones),
+                 getattr(self, "btn_todas", None) is not None and self.btn_todas.isChecked())
+        if self._ts_cache is not None and self._ts_cache[0] == clave:
+            return self._ts_cache[1]
+        if self._nav_todas():
+            ts = [float(h["tl"]) for m in self.menciones for h in m["hits"] if _momento(h) is not None]
+        elif self.mencion is not None:
+            ts = [float(h["tl"]) for h in self.mencion["hits"] if _momento(h) is not None]
+        else:
+            ts = []
+        ts = sorted(set(round(t, 3) for t in ts))
+        self._ts_cache = (clave, ts)
+        return ts
+
+    def al_cabezal(self, t: float):
+        """El cabezal se movió: «más cercana / más lejana» se recalculan (barato: solo si se ve el panel)."""
+        self.cabezal = float(t)
+        if self.isVisible():
+            self._act_nav()
+
+    @staticmethod
+    def _vecinas(ts: list[float], c: float):
+        """(anterior, siguiente, más cercana, más lejana) respecto a c; None si no hay. «Más cercana» no cuenta la
+        que está justo en el cabezal (<0,05 s)."""
+        if not ts:
+            return None, None, None, None
+        i = bisect.bisect_left(ts, c - 0.05)
+        ant = ts[i - 1] if i > 0 else None
+        j = bisect.bisect_right(ts, c + 0.05)
+        sig = ts[j] if j < len(ts) else None
+        cand = [x for x in (ant, sig) if x is not None]
+        cerca = min(cand, key=lambda x: abs(x - c)) if cand else None
+        lejos = max((ts[0], ts[-1]), key=lambda x: abs(x - c))
+        if abs(lejos - c) < 0.05:
+            lejos = None
+        return ant, sig, cerca, lejos
+
+    def _act_nav(self):
+        if not hasattr(self, "btn_cerca"):
+            return
+        ts = self._tiempos_nav()
+        ant, sig, cerca, lejos = self._vecinas(ts, self.cabezal)
+        todas = bool(ts) and self._nav_todas()
+        estado = (ant, sig, cerca, lejos, todas)
+        if estado == self._nav_estado:
+            return                        # (nada cambió: no se repinta nada al reproducir)
+        self._nav_estado = estado
+        que = ("cualquiera de las palabras clave (la palabra elegida o todas: ahora, todas)" if todas
+               else "la palabra elegida (o todas, sin elegir ninguna y con «📍 Todas»)")
+        self.btn_ant.setEnabled(ant is not None)
+        self.btn_sig.setEnabled(sig is not None)
+        self.btn_ant.setToolTip(f"Ir a la vez anterior (antes del cabezal) en que dices {que}")
+        self.btn_sig.setToolTip(f"Ir a la vez siguiente (después del cabezal) en que dices {que}")
+        self.btn_cerca.setEnabled(cerca is not None)
+        self.btn_lejos.setEnabled(lejos is not None)
+        self.btn_cerca.setText("⇢ Más cercana" + (f" {_mmss(cerca)}" if cerca is not None else ""))
+        self.btn_lejos.setText("⇢ Más lejana" + (f" {_mmss(lejos)}" if lejos is not None else ""))
+        self.btn_cerca.setToolTip(f"Ir a la vez más cercana al cabezal en que dices {que}")
+        self.btn_lejos.setToolTip(f"Ir a la vez más lejana del cabezal en que dices {que}")
+
+    def _ir_a(self, t: float):
+        self.cabezal = t
+        self.seek_requested.emit(t)
+        self._act_nav()
+
+    def _ir_vecina(self, sentido: int):
+        ant, sig, _c, _l = self._vecinas(self._tiempos_nav(), self.cabezal)
+        t = sig if sentido > 0 else ant
+        if t is None:
+            self._aviso("No hay más veces " + ("después" if sentido > 0 else "antes") + " del cabezal.")
+            return
+        self._ir_a(t)
+
+    def _ir_extremo(self, cerca: bool):
+        _a, _s, c, lj = self._vecinas(self._tiempos_nav(), self.cabezal)
+        t = c if cerca else lj
+        if t is not None:
+            self._ir_a(t)
 
     def _quitar_marcas(self):
+        """✕: fuera las marcas (también con «📍 Todas», que se apaga) hasta elegir otra mención."""
         self._marcas_quitadas = True
-        self.hints_changed.emit([])
+        if getattr(self, "btn_todas", None) is not None and self.btn_todas.isChecked():
+            self.btn_todas.setChecked(False)          # (→ _cambio_todas → _marcas)
+        else:
+            self._marcas()
 
     def _ir_momento(self, h: dict):
         if _momento(h) is None:

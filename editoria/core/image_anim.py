@@ -111,8 +111,22 @@ def plan_propia(caja: dict, dur: float, kf: list) -> dict:
     pts = sorted((dict(p) for p in kf if isinstance(p, dict)), key=lambda p: float(p.get("t", 0)))
     if not pts:
         return {"layout": layout, "layout_kf": [], "op_kf": [], "fx": {}}
-    keys = [_k(float(p.get("t", 0)) * dur, box, float(p.get("dx", 0)), float(p.get("dy", 0)), i="linear") for p in pts]
+    keys = []
+    for p in pts:                                      # (◆ a mano: cada clave con su escala y la curva de su tramo)
+        k = _k(float(p.get("t", 0)) * dur, box, float(p.get("dx", 0)), float(p.get("dy", 0)),
+               s=max(0.05, float(p.get("s", 1.0) or 1.0)), i=_curva(p.get("i", "linear")))
+        keys.append(k)
     return {"layout": layout, "layout_kf": _limpiar(keys, dur), "op_kf": [], "fx": {}}
+
+
+# ◆ Curvas de las claves a mano (las mismas de transform.CURVES; «smooth» = suave, que allí es None)
+CURVAS_CLAVE = [("smooth", "Suave (entra y sale suave)"), ("linear", "Lineal (velocidad fija)"),
+                ("in", "Entrar suave (acelera)"), ("out", "Salir suave (frena al llegar)"),
+                ("bounce", "Rebote (se pasa un poco y vuelve)"), ("hold", "Mantener (salta en la siguiente)")]
+
+
+def _curva(i):
+    return None if i in (None, "smooth", "") else str(i)
 
 
 def simplificar_trazo(muestras: list[tuple[float, float, float]], dur: float, paso: float = 0.08,
@@ -238,29 +252,105 @@ def plan(clave: str, caja: dict, dur: float, lado: int = 0) -> dict:
         fx = {"shake": round(min(0.6, dur), 3), "shake_amp": SHAKE_AMP * 2.5, "flash": round(min(0.25, dur), 3)}
     elif clave == "pop":
         kf = [_k(0.0, box, s=0.4, i="bounce"), _k(min(0.35, dur * 0.6), box)]
+    elif clave == "ataca":
+        # 👊 embestida: se lanza hacia delante (golpea a los 0,12 s) y vuelve a su sitio
+        ida = lado * 0.35 * box["w"]
+        kf = [_k(0.0, box, i="in"), _k(min(0.12, dur * 0.3), box, ida, 0.01 * box["h"], s=1.04, i="linear"),
+              _k(min(0.2, dur * 0.5), box, ida * 0.9, 0.01 * box["h"], s=1.04), _k(min(0.5, dur), box)]
+    elif clave == "esquiva":
+        atras_x = atras * 0.25 * box["w"]
+        kf = [_k(0.0, box, i="out"), _k(min(0.15, dur * 0.35), box, atras_x, -0.06 * box["h"]),
+              _k(min(0.3, dur * 0.6), box, atras_x, 0.0, i="out"), _k(min(0.6, dur), box)]
+    elif clave == "derribado":
+        # 💫 recibe el golpe, cae al suelo y se queda ahí (no desaparece: para un «K.O.»)
+        g = min(0.1, dur * 0.2)
+        cae = min(dur, max(g + 0.2, 0.5))
+        abajo = (atras * 0.12 * box["w"], 0.45 * box["h"])
+        kf = [_k(0.0, box, i="out"), _k(g, box, atras * 0.08 * box["w"], -0.03 * box["h"], i="in"),
+              _k(cae, box, abajo[0], abajo[1], i="hold"), _k(dur, box, abajo[0], abajo[1])]
+        fx = {"shake": round(min(0.3, dur), 3), "shake_amp": SHAKE_AMP}
+    elif clave in ("huye", "cruza_corre"):
+        # 💨 huir: se da la vuelta y sale corriendo por su espalda · 🏃 cruzar corriendo: de un lado a otro
+        if clave == "huye":
+            ini, fin = 0.0, (-(box["x"] + box["w"]) if atras < 0 else 1.0 - box["x"])
+            layout["flip_h"] = not bool(caja.get("flip_h"))        # (mira hacia donde corre)
+        else:
+            ini = -(box["x"] + box["w"]) if lado > 0 else 1.0 - box["x"]
+            fin = (1.0 - box["x"]) if lado > 0 else -(box["x"] + box["w"])
+        cada, alto = 0.2, 0.045 * box["h"]
+        n = max(1, int(dur / cada))
+        kf = [_k(0.0, box, ini, i="linear")]
+        for j in range(n):
+            t1, t2 = (j + 0.5) * cada, (j + 1) * cada
+            if t2 > dur + 1e-6:
+                break
+            kf += [_k(t1, box, ini + (fin - ini) * t1 / dur, -alto, i="linear"),
+                   _k(t2, box, ini + (fin - ini) * t2 / dur, 0.0, i="linear")]
+        kf.append(_k(dur, box, fin))
+    elif clave == "celebra":
+        kf = [_k(0.0, box, i="out")]
+        t, cada = 0.0, 0.42
+        while t + cada <= dur + 1e-6:
+            kf += [_k(t + cada * 0.45, box, 0.0, -0.15 * box["h"], s=1.05, i="in"), _k(t + cada, box, i="out")]
+            t += cada
+    elif clave == "abatido":
+        b2 = dict(box, y=box["y"] + 0.06 * box["h"])
+        kf = [_k(0.0, box, i="out"), _k(min(1.2, dur), b2, s=0.94), _k(dur, b2, s=0.94)]
+    elif clave == "susto":
+        kf = [_k(0.0, box, i="out"), _k(min(0.1, dur * 0.3), box, atras * 0.04 * box["w"], -0.1 * box["h"], s=1.08),
+              _k(min(0.4, dur), box, atras * 0.04 * box["w"]), _k(dur, box, atras * 0.04 * box["w"])]
+        fx = {"shake": round(min(0.4, dur), 3), "shake_amp": SHAKE_AMP * 1.2}
+    elif clave == "retrocede":
+        kf = [_k(0.0, box, i="out"), _k(dur, box, atras * 0.12)]
+        fx = {"shake": round(dur, 3), "shake_amp": SHAKE_AMP * 0.45}
+    elif clave == "habla":
+        kf = [_k(0.0, box)]
+        t, j = 0.0, 0
+        while t + 0.26 <= dur + 1e-6:
+            t += 0.26
+            arriba = j % 2 == 0
+            kf.append(_k(min(t, dur), box, lado * 0.012 * box["w"] if arriba else 0.0,
+                         -0.018 * box["h"] if arriba else 0.0, s=1.02 if arriba else 1.0))
+            j += 1
+        if kf[-1]["x"] != _k(0.0, box)["x"] or kf[-1]["y"] != _k(0.0, box)["y"]:
+            kf.append(_k(dur, box))                     # (acaba en su sitio: lo de después no da un salto)
+    elif clave == "sacudida":
+        fx = {"shake": round(max(0.1, min(dur, 0.8)), 3), "shake_amp": SHAKE_AMP * 2.0}
     elif clave == "destello":
         fx = {"flash": round(min(0.3, dur), 3)}
-    if clave in ("entra", "cruza", "sale", "conduce", "frena", "camina", "corre"):         # (lo de fuera de la pantalla no debe dejar bandas)
+    if clave in ("entra", "cruza", "sale", "conduce", "frena", "camina", "corre", "huye", "cruza_corre", "derribado",
+                 "ataca", "esquiva", "retrocede"):         # (lo de fuera de la pantalla no debe dejar bandas)
         layout["bg"] = "none"
     return {"layout": layout, "layout_kf": _limpiar(kf, dur), "op_kf": op, "fx": fx}
 
 
 # 🎬 Fases de las escenas (core/scenes.py): cada personaje entra → hace cosas → sale; cada fase es un trozo de clip.
 ENTRADAS = [("abajo", "⬆ Desde abajo"), ("izquierda", "→ Desde la izquierda"), ("derecha", "← Desde la derecha"),
-            ("arriba", "⬇ Desde arriba"), ("aparece", "✨ Aparecer (fundido)")]
+            ("arriba", "⬇ Desde arriba"), ("aparece", "✨ Aparecer (fundido)"), ("pop", "💫 Aparecer de golpe (rebote)"),
+            ("cae", "💥 Caer desde arriba (impacto)")]
 # Las acciones, por categoría (el menú «＋» de cada fila de la escena las enseña así)
 ACCIONES_CAT = [
     ("🧍 Personaje", [("ninguna", "Quieto"), ("disparo", "🔫 Disparar"), ("golpe", "💥 Recibir un golpe"),
                       ("salta", "⤴ Saltar"), ("camina", "🚶 Caminar"), ("corre", "🏃 Correr"),
                       ("agacha", "⤵ Agacharse"), ("tiembla", "〰 Temblar"), ("acerca", "🔍 Acercarse")]),
+    ("⚔ Pelea", [("ataca", "👊 Atacar (embestida)"), ("esquiva", "↩ Esquivar"), ("derribado", "💫 Caer al suelo"),
+                 ("retrocede", "😨 Retroceder con miedo")]),
+    ("🏃 Moverse", [("cruza_corre", "🏃 Cruzar corriendo"), ("cruza", "⇆ Cruzar la pantalla"),
+                    ("huye", "💨 Huir (se da la vuelta)")]),
+    ("💬 Reacción", [("habla", "💬 Hablar (gesticula)"), ("susto", "😱 Sobresaltarse"), ("celebra", "🎉 Celebrar"),
+                     ("abatido", "😞 Abatido (se hunde)")]),
     ("🚗 Vehículo", [("conduce", "🚗 Pasar conduciendo"), ("frena", "🛑 Llegar y frenar"), ("flota", "🛸 Flotar / volar"),
                      ("explota", "💥 Explotar")]),
-    ("✨ Efectos", [("pop", "✨ Aparecer de golpe (rebote)"), ("destello", "⚡ Destello")]),
+    ("✨ Efectos", [("pop", "✨ Aparecer de golpe (rebote)"), ("destello", "⚡ Destello"),
+                    ("sacudida", "📳 Sacudida (temblor de cámara)")]),
 ]
+# Acciones tras las que el personaje ya no está (se fue de la pantalla o explotó): lo de después no lo hace reaparecer
+TERMINAN = {"explota", "huye", "cruza_corre"}      # («⇆ Cruzar» no: lo de después sigue viéndose, como antes)
 ACCIONES = [a for _cat, lst in ACCIONES_CAT for a in lst]
 NOMBRE_ACCION = dict(ACCIONES) | {"propia": "🎥 Movimiento propio"}
 SALIDAS = [("muere", "💀 Morir (cae)"), ("abajo", "⬇ Irse por abajo"), ("izquierda", "← Irse por la izquierda"),
-           ("derecha", "→ Irse por la derecha"), ("arriba", "⬆ Irse por arriba"), ("desvanece", "Desvanecerse")]
+           ("derecha", "→ Irse por la derecha"), ("arriba", "⬆ Irse por arriba"), ("desvanece", "Desvanecerse"),
+           ("huye", "💨 Huir corriendo (se da la vuelta)")]
 FASES = {"entrada": ENTRADAS, "accion": ACCIONES + [("propia", "🎥 Movimiento propio")], "salida": SALIDAS}
 
 
@@ -283,10 +373,17 @@ def plan_fase(tipo: str, clave: str, caja: dict, dur: float, lado: int = 0, kf: 
     layout = dict(caja)
     layout.update({k: _r(v) for k, v in box.items()})
     layout["bg"] = "none"
-    if tipo == "salida" and clave == "muere":
-        p = plan("muere", caja, dur, lado)
+    if (tipo == "salida" and clave in ("muere", "huye")) or (tipo == "entrada" and clave == "pop"):
+        p = plan(clave, caja, dur, lado)
         p["layout"]["bg"] = "none"
         return p
+    if tipo == "entrada" and clave == "cae":            # 💥 cae desde arriba, aplasta un poco al llegar y se recupera
+        llega = dur * 0.7
+        b2 = dict(box, y=box["y"] + 0.07 * box["h"], h=box["h"] * 0.93, x=box["x"] - box["w"] * 0.03,
+                  w=box["w"] * 1.06)
+        kf = [_k(0.0, box, 0.0, -(box["y"] + box["h"]), i="in"), _k(llega, box, i="out"),
+              _k(llega + (dur - llega) * 0.4, b2, i="out"), _k(dur, box)]
+        return {"layout": layout, "layout_kf": _limpiar(kf, dur), "op_kf": [], "fx": {}}
     if clave in ("aparece", "desvanece"):
         op = [{"t": 0.0, "v": 0.0}, {"t": _r(dur), "v": 1.0}] if tipo == "entrada" else \
              [{"t": 0.0, "v": 1.0}, {"t": _r(dur), "v": 0.0}]

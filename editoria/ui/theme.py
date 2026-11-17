@@ -127,10 +127,7 @@ QTabBar::tab {{ background: transparent; padding: 7px 10px; color: {TEXT_DIM}; b
                 border-bottom: 2px solid transparent; }}
 QTabBar::tab:hover {{ color: white; }}
 QTabBar::tab:selected {{ color: white; border-bottom: 2px solid {ACCENT}; }}
-QTabWidget#subtabs QTabBar {{ background: {HEADER}; }}
-QTabWidget#subtabs QTabBar::tab {{ padding: 7px 12px; font-size: 8.5pt; }}
-QTabWidget#subtabs::pane {{ border-top: 1px solid {BORDER}; }}
-QTabWidget#subtabs QGroupBox {{ border: none; margin-top: 0; padding-top: 0; background: transparent; }}
+QWidget#subtabs QGroupBox {{ border: none; background: transparent; }}
 QSplitter::handle {{ background: {BG_DEEP}; }}
 QSplitter::handle:horizontal {{ width: 3px; }}
 QSplitter::handle:vertical {{ height: 3px; }}

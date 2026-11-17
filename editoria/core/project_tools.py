@@ -20,6 +20,8 @@ def slice_project(p: Project, a: float, b: float) -> Project:
         elif cut_left > 0:          # imágenes: sus claves cuentan desde el inicio del clip, que ahora es otro
             for attr in ("layout_kf", "zoom_kf", "op_kf", "vol_kf"):
                 setattr(c, attr, [dict(k, t=round(k["t"] - cut_left, 4)) for k in getattr(c, attr) or []])
+        if cut_left > 0 and c.text and c.text.get("pos_kf"):     # 📌 texto pegado a un objeto: desde su inicio
+            c.text = dict(c.text, pos_kf=[dict(k, t=round(k["t"] - cut_left, 4)) for k in c.text["pos_kf"]])
         c.start = max(0.0, c.start - a)
         c.duration -= cut_left + cut_right
         if c.duration > 0.01:

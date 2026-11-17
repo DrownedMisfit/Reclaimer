@@ -6,7 +6,7 @@ import os
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QInputDialog, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QSlider,
                                QTabWidget, QGroupBox, QHBoxLayout, QLabel,
-                               QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget,
+                               QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QStackedWidget,
                                QVBoxLayout, QWidget)
 
 import json
@@ -71,15 +71,11 @@ class InspectorPanel(QWidget):
         self.stack.addWidget(self._build_text_page())
         self.eq_graph.installEventFilter(self)      # al mostrarse la gráfica del ecualizador, se calcula su espectro
 
-        # Con scroll: así el panel nunca empuja ni aplasta la timeline
-        scroll = QScrollArea()
-        scroll.setWidget(self.stack)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # (sin desplazamiento propio: ya se desplaza todo el panel, a lo alto, y así nunca empuja ni aplasta la
+        # timeline; una sola barra en vez de dos o tres, ↔ responsive)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 6, 0, 6)
-        lay.addWidget(scroll)
+        lay.addWidget(self.stack)
         ctrl.project_changed.connect(self._refresh)
         ctrl.media_changed.connect(self._refresh)
         if engine is not None:
@@ -172,7 +168,7 @@ class InspectorPanel(QWidget):
         row.addWidget(self.speed)
         for pct in (25, 50, 100, 200, 400):
             b = QPushButton(f"{pct}%")
-            b.setFixedWidth(44)
+            b.setMinimumWidth(44)                   # (no fijo: con letra grande, «400%» cabe entero)
             b.clicked.connect(lambda _=False, v=pct: self._on_speed(speed=v / 100))
             row.addWidget(b)
         sl.addLayout(row)
@@ -306,10 +302,7 @@ class InspectorPanel(QWidget):
         fl.addRow("Posición y tamaño", lk)
         fl.addRow(self.lk_label, self.btn_clear_lk)
         fl.addRow("Curva", self.curve_lk)
-        self.btn_track = QPushButton("🎯 Seguir personaje u objeto…")
-        self.btn_track.setToolTip("Marca algo en el fotograma y la IA crea un zoom que lo sigue.")
-        self.btn_track.clicked.connect(lambda: self._ids and self.track_requested.emit(self._ids[0]))
-        fl.addRow(self.btn_track)
+        self.track_box = self._build_track_box("clip")      # 🎯 Seguimiento (en la pestaña Video)
 
         # --- Efectos (edits): destello, fundidos y temblor ---
         self.effects_box = QGroupBox("Efectos")
@@ -370,6 +363,7 @@ class InspectorPanel(QWidget):
         self.transform_box = TransformBox(self)       # ⤧ Tamaño, posición, rotación, voltear y relleno, a la mano
         tv.addWidget(self.transform_box)
         tv.addWidget(self.frame_box)
+        tv.addWidget(self.track_box)
         from ..core.curves import BLEND_MODES
         self.blend_box = QGroupBox("Opacidad y modo de fusión")
         bf = QFormLayout(self.blend_box)
@@ -618,6 +612,7 @@ class InspectorPanel(QWidget):
         grid = QGridLayout()
         grid.setHorizontalSpacing(4)
         grid.setVerticalSpacing(4)
+        grid.setProperty("responsive_columnas", 1)   # (estrecho: las bandas en bloques, B1 B2 B3 | B4…; ↔ responsive)
         self.band_rows = []
         for i in range(E.N_BANDS):
             on = QPushButton(f"B {i + 1}")
@@ -861,17 +856,13 @@ class InspectorPanel(QWidget):
         """Texto en pantalla, como el «Texto» de Resolve: Texto · Trazo · Sombra · Fondo. Cada opción con ↺
         (valor de fábrica). Lo que cambias se recuerda como «mi estilo» para los textos nuevos."""
         from PySide6.QtGui import QColor, QFont, QFontDatabase
-        from PySide6.QtWidgets import QColorDialog, QFontComboBox, QGroupBox, QScrollArea, QToolButton
+        from PySide6.QtWidgets import QColorDialog, QFontComboBox, QGroupBox, QToolButton
         from ..core.title_render import FACTORY
         outer = QWidget()
         ol = QVBoxLayout(outer)
         ol.setContentsMargins(0, 0, 0, 0)
-        sc = QScrollArea()
-        sc.setWidgetResizable(True)
-        sc.setFrameShape(QScrollArea.NoFrame)
-        ol.addWidget(sc)
-        w = QWidget()
-        sc.setWidget(w)
+        w = QWidget()                               # (sin desplazamiento propio: se desplaza todo el panel)
+        ol.addWidget(w)
         lay = QVBoxLayout(w)
         set_help(w, "texto_pantalla")
         title = QLabel("Texto en pantalla")
@@ -902,6 +893,7 @@ class InspectorPanel(QWidget):
 
         def row(form, label, widget, keys):
             h = QHBoxLayout()
+            h.setProperty("responsive_no_baja", True)   # (el ↺ siempre al lado de su campo, que se estrecha)
             h.setContentsMargins(0, 0, 0, 0)
             h.addWidget(widget, 1)
             h.addWidget(reset_btn(keys))
@@ -959,7 +951,8 @@ class InspectorPanel(QWidget):
         self.tw["font_style"] = (self.text_ftype, set_ftype)
         row(f, "Tipo", self.text_ftype, ["font_style"])
         row(f, "Color", color_btn("color"), ["color"])
-        self.text_size = spin("size", 1.0, 40.0, 0.5, " % del alto")
+        self.text_size = spin("size", 1.0, 40.0, 0.5, " %")      # (la explicación, en la ayuda: cabe estrecho)
+        self.text_size.setToolTip("Tamaño de la letra, en % del alto del video.")
         row(f, "Tamaño", self.text_size, ["size"])
         row(f, "Interletrado", spin("tracking", -20, 100, 1, " %", 0), ["tracking"])
         row(f, "Interlineado", spin("line_spacing", -50, 200, 5, " %", 0), ["line_spacing"])
@@ -1144,8 +1137,80 @@ class InspectorPanel(QWidget):
         tr_.addWidget(self.btn_save_template)
         lay.addLayout(tr_)
         self._fill_templates()
+        self.text_track_box = self._build_track_box("text")   # 📌 pegar el texto a un objeto seguido
+        lay.addWidget(self.text_track_box)
         lay.addStretch()
         return outer
+
+    # -------------------------------------------------------------- 🎯 seguimiento / 📌 pegar a un objeto
+    def _build_track_box(self, kind: str) -> QGroupBox:
+        box = QGroupBox("🎯 Seguimiento" if kind == "clip" else "📌 Seguir a un objeto")
+        v = QVBoxLayout(box)
+        info = _dim()
+        info.setWordWrap(True)
+        row = QHBoxLayout()
+        pin = QPushButton("📌 Pegar a un objeto seguido…")
+        pin.setToolTip("Que este clip (texto, imagen, emoji, flecha, título…) siga a un objeto del video de debajo, "
+                       "conservando el desfase con el que lo colocaste")
+        pin.clicked.connect(self._pin_requested)
+        unpin = QPushButton("✕ Despegar")
+        unpin.setToolTip("Deja de seguir al objeto: se queda donde está en el cabezal")
+        unpin.clicked.connect(lambda: self._clip_or_text() and self.ctrl.unpin(self._clip_or_text().id, self._now()))
+        if kind == "clip":
+            self.btn_track = QPushButton("🎯 Seguimiento…")
+            self.btn_track.setToolTip("Sigue un personaje u objeto (solo o a mano, hacia delante y hacia atrás) y úsalo: "
+                                      "zoom que lo sigue, encuadre vertical, desenfocarlo/pixelarlo o pegarle algo")
+            self.btn_track.clicked.connect(lambda: self._ids and self.track_requested.emit(self._ids[0]))
+            self.btn_unblur = QPushButton("🙈 Quitar lo tapado")
+            self.btn_unblur.setToolTip("Quita el desenfoque/pixelado que acompaña al objeto")
+            self.btn_unblur.clicked.connect(lambda: self._clip() and self.ctrl.remove_track_blur(self._clip().id))
+            row.addWidget(self.btn_track)
+            row.addWidget(self.btn_unblur)
+            self.track_info, self.btn_pin, self.btn_unpin = info, pin, unpin
+        else:
+            self.text_track_info, self.btn_pin_text, self.btn_unpin_text = info, pin, unpin
+        row.addWidget(pin)
+        row.addWidget(unpin)
+        row.addStretch()
+        v.addWidget(info)
+        v.addLayout(row)
+        return box
+
+    def _clip_or_text(self):
+        return self.ctrl.project.clips.get(self._ids[0]) if len(self._ids) == 1 else None
+
+    def _pin_requested(self):
+        c = self._clip_or_text()
+        if c is None:
+            return
+        if self.engine is not None and hasattr(self.engine, "pause"):
+            self.engine.pause()
+        from .pegar_dialog import abrir
+        abrir(self.ctrl, c.id, self._now(), self.window())
+
+    def _refresh_track_box(self, c, m=None):
+        """Qué recorridos tiene el clip, a qué está pegado y qué se puede hacer."""
+        from ..core import motion_track as MT
+        info = self.ctrl.pinned_info(c)
+        pinned = f"📌 Pegado a «{info.get('name') or 'Objeto'}»." if info else ""
+        if c.text is not None:
+            self.text_track_info.setText(pinned or "Quieto (no sigue a nada).")
+            self.btn_unpin_text.setVisible(bool(info))
+            return
+        is_video = bool(m and m.kind == "video")
+        trks = [x for x in MT.tracks_of(c) if not MT.is_empty(x)]
+        lines = []
+        if is_video:
+            lines.append(("🎯 " + ", ".join(x.get("name", "Objeto") for x in trks)) if trks else
+                         "Sin recorridos.")
+            if (c.fx or {}).get("tracked_blur"):
+                lines.append("🙈 Tapa lo que se sigue.")
+        if pinned:
+            lines.append(pinned)
+        self.track_info.setText("  ".join(lines) or "Quieto (no sigue a nada).")
+        self.btn_track.setVisible(is_video)
+        self.btn_unblur.setVisible(bool((c.fx or {}).get("tracked_blur")))
+        self.btn_unpin.setVisible(bool(info))
 
     def _canvas_px(self, axis: str) -> float:
         p = self.ctrl.project
@@ -1207,6 +1272,7 @@ class InspectorPanel(QWidget):
         name = next((n for n, x, y in self.TEXT_POSITIONS
                      if abs(x - t.get("x", 0.5)) < 0.01 and abs(y - t.get("y", 0.5)) < 0.01), "Personalizada")
         self.text_pos.setCurrentText(name)
+        self._refresh_track_box(c)
 
     def _set_text(self, **props):
         if not self._loading and len(self._ids) == 1:
@@ -1348,7 +1414,9 @@ class InspectorPanel(QWidget):
                 self._last_tab = quiero
                 if has_audio:
                     self._refresh_audio_tab(ac, m)
-                self.btn_track.setVisible(bool(m and m.kind == "video") and visual)
+                self.track_box.setVisible(visual)
+                self.track_box.setEnabled(editable)
+                self._refresh_track_box(c, m)
                 self._refresh_speed(c, m, editable)
                 self._refresh_enhance(c, m, editable)
                 self._refresh_color(c, visual, editable)

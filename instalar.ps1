@@ -221,6 +221,26 @@ if ($Simular) {
     }
 }
 
+# 🗣 Voz IA (opcional, sin obligar): su modelo de voz pesa ≈350 MB; se puede bajar ahora o desde Reclaimer
+# (panel «🗣 Voz IA» → «⬇ Descargar la voz»). Con -SinPreguntas no se descarga (es opcional).
+if ($Simular) {
+    Aviso "(simulación) aquí se ofrecería descargar la voz de «Voz IA» (≈350 MB, opcional)"
+} elseif (-not $SinPreguntas -and (Test-Path -LiteralPath $venvPy)) {
+    $codigoVoz = "import sys; sys.path.insert(0, sys.argv[1]); from editoria.ai import tts; print(int(tts.falta_modelo()))"
+    $faltaVoz = & $venvPy -c $codigoVoz $Raiz 2>$null
+    if ("$faltaVoz".Trim() -eq "1") {
+        $r = Read-Host "   ¿Descargo ahora la voz de «Voz IA» (≈350 MB, opcional; también se puede desde Reclaimer)? (s/N)"
+        if ($r -match '^\s*[sS]') {
+            Escribir "   Descargando la voz… (≈350 MB, de la página oficial de kokoro-onnx en GitHub)"
+            $bajar = "import sys; sys.path.insert(0, sys.argv[1]); from editoria.ai import tts; u = [-1]; " +
+                     "tts.descargar(lambda f, t: (int(f * 10) != u[0]) and (u.__setitem__(0, int(f * 10)) or print('   ' + t, flush=True)))"
+            & $venvPy -c $bajar $Raiz 2>&1 | ForEach-Object { Registrar $_; if ("$_" -match 'Descargando') { Write-Host $_ -ForegroundColor DarkGray } }
+            if ($LASTEXITCODE -eq 0) { Bien "Voz IA descargada" }
+            else { Aviso "No se pudo descargar la voz (opcional): bájala luego desde Reclaimer, panel «Voz IA»." }
+        } else { Aviso "Voz IA sin descargar (opcional): se puede bajar desde Reclaimer, panel «Voz IA»." }
+    }
+}
+
 Paso 4 "Comprobación y accesos directos"
 if (-not $Simular -or $hayVenv) {
     $prueba = "import PySide6, numpy, cv2, onnxruntime, faster_whisper; assert hasattr(cv2, 'dnn_superres'), 'OpenCV sin contrib'; print('ok')"

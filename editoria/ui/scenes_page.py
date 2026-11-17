@@ -12,6 +12,9 @@ Montas una escena animada en un tramo de la línea de tiempo (del segundo 15 al 
   · Abajo: la línea de tiempo de la escena: una fila por personaje con sus fases (🟦 entrada → 🟧 acciones → 🟥 salida;
     arrastra el borde derecho para cambiar la duración, el cuerpo de la primera fase para que empiece más tarde) y
     las filas de sonidos (arrástralos al segundo exacto).
+  · ⚡ Prehechas (pestaña de «Material»): escenas de acción listas (se disparan, pelea, uno contra un grupo, huye…)
+    con sus papeles, sonidos, temblores y destellos (core/escenas_prehechas.py); todo editable después.
+  · ◆ Auto clave (barra de la línea de la escena): animar a mano por claves; los rombos salen en la fila del personaje.
 Nada toca el proyecto hasta «✓ Aplicar» (controller.apply_scene: un paso de Ctrl+Z). Las escenas se guardan en el
 proyecto: doble clic en uno de sus clips (o «🎬 Escena» en esta página) para volver a abrirla.
 """
@@ -93,6 +96,92 @@ def estado_en(escena: dict, t_local: float) -> dict[str, dict]:
         dx, dy = effects.shake_at(pl["fx"], s)
         out[pz["actor"]] = {"box": box, "op": _opacidad(pl["op_kf"], s), "dx": dx, "dy": dy}
     return out
+
+
+class _MiniVista(QWidget):
+    """⚡ Vista previa animada (en bucle) de una prehecha, con siluetas de colores en lugar de los personajes."""
+    COLORES = {"A": QColor(70, 130, 230), "B": QColor(220, 80, 70), "G": QColor(70, 180, 110), "": QColor(240, 200, 60)}
+
+    def __init__(self, page):
+        super().__init__(page)
+        self.page = page
+        self.escena = None
+        self.t = 0.0
+        self.setMinimumHeight(110)
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
+        import time as _time
+        self._t0 = _time.monotonic()
+
+    def poner(self, escena: dict | None):
+        import time as _time
+        self.escena = escena
+        self._t0 = _time.monotonic()
+        self.t = 0.0
+        if escena is not None and not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def _tick(self):
+        import time as _time
+        if self.escena is None or not self.isVisible():
+            self._timer.stop()
+            return
+        self.t = (_time.monotonic() - self._t0) % (scenes.largo(self.escena) + 0.7)
+        self.update()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.escena is not None:
+            self._timer.start()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        W, H = self.page.W, self.page.H
+        k = min(self.width() / W, self.height() / H)
+        cw, ch = W * k, H * k
+        r0 = QRectF((self.width() - cw) / 2, (self.height() - ch) / 2, cw, ch)
+        p.fillRect(r0, QColor(38, 42, 50))
+        if self.escena is None:
+            p.setPen(QColor(150, 150, 160))
+            p.drawText(r0, Qt.AlignCenter, "⚡")
+            p.end()
+            return
+        actores = {a["id"]: a for a in self.escena["actores"]}
+        st = estado_en(self.escena, min(self.t, scenes.largo(self.escena) - 1e-3))
+        for i, a in enumerate(self.escena["actores"]):
+            e = st.get(a["id"])
+            if e is None:
+                continue
+            b = e["box"]
+            r = QRectF(r0.x() + (b["x"] + e["dx"] * b["w"]) * cw, r0.y() + (b["y"] + e["dy"] * b["h"]) * ch,
+                       b["w"] * cw, b["h"] * ch)
+            p.setOpacity(max(0.0, min(1.0, e["op"])))
+            if a.get("efecto") == "destello":
+                p.fillRect(r0, QColor(255, 255, 255))
+            elif a.get("prop"):
+                f = QFont(self.font())
+                f.setBold(True)
+                f.setPixelSize(max(6, int(r.height() * 0.7)))
+                p.setFont(f)
+                p.setPen(QColor(255, 205, 40) if a["prop"] == "vs" else QColor(255, 80, 60))
+                p.drawText(r, Qt.AlignCenter, "VS" if a["prop"] == "vs" else "!")
+            else:
+                col = QColor(self.COLORES.get(actores[a["id"]].get("papel", "A"), self.COLORES["A"]))
+                if a.get("grupo"):
+                    col = col.lighter(100 + 12 * (i % 3))
+                fw = min(r.width(), r.height() * 0.45)
+                cx = r.center().x()
+                cabeza = fw * 0.55
+                p.setPen(QPen(col.darker(160), 1))
+                p.setBrush(col)
+                p.drawEllipse(QRectF(cx - cabeza / 2, r.top(), cabeza, cabeza))
+                p.drawRoundedRect(QRectF(cx - fw / 2, r.top() + cabeza * 1.05, fw, r.height() - cabeza * 1.05),
+                                  fw * 0.3, fw * 0.3)
+        p.setOpacity(1.0)
+        p.end()
 
 
 # ============================================================ visor de la escena
@@ -286,6 +375,17 @@ class SceneTimeline(QWidget):
                                    self.FILA - 6), "sonido", obj, None))
         return out
 
+    def _claves_vis(self) -> list:
+        """[(centro, actor, fase, clave, segundo)] de los rombos ◆ de las animaciones a mano, fila a fila."""
+        out = []
+        for i, (tipo, obj, _n) in enumerate(self.filas()):
+            if tipo != "actor":
+                continue
+            y = self.REGLA + i * self.FILA + self.FILA / 2
+            for t, f, k in scenes.claves(self.escena(), obj):
+                out.append((QPointF(self.x_de(t), y), obj, f, k, t))
+        return out
+
     def _rect_mas(self, i: int) -> QRectF:
         y = self.REGLA + i * self.FILA
         return QRectF(self.width() - self.DER + 6, y + 5, self.DER - 12, self.FILA - 10)
@@ -361,9 +461,19 @@ class SceneTimeline(QWidget):
             p.setBrush(col)
             p.drawRoundedRect(r, 4, 4)
             p.setPen(QColor("#111111"))
-            txt = (dict(image_anim.FASES[fase["tipo"]]).get(fase["anim"], fase["anim"]) if fase else "")
+            txt = (("◆ A mano" if fase.get("mano") else dict(image_anim.FASES[fase["tipo"]]).get(fase["anim"],
+                                                                                                fase["anim"]))
+                   if fase else "")
             p.drawText(r.adjusted(5, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
                        p.fontMetrics().elidedText(txt, Qt.ElideRight, int(r.width()) - 8))
+        clave_sel = getattr(self, "clave_sel", None)      # ◆ claves a mano (arrastrables; clic derecho = curva)
+        for c, _a, _f, k, _t in self._claves_vis():
+            d = 6.0
+            from PySide6.QtGui import QPolygonF
+            p.setPen(QPen(QColor("#1a1a1a"), 1))
+            p.setBrush(QColor("#ffffff") if k is clave_sel else QColor("#ffd166"))
+            p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - d), QPointF(c.x() + d, c.y()), QPointF(c.x(), c.y() + d),
+                                     QPointF(c.x() - d, c.y())]))
         if self._guia is not None:                       # 🧲 dónde se pegó
             p.setPen(QPen(QColor("#ffd166"), 1, Qt.DashLine))
             p.drawLine(int(self._guia), self.REGLA, int(self._guia), self.height())
@@ -468,6 +578,19 @@ class SceneTimeline(QWidget):
                 self.update()
                 self.mas.emit(obj, e.globalPosition().toPoint())
                 return
+        if pos.y() >= self.REGLA and self.IZQ <= pos.x() <= self.width() - self.DER:   # ◆ un rombo de clave
+            for c, act, fase, k, _t in reversed(self._claves_vis()):
+                if abs(pos.x() - c.x()) <= 7 and abs(pos.y() - c.y()) <= 9:
+                    self.clave_sel = k
+                    self.sel = ("fase", fase)
+                    self.elegido.emit("fase", (act, fase))
+                    if e.button() == Qt.RightButton:
+                        self.update()
+                        self.page._menu_clave(act, fase, k, e.globalPosition().toPoint())
+                    else:
+                        self._arr = ("clave", act, fase, k)
+                    self.update()
+                    return
         if pos.y() < self.REGLA or (pos.x() < self.IZQ or pos.x() > self.width() - self.DER) and not self._en(pos):
             if self.IZQ <= pos.x() <= self.width() - self.DER:
                 self._arr = ("cabezal",)
@@ -524,6 +647,12 @@ class SceneTimeline(QWidget):
             self.t = self.t_de(pos.x())
             self.cabezal.emit(self.t)
             self.update()
+            return
+        if self._arr[0] == "clave":                       # ◆ mover la clave en el tiempo (dentro de su fase)
+            _x, act, fase, k = self._arr
+            scenes.mover_clave(self.escena(), act, fase, k, self._imantar(self.t_de(pos.x())))
+            self.update()
+            self.page.vista_previa_en(self.t)
             return
         tipo, obj, fase, borde, x0, v0, primera, inicio_fase = self._arr
         dt = (pos.x() - x0) / self._pps()
@@ -684,6 +813,9 @@ class ScenesPage(QWidget):
         self.material = QTabWidget()
         self.material.addTab(self._tab_personajes(), "🧍 Personajes")
         self.material.addTab(self._tab_sonidos(), "🔊 Sonidos")
+        self.material.addTab(self._tab_prehechas(), "⚡ Prehechas")
+        self.material.setTabToolTip(2, "Escenas de acción listas para usar: se disparan, pelea, uno contra un grupo, "
+                                       "huye y le persiguen, sorpresa, victoria, cara a cara…")
         self.material.setMinimumWidth(260)
 
         # ---- visor (centro)
@@ -1135,12 +1267,141 @@ class ScenesPage(QWidget):
         it = self.lista_img.itemAt(pos)
         if it is None:
             return
+        self._armar_menu_img(it.data(Qt.UserRole)).exec(self.lista_img.viewport().mapToGlobal(pos))
+
+    def _armar_menu_img(self, mid: str):
         from PySide6.QtWidgets import QMenu
-        mid = it.data(Qt.UserRole)
         menu = QMenu(self)
         menu.addAction("🎬 Añadir a la escena", lambda: self._añadir_actor(mid))
         menu.addAction("🖼 Usar de fondo de la escena", lambda: self._usar_de_fondo(mid))
-        menu.exec(self.lista_img.viewport().mapToGlobal(pos))
+        m = self.ctrl.project.media.get(mid)
+        if m is not None:
+            menu.addSeparator()
+            self._menu_archivo(menu, m.path)
+            menu.addSeparator()
+            menu.addAction("🗑 Quitar de Medios", lambda: self._quitar_de_medios(mid))
+        return menu
+
+    # ---------------------------------------------------------------- clic derecho: ruta, carpeta, quitar
+    def _menu_archivo(self, menu, ruta: str):
+        """La ruta del archivo (a la vista, sin pulsar), 📋 copiarla y 📂 abrir su carpeta con el archivo marcado."""
+        corta = ruta if len(ruta) <= 64 else "…" + ruta[-62:]
+        a = menu.addAction("📄 " + corta)
+        a.setEnabled(False)
+        a.setToolTip(ruta)
+        menu.setToolTipsVisible(True)
+        from PySide6.QtWidgets import QApplication
+        menu.addAction("📋 Copiar la ruta", lambda: QApplication.clipboard().setText(os.path.normpath(ruta)))
+        menu.addAction("📂 Abrir su carpeta", lambda: self._abrir_carpeta(ruta))
+
+    def _abrir_carpeta(self, ruta: str):
+        import subprocess
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":       # (pruebas: sin abrir ventanas)
+            self._ultima_carpeta = ruta
+            return
+        if os.path.isfile(ruta):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(ruta)])
+        elif os.path.isdir(os.path.dirname(ruta)):
+            subprocess.Popen(["explorer", os.path.normpath(os.path.dirname(ruta))])
+        else:
+            self.win.statusBar().showMessage("No encuentro esa carpeta en el disco.", 5000)
+
+    @staticmethod
+    def _usa(e: dict, mid: str) -> bool:
+        if any(a.get("media_id") == mid for a in e.get("actores", [])) or e.get("fondo_img") == mid:
+            return True
+        if any(s.get("media_id") == mid for s in e.get("sonidos", [])):
+            return True
+        comp = e.get("comp") or {}
+        return any((comp.get(k) or {}).get("media_id") == mid for k in ("A", "B"))
+
+    def _escena_que_usa(self, mid: str) -> str | None:
+        """El nombre de la escena (la abierta o una guardada del proyecto) que usa ese medio, o None."""
+        if self._usa(self.escena, mid):
+            return self.escena.get("nombre") or "esta escena"
+        for e in (self.ctrl.project.scenes or {}).values():
+            if e.get("id") != self.escena.get("id") and self._usa(e, mid):
+                return e.get("nombre") or "otra escena"
+        return None
+
+    def _quitar_de_medios(self, mid: str) -> bool:
+        """🗑 Quita la imagen o el sonido de Medios (el archivo de tu PC no se borra)."""
+        m = self.ctrl.project.media.get(mid)
+        if m is None:
+            return False
+        quien = self._escena_que_usa(mid)
+        if quien:
+            self.win.statusBar().showMessage(f"«{m.name}» se usa en la escena «{quien}»: quítalo antes de ella.", 6000)
+            return False
+        if self.ctrl.project.is_media_used(mid):
+            self.win.statusBar().showMessage(f"«{m.name}» se está usando en la línea de tiempo: quita antes sus clips.",
+                                             6000)
+            return False
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen" and QMessageBox.question(
+                self, "Quitar de Medios", f"¿Quitar «{m.name}» de Medios?\nEl archivo de tu PC NO se borra.") \
+                != QMessageBox.Yes:
+            return False
+        if not self.ctrl.remove_all_media([mid], False):     # (un paso de Ctrl+Z en el editor)
+            return False
+        self._llenar_imagenes()
+        self.reload()
+        self.win.statusBar().showMessage(f"🗑 «{m.name}» quitado de Medios (el archivo sigue en tu PC; Ctrl+Z en el "
+                                         "editor lo devuelve).", 6000)
+        return True
+
+    def _menu_lista_snd(self, pos):
+        it = self.lista_snd.itemAt(pos)
+        ref = it.data(Qt.UserRole) if it is not None else None
+        if ref:
+            self._armar_menu_snd(ref).exec(self.lista_snd.viewport().mapToGlobal(pos))
+
+    def _armar_menu_snd(self, ref: str):
+        from PySide6.QtWidgets import QMenu
+        from ..core.paths import user_dir
+        menu = QMenu(self)
+        if ref == getattr(self, "_oyendo", None) and self._sonando_escucha():
+            menu.addAction("⏸ Pausar", self._pausa_escucha)
+            menu.addAction("⏹ Dejar de escuchar", self._parar_escucha)
+        else:
+            menu.addAction("▶ Escuchar", lambda: self._clic_sonido(ref))
+        menu.addAction("➕ Añadir a la escena", lambda: self._añadir_sonido(ref))
+        menu.addSeparator()
+        ruta = self._ruta_sonido(ref)
+        self._menu_archivo(menu, ruta)
+        if not ref.startswith("sfx:"):            # (los ✦ de Reclaimer no se quitan)
+            n = os.path.normcase(os.path.abspath(ruta))
+            mid = next((m.id for m in self.ctrl.project.media.values()
+                        if os.path.normcase(os.path.abspath(m.path)) == n), None)
+            web = os.path.normcase(os.path.abspath(str(user_dir() / "Sonidos de internet")))
+            menu.addSeparator()
+            if mid is not None:
+                menu.addAction("🗑 Quitar de Medios", lambda: self._quitar_de_medios(mid))
+            elif n.startswith(web + os.sep):
+                menu.addAction("🗑 Mandar a la papelera", lambda: self._sonido_a_papelera(ruta))
+        return menu
+
+    def _sonido_a_papelera(self, ruta: str) -> bool:
+        """🗑 Un sonido guardado de 🌐 internet: a la papelera de Windows (se puede recuperar de ahí)."""
+        from PySide6.QtCore import QFile
+        nombre = os.path.basename(ruta)
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen" and QMessageBox.question(
+                self, "Mandar a la papelera", f"¿Mandar «{nombre}» a la papelera?\nSe puede recuperar desde la "
+                                             "papelera de Windows.") != QMessageBox.Yes:
+            return False
+        if self._oyendo_ruta() == os.path.normcase(os.path.abspath(ruta)):
+            from PySide6.QtCore import QUrl                  # (si se está escuchando, Windows no deja moverlo)
+            try:
+                self.player.pause()
+                self.player.setSource(QUrl())
+            except RuntimeError:
+                pass
+            self._oyendo = None
+        if not QFile.moveToTrash(ruta):
+            self.win.statusBar().showMessage(f"No se pudo mandar «{nombre}» a la papelera.", 6000)
+            return False
+        self.reload()
+        self.win.statusBar().showMessage(f"🗑 «{nombre}» está en la papelera.", 5000)
+        return True
 
     def _fondo_visor(self):
         pix = getattr(self, "_fondo_pix", None)
@@ -1195,9 +1456,16 @@ class ScenesPage(QWidget):
             it.setZValue(10 + z)
             self.vscene.addItem(it)
             self._items[act["id"]] = it
-        self._poner_en_reposo()
+        self._mostrar_visor()
         self.tl.refrescar()
         self._elegir(*self.tl.sel)
+
+    def _mostrar_visor(self):
+        """Modo edición (cada uno en su caja) o, con ◆ Auto clave, cómo está todo en la línea roja."""
+        if getattr(self, "_auto_clave", False):
+            self.vista_previa_en(self.tl.t)
+        else:
+            self._poner_en_reposo()
 
     def _actor(self, actor_id: str) -> dict | None:
         return next((a for a in self.escena["actores"] if a["id"] == actor_id), None)
@@ -1209,12 +1477,15 @@ class ScenesPage(QWidget):
             if act is None:
                 continue
             c = act["caja"]
-            it.editable = True
-            it.setFlag(QGraphicsItem.ItemIsMovable, True)
+            destello = act.get("efecto") == "destello"   # (⚡ el blanco del destello no tapa el visor al editar)
+            it.editable = not destello
+            it.flip = bool(c.get("flip_h"))
+            it.setFlag(QGraphicsItem.ItemIsMovable, not destello)
+            it.setAcceptedMouseButtons(Qt.NoButton if destello else Qt.AllButtons)
             it.prepareGeometryChange()
             it.setRect(QRectF(0, 0, c["w"] * self.W, c["h"] * self.H))
             it.setPos(c["x"] * self.W, c["y"] * self.H)
-            it.setOpacity(1.0)
+            it.setOpacity(0.08 if destello else 1.0)
             it.setVisible(True)
             it.update()
 
@@ -1239,8 +1510,16 @@ class ScenesPage(QWidget):
             it.setRect(QRectF(0, 0, bw, bh))
             it.setPos(b["x"] * self.W + s["dx"] * bw, b["y"] * self.H + s["dy"] * bh)
             it.setOpacity(s["op"])
+            it.flip = bool(b.get("flip_h"))            # (💨 huir le da la vuelta solo en esa fase)
             it.setVisible(True)
             it.update()
+        act = self._actor_elegido() if getattr(self, "_auto_clave", False) and not self._timer.isActive() else None
+        if act is not None and act["id"] in self._items and act["id"] != quieto:
+            it = self._items[act["id"]]                 # ◆ con Auto clave, el elegido se arrastra en la línea roja
+            if it.isVisible():
+                it.editable = True
+                it.setFlag(QGraphicsItem.ItemIsMovable, True)
+                it.update()
         self.tl.update()
 
     def _actor_movido(self, actor_id: str):
@@ -1248,6 +1527,11 @@ class ScenesPage(QWidget):
         if act is None or it is None:
             return
         r = it.rect().translated(it.pos())
+        if getattr(self, "_auto_clave", False):          # ◆ Auto clave: se crea o cambia la clave en la línea roja
+            caja = {"x": r.x() / self.W, "y": r.y() / self.H, "w": r.width() / self.W, "h": r.height() / self.H}
+            if scenes.poner_clave(self.escena, act, self.tl.t, caja) is not None:
+                self._tras_clave()
+            return
         act["caja"].update(x=round(r.x() / self.W, 4), y=round(r.y() / self.H, 4), w=round(r.width() / self.W, 4),
                            h=round(r.height() / self.H, 4))
         self._ensuciar()
@@ -1255,13 +1539,16 @@ class ScenesPage(QWidget):
     def _elegir_actor(self, actor_id: str):
         if self._timer.isActive():
             self.parar()
-        if not self._items.get(actor_id, None) or not self._items[actor_id].editable:
+        auto = getattr(self, "_auto_clave", False)
+        if not auto and (not self._items.get(actor_id, None) or not self._items[actor_id].editable):
             self._poner_en_reposo()
         act = self._actor(actor_id)
         if act is not None:
             self.tl.sel = ("actor", act)
             self._elegir("actor", act)
             self.tl.update()
+        if auto:
+            self.vista_previa_en(self.tl.t)
 
     # ================================================================ reproducir
     def alternar(self):
@@ -1298,6 +1585,20 @@ class ScenesPage(QWidget):
         self.lbl_tiempo.setToolTip("Dónde está la línea roja / lo que dura la escena")
         fila.addSpacing(8)
         fila.addWidget(self.lbl_tiempo)
+        fila.addSpacing(12)
+        self.b_auto = QPushButton("◆ Auto clave")
+        self.b_auto.setCheckable(True)
+        self.b_auto.setFocusPolicy(Qt.NoFocus)
+        self.b_auto.setToolTip("Animar a mano (como After Effects o Resolve): elige un personaje, mueve la línea roja y "
+                               "arrástralo o agrándalo en el visor; se crea o cambia una clave en ese instante y entre "
+                               "claves se mueve solo. Los rombos ◆ salen en su fila: arrástralos en el tiempo; clic "
+                               "derecho = curva o borrar.")
+        self.b_auto.toggled.connect(self._auto)
+        fila.addWidget(self.b_auto)
+        boton("◆", "Clave aquí: guarda dónde está el personaje elegido en la línea roja", self._clave_aqui)
+        boton("◇", "Quitar la clave del personaje elegido que hay en la línea roja", self._quitar_clave_aqui)
+        boton("◀◆", "Ir a la clave anterior del personaje elegido", lambda: self._ir_clave(-1))
+        boton("◆▶", "Ir a la clave siguiente del personaje elegido", lambda: self._ir_clave(1))
         fila.addStretch(1)
         fila.addWidget(QLabel("🔊"))
         self.vol_vista = QSlider(Qt.Horizontal)
@@ -1314,6 +1615,93 @@ class ScenesPage(QWidget):
                                                              setattr(self.tl, "off", 0.0), self.tl.update()))
         self.tl.cabezal.connect(self._act_tiempo)
         return fila
+
+    # ---------------------------------------------------------------- ◆ animar a mano
+    def _actor_elegido(self) -> dict | None:
+        tipo, obj = self.tl.sel
+        act = obj if tipo == "actor" else self._buscar_actor_de(obj) if tipo == "fase" and obj is not None else None
+        if act is None:
+            act = getattr(self, "_act_sel", None)
+        return act if act is not None and act in self.escena["actores"] else None
+
+    def _auto(self, on: bool):
+        self._auto_clave = bool(on)
+        self.parar()
+        self._mostrar_visor()
+        if on:
+            self.win.statusBar().showMessage("◆ Auto clave: elige un personaje, mueve la línea roja y arrástralo en el "
+                                             "visor.", 6000)
+
+    def _sin_actor(self) -> bool:
+        if self._actor_elegido() is None:
+            self.win.statusBar().showMessage("Elige antes un personaje (en el visor o en su fila).", 5000)
+            return True
+        return False
+
+    def _tras_clave(self):
+        self._ensuciar()
+        self.tl.refrescar()
+        act = self._actor_elegido()
+        if act is not None:
+            self._elegir("actor", act) if self.tl.sel[0] != "fase" else None
+        self._mostrar_visor()
+
+    def _clave_aqui(self):
+        if self._sin_actor():
+            return
+        if scenes.poner_clave(self.escena, self._actor_elegido(), self.tl.t) is None:
+            self.win.statusBar().showMessage("En ese momento no se ve: mueve la línea roja a donde esté en pantalla.",
+                                             5000)
+            return
+        self._tras_clave()
+
+    def _quitar_clave_aqui(self):
+        if self._sin_actor():
+            return
+        if scenes.quitar_clave(self.escena, self._actor_elegido(), self.tl.t):
+            self.tl.clave_sel = None
+            self._tras_clave()
+        else:
+            self.win.statusBar().showMessage("No hay ninguna clave en la línea roja (◀◆ ◆▶ saltan a ellas).", 5000)
+
+    def _ir_clave(self, sentido: int):
+        if self._sin_actor():
+            return
+        ts = [t for t, _f, _k in scenes.claves(self.escena, self._actor_elegido())]
+        t0 = self.tl.t
+        cand = [t for t in ts if t > t0 + 0.005] if sentido > 0 else [t for t in ts if t < t0 - 0.005]
+        if cand:
+            self._saltar_a(min(cand) if sentido > 0 else max(cand))
+            if getattr(self, "_auto_clave", False):
+                self.vista_previa_en(self.tl.t)
+
+    def _menu_clave(self, act: dict, fase: dict, k: dict, gpos):
+        """Clic derecho en un rombo: la curva del tramo que empieza en esa clave, llevar la línea roja o borrarla."""
+        m = QMenu(self)
+        m.setToolTipsVisible(True)
+        cab = m.addAction("Curva hasta la clave siguiente:")
+        cab.setEnabled(False)
+        actual = k.get("i", "smooth")
+        for c, nombre in image_anim.CURVAS_CLAVE:
+            a = m.addAction(nombre, lambda cc=c: self._curva(k, cc))
+            a.setCheckable(True)
+            a.setChecked(actual == c)
+        m.addSeparator()
+        st, d = scenes.inicio_de(act, fase), float(fase["dur"])
+        m.addAction("⏱ Llevar la línea roja aquí", lambda: self._saltar_a(st + float(k.get("t", 0)) * d))
+        m.addAction("🗑 Borrar clave", lambda: self._borrar_clave(act, fase, k))
+        m.exec(gpos)
+
+    def _curva(self, k: dict, curva: str):
+        scenes.curva_clave(k, curva)
+        self._ensuciar()
+        self.tl.update()
+        self.vista_previa_en(self.tl.t)
+
+    def _borrar_clave(self, act: dict, fase: dict, k: dict):
+        scenes.borrar_clave(self.escena, act, fase, k)
+        self.tl.clave_sel = None
+        self._tras_clave()
 
     def _vol_vista(self, v: int):
         from PySide6.QtCore import QSettings
@@ -1459,7 +1847,8 @@ class ScenesPage(QWidget):
         self.lista_img.setGridSize(QSize(100, 104))
         self.lista_img.setWordWrap(True)
         self.lista_img.setToolTip("Tus imágenes (Medios). ✓ = recorte con fondo transparente. Doble clic = añadirla a "
-                                  "la escena.")
+                                  "la escena. Ctrl + clic elige varias (los papeles de ⚡ Prehechas las usan).")
+        self.lista_img.setSelectionMode(QListWidget.ExtendedSelection)
         self.lista_img.itemDoubleClicked.connect(lambda it: self._añadir_actor(it.data(Qt.UserRole)))
         self.lista_img.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lista_img.customContextMenuRequested.connect(self._menu_lista_img)
@@ -1672,9 +2061,10 @@ class ScenesPage(QWidget):
     def _llenar_imagenes(self):
         self.lista_img.clear()
         p = self.ctrl.project
+        from ..core import escenas_prehechas as PH
         imgs = sorted((m for m in p.media.values() if m.kind == KIND_IMAGE and m.id not in self.ctrl.missing
-                       and not getattr(m, "gen", None)), key=lambda m: (not image_anim.tiene_transparencia(m.path),
-                                                                         m.name.lower()))
+                       and not getattr(m, "gen", None) and not PH.es_propia(m.path)),
+                      key=lambda m: (not image_anim.tiene_transparencia(m.path), m.name.lower()))
         for m in imgs:
             alfa = image_anim.tiene_transparencia(m.path)
             it = QListWidgetItem(("✓ " if alfa else "") + os.path.splitext(m.name)[0][:22])
@@ -1683,7 +2073,8 @@ class ScenesPage(QWidget):
                 it.setIcon(ico)
             it.setData(Qt.UserRole, m.id)
             it.setToolTip(m.name + ("\nRecorte con fondo transparente" if alfa else "\nSin transparencia (se verá su "
-                                                                                       "fondo rectangular)"))
+                                                                                       "fondo rectangular)")
+                          + "\n" + m.path + "\nClic derecho: añadir, de fondo, abrir su carpeta o quitar")
             self.lista_img.addItem(it)
 
     def _boton_añadir_img(self):
@@ -1819,6 +2210,201 @@ class ScenesPage(QWidget):
         self._añadir_actor(mid, getattr(self, "_caja_pendiente", None))
         self._caja_pendiente = None
 
+    # ================================================================ ⚡ prehechas
+    def _tab_prehechas(self) -> QWidget:
+        from PySide6.QtWidgets import QSpinBox
+        from ..core import escenas_prehechas as PH
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(4, 4, 4, 4)
+        self.pre_vista = _MiniVista(self)
+        self.pre_vista.setToolTip("Así se mueve la prehecha (en bucle): azul = A, rojo = B, verde = el grupo")
+        v.addWidget(self.pre_vista)
+        self.pre_lista = QListWidget()
+        self.pre_lista.setToolTip("Elige una: abajo, qué imagen hace cada papel. Doble clic = crearla.")
+        negrita = QFont(self.pre_lista.font())
+        negrita.setBold(True)
+        for g in PH.GRUPOS:
+            cab = QListWidgetItem(g)
+            cab.setFlags(Qt.NoItemFlags)
+            cab.setFont(negrita)
+            self.pre_lista.addItem(cab)
+            for t in PH.CATALOGO:
+                if t["grupo"] != g:
+                    continue
+                it = QListWidgetItem("   " + t["nombre"])
+                it.setData(Qt.UserRole, t["clave"])
+                try:
+                    it.setToolTip(PH.resumen(t))
+                except Exception:  # noqa: BLE001 - un tooltip no tumba la página
+                    it.setToolTip(t["desc"])
+                self.pre_lista.addItem(it)
+        self.pre_lista.currentItemChanged.connect(lambda it, _p: self._pre_elegir(it.data(Qt.UserRole) if it else None))
+        self.pre_lista.itemDoubleClicked.connect(lambda it: self._crear_prehecha() if it.data(Qt.UserRole) else None)
+        v.addWidget(self.pre_lista, 1)
+        self.pre_papeles = QWidget()
+        self.pre_form = QFormLayout(self.pre_papeles)
+        self.pre_form.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.pre_papeles)
+        self.pre_n = QSpinBox()
+        self.pre_n.setRange(1, 12)
+        self.pre_n.setPrefix("× ")
+        self.pre_n.setToolTip("Cuántos hay en el grupo: el mismo PNG repetido, con pequeñas diferencias de sitio, "
+                              "tamaño y momento")
+        self.pre_n.valueChanged.connect(lambda _v: self._pre_elegir(self._pre_clave, rehacer_papeles=False))
+        self._pre_combos: dict[str, QComboBox] = {}
+        self._pre_clave = None
+        fila = QHBoxLayout()
+        self.b_pre_crear = QPushButton("⚡ Crear escena")
+        self.b_pre_crear.setObjectName("primary")
+        self.b_pre_crear.setToolTip("Crea la escena en el tramo marcado (I/O), estirada a lo que dura; sin tramo, en el "
+                                    "cabezal con su duración. Si la escena de ahora está vacía, se hace en ella (Ctrl+Z "
+                                    "la deshace); si no, como escena nueva. Todo queda editable.")
+        self.b_pre_crear.clicked.connect(lambda: self._crear_prehecha())
+        self.b_pre_añadir = QPushButton("＋ A esta escena")
+        self.b_pre_añadir.setToolTip("Mete la prehecha dentro de la escena que estás editando, desde la línea roja "
+                                     "(sus personajes y sonidos se suman a los que ya hay). Ctrl+Z la quita.")
+        self.b_pre_añadir.clicked.connect(lambda: self._crear_prehecha(añadir=True))
+        for b in (self.b_pre_crear, self.b_pre_añadir):
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setEnabled(False)
+        fila.addWidget(self.b_pre_crear, 1)
+        fila.addWidget(self.b_pre_añadir)
+        v.addLayout(fila)
+        return w
+
+    def _pre_imagenes(self) -> list:
+        """Las imágenes que pueden hacer un papel (recortes con transparencia primero), sin las propias de prehechas."""
+        from ..core import escenas_prehechas as PH
+        p = self.ctrl.project
+        return sorted((m for m in p.media.values() if m.kind == KIND_IMAGE and m.id not in self.ctrl.missing
+                       and not getattr(m, "gen", None) and not PH.es_propia(m.path)),
+                      key=lambda m: (not image_anim.tiene_transparencia(m.path), m.name.lower()))
+
+    def _pre_candidatos(self) -> list[str]:
+        """Los personajes para los papeles, por orden: los elegidos en 🗂 Local y los que ya están en la escena."""
+        from ..core import escenas_prehechas as PH
+        p = self.ctrl.project
+        out = []
+        elegidos = [self.lista_img.item(i) for i in range(self.lista_img.count())
+                    if self.lista_img.item(i).isSelected()]
+        for it in elegidos:
+            out.append(it.data(Qt.UserRole))
+        for a in self.escena.get("actores", []):
+            m = p.media.get(a["media_id"])
+            if m is not None and not a.get("prop") and not a.get("efecto") and not PH.es_propia(m.path):
+                out.append(a["media_id"])
+        vistos, res = set(), []
+        for mid in out:
+            if mid and mid in p.media and mid not in vistos:
+                vistos.add(mid)
+                res.append(mid)
+        return res
+
+    def _pre_medios(self) -> dict:
+        return {papel: cb.currentData() for papel, cb in self._pre_combos.items()}
+
+    def _pre_elegir(self, clave: str | None, rehacer_papeles: bool = True):
+        """Elegir una prehecha: sus papeles (con los personajes que hay a mano) y su vista previa."""
+        from ..core import escenas_prehechas as PH
+        cambio = clave != self._pre_clave
+        self._pre_clave = clave
+        for b in (self.b_pre_crear, self.b_pre_añadir):
+            b.setEnabled(bool(clave))
+        if not clave:
+            self.pre_vista.poner(None)
+            return
+        t = PH.POR_CLAVE[clave]
+        grupo = next((x for x in t["papeles"] if x[2]), None)
+        if rehacer_papeles or cambio:
+            self.pre_n.setParent(None)                 # (que no se borre con las filas: se vuelve a poner)
+            while self.pre_form.rowCount():
+                self.pre_form.removeRow(0)
+            self._pre_combos = {}
+            imgs = self._pre_imagenes()
+            cand = self._pre_candidatos()
+            for i, (papel, nombre, n) in enumerate(t["papeles"]):
+                cb = QComboBox()
+                cb.addItem("👤 Marcador (falta)", None)
+                for m in imgs:
+                    cb.addItem(("✓ " if image_anim.tiene_transparencia(m.path) else "") +
+                               os.path.splitext(m.name)[0][:28], m.id)
+                if i < len(cand):
+                    cb.setCurrentIndex(max(0, cb.findData(cand[i])))
+                cb.setToolTip(f"Qué imagen hace de «{nombre}»" + (" (se repite en todo el grupo)" if n else "") +
+                              ". Sin imagen queda un marcador (una silueta con su letra) que luego cambias con "
+                              "«🔁 Cambiar imagen».")
+                self._pre_combos[papel] = cb
+                if n:
+                    fila = QHBoxLayout()
+                    fila.addWidget(cb, 1)
+                    self.pre_n.blockSignals(True)
+                    self.pre_n.setValue(int(n))
+                    self.pre_n.blockSignals(False)
+                    fila.addWidget(self.pre_n)
+                    self.pre_form.addRow(f"{papel} · {nombre}", fila)
+                else:
+                    self.pre_form.addRow(f"{papel} · {nombre}", cb)
+        e, _f = PH.construir(clave, 0.0, {}, None, self.ctrl.project.height > self.ctrl.project.width,
+                             n_grupo=self.pre_n.value() if grupo else None)
+        self.pre_vista.poner(e)
+
+    def _crear_prehecha(self, clave: str | None = None, añadir: bool = False, medios: dict | None = None,
+                        n_grupo: int | None = None) -> dict | None:
+        """⚡ Crea la prehecha: en el tramo I/O (estirada) o en el cabezal; en esta escena si está vacía (Ctrl+Z la
+        deshace) o como escena nueva; con «añadir», dentro de esta escena desde la línea roja."""
+        from ..core import escenas_prehechas as PH
+        clave = clave or self._pre_clave
+        if not clave or scenes.es_comparativa(self.escena) and añadir:
+            return None
+        self.parar()
+        t = PH.POR_CLAVE[clave]
+        medios = self._pre_medios() if medios is None else medios
+        if n_grupo is None and any(x[2] for x in t["papeles"]):
+            n_grupo = self.pre_n.value()
+        p = self.ctrl.project
+        vertical = p.height > p.width
+        if añadir and self._tiene_contenido():
+            esc, faltan = PH.construir(clave, 0.0, medios, self.ctrl.media_for_path, vertical, n_grupo=n_grupo)
+            PH.añadir_a(self.escena, esc, float(self.tl.t))
+            self._ensuciar()
+            self._recargar_barra()
+            self._reconstruir()
+        else:
+            if p.mark_in is not None and p.mark_out is not None and p.mark_out > p.mark_in + 0.3:
+                a, dur = float(p.mark_in), float(p.mark_out - p.mark_in)
+            else:
+                a, dur = self._cabezal(), None
+            esc, faltan = PH.construir(clave, a, medios, self.ctrl.media_for_path, vertical, dur, n_grupo)
+            if not self._tiene_contenido() and not scenes.es_comparativa(self.escena) and \
+                    self.escena["id"] not in p.scenes:   # (la de ahora está vacía: se hace en ella → Ctrl+Z vuelve)
+                for k in ("a", "b", "nombre", "fondo", "actores", "sonidos", "prehecha"):
+                    self.escena[k] = esc[k]
+                self.escena.pop("fondo_img", None)
+                self.tl.sel = ("", None)
+                self.tl.t = 0.0
+                self._ensuciar()
+                self._recargar_barra()
+                self._llenar_escenas()
+                self._reconstruir()
+                self._tomar_fondo()
+            else:
+                if self.sucia and self._tiene_contenido() and not self._descartar_ok():
+                    return None
+                self._cargar(esc, True)
+        self._llenar_imagenes()
+        self.reload()
+        if faltan:
+            self.marca.setText(f"⚠ faltan: {', '.join(faltan)}")
+            self.marca.setToolTip("Esos papeles llevan un marcador (una silueta con su letra). Elige al marcador y pulsa "
+                                  "«🔁 Cambiar imagen», o elige antes las imágenes en «🗂 Local» (Ctrl + clic para "
+                                  "varias) o en la lista de papeles.")
+            self.win.statusBar().showMessage(f"⚡ «{t['nombre']}» creada; faltan personajes: {', '.join(faltan)} "
+                                             "(llevan un marcador: cámbialo con «🔁 Cambiar imagen»).", 10000)
+        else:
+            self.win.statusBar().showMessage(f"⚡ «{t['nombre']}» creada: retócala y pulsa «✓ Aplicar».", 7000)
+        return self.escena
+
     # ================================================================ material: sonidos
     def _tab_sonidos(self) -> QWidget:
         w = QWidget()
@@ -1826,8 +2412,10 @@ class ScenesPage(QWidget):
         v.setContentsMargins(4, 4, 4, 4)
         self.lista_snd = QListWidget()
         self.lista_snd.setToolTip("Clic = escuchar · doble clic = ponerlo en el cabezal de la escena.")
-        self.lista_snd.itemClicked.connect(lambda it: self._escuchar(it.data(Qt.UserRole)))
+        self.lista_snd.itemClicked.connect(lambda it: self._clic_sonido(it.data(Qt.UserRole)))
         self.lista_snd.itemDoubleClicked.connect(lambda it: self._añadir_sonido(it.data(Qt.UserRole)))
+        self.lista_snd.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lista_snd.customContextMenuRequested.connect(self._menu_lista_snd)
         b = self.b_add_snd = QPushButton("➕ Añadir a la escena")
         b.setObjectName("primary")
         b.setToolTip("Pone el sonido elegido donde está la línea roja de la escena. También puedes arrastrarlo a la "
@@ -1861,6 +2449,21 @@ class ScenesPage(QWidget):
         self.vol_snd.valueChanged.connect(vol_snd)
         fv.addWidget(self.vol_snd, 1)
         fv.addWidget(self.lbl_vol_snd)
+        self.b_pausa_snd = QPushButton("⏸")
+        self.b_pausa_snd.setFixedWidth(34)
+        self.b_pausa_snd.setToolTip("Pausar / seguir escuchando (también: clic otra vez en el mismo sonido)")
+        self.b_pausa_snd.clicked.connect(self._pausa_escucha)
+        self.b_parar_snd = QPushButton("⏹")
+        self.b_parar_snd.setFixedWidth(34)
+        self.b_parar_snd.setToolTip("Dejar de escuchar")
+        self.b_parar_snd.clicked.connect(self._parar_escucha)
+        fv.addWidget(self.b_pausa_snd)
+        fv.addWidget(self.b_parar_snd)
+        try:
+            self.player.playbackStateChanged.connect(lambda _s: self._estado_escucha())
+        except (AttributeError, RuntimeError):
+            pass
+        self._estado_escucha()
         v.addLayout(fv)
         try:
             self.player.audioOutput().setVolume(self.vol_snd.value() / 100.0)
@@ -1909,6 +2512,68 @@ class ScenesPage(QWidget):
             it.setData(Qt.UserRole, "sfx:" + k)
             self.lista_snd.addItem(it)
 
+    # ---------------------------------------------------------------- ▶ ⏸ ⏹ escuchar sonidos de la lista
+    def _sonando_escucha(self) -> bool:
+        from PySide6.QtMultimedia import QMediaPlayer
+        try:
+            return self.player.playbackState() == QMediaPlayer.PlayingState
+        except RuntimeError:
+            return False
+
+    def _clic_sonido(self, ref: str):
+        """Clic en un sonido: lo escucha; clic otra vez en el MISMO mientras suena: pausa (y otra vez: sigue)."""
+        from PySide6.QtMultimedia import QMediaPlayer
+        if ref and ref == getattr(self, "_oyendo", None):
+            try:
+                st = self.player.playbackState()
+            except RuntimeError:
+                st = None
+            if st == QMediaPlayer.PlayingState:
+                self.player.pause()
+                return
+            if st == QMediaPlayer.PausedState:
+                self.player.play()
+                return
+        self._escuchar(ref)
+
+    def _pausa_escucha(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+        try:
+            st = self.player.playbackState()
+            if st == QMediaPlayer.PlayingState:
+                self.player.pause()
+            elif st == QMediaPlayer.PausedState:
+                self.player.play()
+            else:
+                it = self.lista_snd.currentItem()
+                if it is not None and it.data(Qt.UserRole):
+                    self._escuchar(it.data(Qt.UserRole))
+        except RuntimeError:
+            pass
+
+    def _parar_escucha(self):
+        try:
+            self.player.pause()             # (stop() a veces se bloquea)
+            self.player.setPosition(0)
+        except RuntimeError:
+            pass
+        self._estado_escucha()                  # (sigue sabiendo cuál era: clic en él = seguir escuchándolo)
+
+    def _oyendo_ruta(self) -> str:
+        ref = getattr(self, "_oyendo", None)
+        return os.path.normcase(os.path.abspath(self._ruta_sonido(ref))) if ref else ""
+
+    def _estado_escucha(self):
+        if not hasattr(self, "b_pausa_snd"):
+            return
+        try:
+            sonando = self._sonando_escucha()
+            self.b_pausa_snd.setText("⏸" if sonando else "▶")
+            self.b_pausa_snd.setToolTip("Pausar (también: clic otra vez en el mismo sonido)" if sonando else
+                                        "Escuchar / seguir escuchando el sonido elegido")
+        except RuntimeError:
+            pass
+
     def _ruta_sonido(self, ref: str) -> str:
         from ..core import sfx
         return sfx.path_for(ref[4:]) if ref.startswith("sfx:") else ref
@@ -1928,6 +2593,7 @@ class ScenesPage(QWidget):
             self.player.pause()             # (stop() a veces se bloquea)
             self.player.setSource(QUrl.fromLocalFile(self._ruta_sonido(ref)))
             self.player.play()
+            self._oyendo = ref
         except RuntimeError:
             pass
 
@@ -2011,6 +2677,13 @@ class ScenesPage(QWidget):
         b_quitar.setToolTip("Lo quita de la escena (al aplicar, también de la línea de tiempo).")
         b_quitar.clicked.connect(lambda: self._quitar_actor(self._act_sel) if getattr(self, "_act_sel", None)
                                  else None)
+        b_img = QPushButton("🔁 Cambiar imagen")
+        b_img.setToolTip("Otra imagen para este personaje (lo que hace no cambia). En un grupo de una prehecha, se cambia "
+                         "en todo el grupo. Sirve para poner el personaje que falta en un marcador.")
+        self.menu_img = QMenu(b_img)
+        self.menu_img.aboutToShow.connect(self._llenar_menu_img)
+        b_img.setMenu(self.menu_img)
+        b_img.setFocusPolicy(Qt.NoFocus)
         f.addRow(self.a_nombre)
         f.addRow("Mira", self.a_lado)
         f.addRow("Aparece en", self.a_inicio)
@@ -2018,8 +2691,50 @@ class ScenesPage(QWidget):
         f.addRow("Salida", self.a_salida)
         f.addRow(self.a_flip)
         f.addRow(b_acc)
+        f.addRow(b_img)
         f.addRow(b_quitar)
         self.insp.addWidget(w)
+
+    def _llenar_menu_img(self):
+        m = self.menu_img
+        m.clear()
+        act = getattr(self, "_act_sel", None)
+        if act is None or act not in self.escena["actores"]:
+            return
+        elegida = self.lista_img.currentItem()
+        if elegida is not None and elegida.data(Qt.UserRole) != act["media_id"]:
+            m.addAction(f"La elegida en 🗂 Local: {elegida.text()}",
+                        lambda mid=elegida.data(Qt.UserRole): self._cambiar_imagen(act, mid))
+            m.addSeparator()
+        imgs = self._pre_imagenes()
+        for im in imgs[:60]:
+            a = m.addAction(("✓ " if image_anim.tiene_transparencia(im.path) else "") + os.path.splitext(im.name)[0][:40],
+                            lambda mid=im.id: self._cambiar_imagen(act, mid))
+            a.setEnabled(im.id != act["media_id"])
+        if not imgs:
+            m.addAction("(no hay imágenes en Medios: añádelas en «🧍 Personajes»)").setEnabled(False)
+
+    def _cambiar_imagen(self, act: dict, media_id: str):
+        """🔁 Otra imagen para el personaje (y para todo su grupo si es de una prehecha)."""
+        if act not in self.escena["actores"] or media_id not in self.ctrl.project.media:
+            return
+        viejo = act["media_id"]
+        cambiar = [act]
+        if act.get("grupo"):
+            cambiar += [a for a in self.escena["actores"] if a is not act and a.get("grupo") == act["grupo"]
+                        and a["media_id"] == viejo]
+        for a in cambiar:
+            a["media_id"] = media_id
+        self._ensuciar()
+        self._reconstruir()
+        from ..core import escenas_prehechas as PH
+        quedan = sorted({a.get("papel") or "?" for a in self.escena["actores"]
+                         if a["media_id"] in self.ctrl.project.media
+                         and PH.es_propia(self.ctrl.project.media[a["media_id"]].path)
+                         and not a.get("prop") and not a.get("efecto")})
+        if self.marca.text().startswith("⚠ faltan"):
+            self.marca.setText(f"⚠ faltan: {', '.join(quedan)}" if quedan else "● sin aplicar")
+        self.win.statusBar().showMessage(f"🔁 Imagen cambiada en {len(cambiar)} personaje(s).", 5000)
 
     def _insp_fase(self):
         w = QWidget()
@@ -2220,7 +2935,9 @@ class ScenesPage(QWidget):
     # ---------------------------------------------------------------- «＋» de cada fila
     DUR_ACCION = {"disparo": 1.2, "golpe": 0.5, "salta": 1.0, "camina": 1.5, "corre": 1.2, "agacha": 1.0,
                   "tiembla": 1.0, "acerca": 1.5, "conduce": 2.0, "frena": 1.2, "flota": 2.0, "explota": 0.8,
-                  "pop": 0.5, "destello": 0.4, "ninguna": 1.0}
+                  "pop": 0.5, "destello": 0.4, "ninguna": 1.0, "ataca": 0.5, "esquiva": 0.6, "derribado": 1.0,
+                  "retrocede": 1.0, "cruza_corre": 2.0, "cruza": 2.0, "huye": 1.2, "habla": 1.5, "susto": 0.5,
+                  "celebra": 1.7, "abatido": 1.4, "sacudida": 0.35}
 
     def _menu_mas(self, actor: dict, gpos):
         """«＋»: qué añadir a ese personaje JUSTO en la línea roja de la escena."""
@@ -2244,6 +2961,10 @@ class ScenesPage(QWidget):
                 a = s2.addAction("…y muere", lambda a=actor, oo=o: self._disparar(a, oo, True))
                 a.setToolTip("Dispara desde la línea roja; al otro le llega el disparo, recibe el golpe y cae.")
                 s2.addAction("…solo herido", lambda a=actor, oo=o: self._disparar(a, oo, False))
+        a = m.addAction("📳 Temblor de cámara aquí (a todos)", self._temblor_aqui)
+        a.setToolTip("Todos los que estén quietos en la línea roja se sacuden a la vez (una fase «📳 Sacudida»).")
+        a = m.addAction("⚡ Destello de pantalla aquí", self._destello_aqui)
+        a.setToolTip("Un fogonazo blanco a pantalla completa que se desvanece (va encima de todo).")
         m.addSeparator()
         a = m.addAction("🎥 Grabar mi movimiento desde aquí…", lambda a=actor: self._armar_grabacion(a))
         a.setToolTip("Mantén pulsado al personaje en el visor y muévelo con el ratón: se graba mientras lo mueves "
@@ -2266,6 +2987,24 @@ class ScenesPage(QWidget):
         m.addSeparator()
         m.addAction("🗑 Quitar personaje", lambda a=actor: self._quitar_actor(a))
         m.exec(gpos)
+
+    def _temblor_aqui(self):
+        if scenes.temblor_camara(self.escena, self.tl.t, 0.35):
+            self._ensuciar()
+            self.tl.refrescar()
+            self.vista_previa_en(self.tl.t)
+        else:
+            self.win.statusBar().showMessage("Nadie está quieto en ese momento (el temblor solo se pone a los que están "
+                                             "quietos, temblando o hablando).", 6000)
+
+    def _destello_aqui(self):
+        from ..core import escenas_prehechas as PH
+        mid = self.ctrl.media_for_path(PH.ruta_imagen("blanco"), "Escenas")
+        if not mid:
+            return
+        scenes.nuevo_destello(self.escena, mid, self.tl.t)
+        self._ensuciar()
+        self._reconstruir()
 
     def _insertar(self, actor: dict, fase: dict) -> dict:
         f = scenes.insertar_en(self.escena, actor, self.tl.t, fase)
@@ -2654,6 +3393,7 @@ class ScenesPage(QWidget):
             return False
         borrador = copy.deepcopy(self.escena)
         horizontal_antes = p.width >= p.height
+        w0, h0 = p.width, p.height
         self.sucia = False                                 # (lo de aquí no se pierde: va a la otra pestaña)
         self.win.go_page("edit")
         if not ws.switch(destino):                         # (canceló al guardar: vuelve a Escenas con su borrador)
@@ -2679,6 +3419,7 @@ class ScenesPage(QWidget):
                 for v in x:
                     cambiar(v)
         cambiar(esc)
+        recolocada = scenes.adaptar_formato(esc, w0, h0, c.project.width, c.project.height)   # (📐 otro formato)
         res = c.apply_scene(esc)
         nombre = self.destino.currentText()
         if not res:                                        # (no se pudo poner aquí: la escena sigue, sin perderse)
@@ -2697,7 +3438,9 @@ class ScenesPage(QWidget):
             except Exception:  # noqa: BLE001 - resaltar es un extra
                 pass
             aviso = ""
-            if horizontal_antes != (c.project.width >= c.project.height):
+            if recolocada:
+                aviso = " Los personajes se recolocaron para este formato (🎬 Editar la escena para retocarlos)."
+            elif horizontal_antes != (c.project.width >= c.project.height):
                 aviso = " Ojo: se hizo en otro formato, revisa dónde quedan los personajes (🎬 Editar la escena)."
             self.win.statusBar().showMessage(f"🎬 «{esc.get('nombre')}» puesta en {nombre} ({len(res)} clips). "
                                              f"Ctrl+Z la quita.{aviso}", 10000)

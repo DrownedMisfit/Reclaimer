@@ -408,6 +408,10 @@ def paint_title(p: QPainter, text: dict, t_in_clip: float, duration: float, W: i
         fade = 0.15
     p.save()
     p.setOpacity(max(0.0, min(1.0, t_in_clip / fade, (duration - t_in_clip) / fade)))
+    if text.get("pos_kf"):           # 📌 pegado a un objeto: se mueve con él (como al exportar)
+        from ..core.motion_track import text_offset_at
+        dx, dy = text_offset_at(text, t_in_clip)
+        pos = QPointF(pos.x() + dx * W, pos.y() + dy * H)
     p.drawImage(pos, img)
     p.restore()
 
@@ -430,7 +434,8 @@ class TitlesItem(QGraphicsItem):
 
     def set_items(self, items: list[tuple[dict, float, float]]):
         """[(texto, segundos desde que empezó, duración)]"""
-        key = tuple((repr(t), round(a, 2) if (a < 0.2 or d - a < 0.2) else None, d) for t, a, d in items)
+        key = tuple((repr(t), round(a, 2) if (a < 0.2 or d - a < 0.2 or t.get("pos_kf")) else None, d)
+                    for t, a, d in items)          # (📌 un texto pegado a un objeto cambia en cada fotograma)
         self._items = items
         if key != self._key:
             self._key = key

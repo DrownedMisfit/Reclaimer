@@ -392,7 +392,9 @@ para ese clip."""),
 suavemente entre ellas (rombos amarillos en el clip). ◀ ▶ saltan entre claves, ✕ quita la clave del cabezal.</li>
 <li><b>En pantalla</b>: pon el clip en una mitad, arriba/abajo o en una esquina (pantalla dividida). Para llenar lo
 que queda vacío alrededor con la propia imagen desenfocada: <b>▦ Relleno</b> (⤧ Transformar).</li>
-<li><b>🎯 Seguir personaje u objeto</b>: marcas algo y la IA crea un zoom que lo acompaña.</li>
+<li><b>🎯 Seguimiento</b> (clic derecho en un video): sigue algo, solo o a mano (corriges el recuadro donde falle y
+«Seguir desde aquí»), y úsalo para un zoom que lo acompaña, el encuadre vertical, taparlo (desenfocar/pixelar) o
+<b>📌 pegarle</b> un texto o una imagen que vayan con él.</li>
 </ul>"""),
     "audio_clip": ("Audio del clip", """
 <b>Volumen</b> del clip y <b>Balance</b> (más a la izquierda o a la derecha).<br><br>

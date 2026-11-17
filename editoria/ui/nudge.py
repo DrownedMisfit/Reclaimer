@@ -44,6 +44,9 @@ def reveal_tab(widget: QWidget | None):
             if i >= 0 and tw.currentIndex() != i:
                 tw.setCurrentIndex(i)
         w = p
+    if widget is not None:                         # (y si está en una sección plegada, se abre y se trae a la vista)
+        from .guide import reveal
+        reveal(widget, traer_panel=False)
 
 
 def nudge(widget: QWidget | None, tip: str | None = None, seconds: float = 4.0):

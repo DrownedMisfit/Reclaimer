@@ -279,10 +279,17 @@ def _clip_video_filters(k: int, c, m, W: int, H: int, F: str) -> list[str]:
     if float((c.fx or {}).get("glow", 0) or 0) > 0:    # brillo soñador: dos ramas y se vuelve a la cadena
         fx = fx + f"null[gz{k}];{effects.glow_graph(c.fx, k)};[go{k}]format=yuv420p,"
     regions = effects.blur_regions(c.fx)
-    if regions:   # desenfoque por zonas: se sale de la cadena y se vuelve a ella con [ro{k}]
-        fx = fx + f"null[rz{k}];{effects.region_blur_graph(regions, k)};[ro{k}]"
+    rgraph = ""   # ◌ desenfoque por zonas: se sale de la cadena y se vuelve a ella con [ro{k}]; ANTES de voltear (las
+    if regions:   # zonas están en la caja sin voltear, como las dibujas en el visor, que voltea la capa entera después)
+        rgraph = f"null[rz{k}];{effects.region_blur_graph(regions, k)};[ro{k}]"
+    from ..core import motion_track as MT
+    tregs = MT.tracked_blurs(c.fx) if m.kind == KIND_VIDEO else []
+    tgraph = ""   # 🙈 tapar lo que se sigue: zonas que se mueven con el objeto (mismas rectas que el visor), ANTES de
+    if tregs:     # voltear (en el visor, el volteo también se aplica después, a la capa entera)
+        tgraph = f"null[tz{k}];{MT.ffmpeg_graph(tregs, k, curves.s_of_t(c, 't'), bw, bh)};[to{k}]"
     alpha = opacity_filters(c, m)
     flips = ("hflip," if box.get("flip_h") else "") + ("vflip," if box.get("flip_v") else "")   # ↔ ↕ voltear
+    flips = rgraph + tgraph + flips
     place = f"{flips}{fx}setsar=1,format=yuv420p,{alpha}setpts=PTS-STARTPTS+{c.start:.3f}/TB"
     cr = box.get("crop")
     crop_f = ""
@@ -964,6 +971,7 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
     titles = [(c.start, c.end, c.text) for tr in project.tracks if tr.kind == TRACK_TEXT and not tr.hidden
               for c in project.clips_on(tr.id) if c.enabled and c.text]
     if titles:
+        from ..core import motion_track as MT
         from ..core import title_render
         tdir = texts_dir(script_path)
         os.makedirs(tdir, exist_ok=True)
@@ -986,7 +994,12 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
             filters.append(f"[{k}:v]format=rgba,fade=t=in:st=0:d={fd:.3f}:alpha=1,"
                            f"fade=t=out:st={dur - fd:.3f}:d={fd:.3f}:alpha=1,"
                            f"setpts=PTS-STARTPTS+{a:.3f}/TB[tx{i}]")
-            filters.append(f"[{last}][tx{i}]overlay=x={int(round(pos.x()))}:y={int(round(pos.y()))}:"
+            off = MT.text_offset_expr(t, f"(t-{a:.4f})")
+            if off:       # 📌 pegado a un objeto: se mueve con él (las mismas rectas que el visor)
+                pos_xy = (f"x='{pos.x():.2f}+{W}*({off[0]})':y='{pos.y():.2f}+{H}*({off[1]})':eval=frame:")
+            else:
+                pos_xy = f"x={int(round(pos.x()))}:y={int(round(pos.y()))}:"
+            filters.append(f"[{last}][tx{i}]overlay={pos_xy}"
                            f"eof_action=pass:enable='between(t,{a:.3f},{b:.3f})'[txo{i}]")
             last = f"txo{i}"
 

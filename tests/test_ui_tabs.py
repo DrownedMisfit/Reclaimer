@@ -1,6 +1,7 @@
 """
-Prueba de la interfaz limpia (como Resolve: todo en pestañas, sin explicaciones largas a la vista):
-  · Efectos, Limpieza, Subtítulos e IA ✨ tienen sus subpestañas; las tarjetas de la IA abren su pestaña;
+Prueba de la interfaz limpia (sin explicaciones largas a la vista):
+  · Efectos, Limpieza, Subtítulos e IA ✨ tienen sus partes en secciones plegables una debajo de otra (17/11: antes
+    subpestañas); las tarjetas de la IA abren la suya (y la traen a la vista) sin guardar que la abriste tú;
   · ⚡ Subtítulos para Short: con la narración ya transcrita, un clic los activa con el estilo «Mis Shorts»;
     sin transcribir, pide la transcripción y al terminar los pone solos.
 Ejecutar:  .venv/Scripts/python.exe tests/test_ui_tabs.py <carpeta_salida>
@@ -43,7 +44,7 @@ def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     st = QSettings("EditorIA", "EditorIA")
-    keep = {k: st.value(k) for k in ("ventana/paneles", "geometry")}
+    keep = {k: st.value(k) for k in ("ventana/paneles", "geometry", "secciones/ia/Broll")}
     app = QApplication(sys.argv)
     from editoria.ui.main_window import MainWindow
     from editoria.ui.theme import apply_dark_theme
@@ -53,14 +54,40 @@ def main():
         win.resize(1500, 900)
         win.show()
         pump(app, 0.3)
+        from PySide6.QtCore import QSettings as _QS
+        from editoria.ui.tabs import Escalonado
         names = lambda tw: [tw.tabText(i) for i in range(tw.count())]   # noqa: E731
-        assert names(win.effects.tabs) == ["Imagen", "Transiciones", "Sonidos", "⭐ Para la IA"]
-        assert names(win.voice.tabs) == ["Transcribir", "Limpiar", "Sugerencias"]
+        for panel in (win.effects, win.voice, win.subtitles, win.ai_panel):
+            assert isinstance(panel.tabs, Escalonado), type(panel.tabs)
+        assert names(win.effects.tabs) == ["Imagen", "Transiciones", "Sonidos", "⭐ Para la IA", "✨ Lo que dices"]
+        assert names(win.voice.tabs) == ["Limpiar", "Sugerencias"]        # («Transcribir» está en IA ✨)
         assert names(win.subtitles.tabs) == ["Letra", "Colores", "Posición", "Animación"]
-        assert names(win.ai_panel.tabs)[0] == "Inicio" and "B-roll" in names(win.ai_panel.tabs)
+        ia = win.ai_panel.tabs
+        assert names(ia)[:2] == ["🎙 Transcribir", "Inicio"] and "B-roll" in names(ia), names(ia)
+        win.show_panel(win.ai_panel)
+        i_broll = names(ia).index("B-roll")
+        sec = ia.secciones()[i_broll]
+        clave = "secciones/ia/Broll"
+        _QS("EditorIA", "EditorIA").remove(clave)
+        sec.set_open(False, save=False)
+        pump(app, 0.1)
+        assert not sec.is_open() and not win.ai_panel._groups["broll"].isVisible()
         win.ai_panel._card("broll")
-        assert win.ai_panel.tabs.tabText(win.ai_panel.tabs.currentIndex()) == "B-roll"
-        print("✓ Efectos, Limpieza, Subtítulos e IA ✨ en subpestañas; las tarjetas de la IA abren la suya")
+        pump(app, 0.3)
+        assert ia.tabText(ia.currentIndex()) == "B-roll"
+        assert sec.is_open() and win.ai_panel._groups["broll"].isVisible(), "la tarjeta abre la sección B-roll"
+        zona = win.docks["ai"].widget()
+        r = sec.head.geometry().translated(sec.mapTo(zona.widget(), sec.rect().topLeft()))
+        vis = zona.viewport().rect().translated(0, zona.verticalScrollBar().value())
+        assert vis.intersects(r), (vis, r)
+        assert _QS("EditorIA", "EditorIA").value(clave) is None, "abrirla el código no se recuerda como tuya"
+        sec.head.click()                         # (clic tuyo: se cierra y se recuerda)
+        pump(app, 0.1)
+        assert not sec.is_open() and str(_QS("EditorIA", "EditorIA").value(clave)).lower() in ("false", "0")
+        sec.head.click()
+        assert sec.is_open() and str(_QS("EditorIA", "EditorIA").value(clave)).lower() in ("true", "1")
+        print("✓ Efectos, Limpieza, Subtítulos e IA ✨ en secciones plegables; la tarjeta «B-roll» abre la suya y la "
+              "trae a la vista (solo se recuerda lo que abres o cierras tú)")
 
         ctrl = win.ctrl
         wav = os.path.join(out, "narracion.wav")

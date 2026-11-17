@@ -31,6 +31,14 @@ CATALOG = {
     "clic": ("Clic de interfaz", "Digital", "Clic limpio para textos o menús."),
     "brillo": ("Destello sonoro", "Digital", "Brillo agudo para un destello o un texto que aparece."),
     "obturador": ("Obturador de cámara", "Digital", "Foto: para congelar imagen o capturas."),
+    # 🎬 para las escenas (⚡ prehechas): acción y reacciones
+    "disparo": ("Disparo", "Acción", "Disparo seco con su eco corto. Uno por cada retroceso del arma."),
+    "punetazo": ("Puñetazo", "Acción", "Golpe de puño o patada: seco y con cuerpo."),
+    "explosion": ("Explosión", "Acción", "Estallido grave con cola larga."),
+    "pasos": ("Pasos corriendo", "Acción", "Pasos rápidos durante 1,6 s (persecuciones, huidas)."),
+    "susto": ("Susto (golpe de tensión)", "Reacción", "Acorde disonante de golpe: sorpresa, aparece algo, emboscada."),
+    "victoria": ("Fanfarria de victoria", "Reacción", "Arpegio alegre que sube: victoria, celebración."),
+    "derrota": ("Trombón triste", "Reacción", "«Buah, buah, buaaah»: derrota, fracaso, cae derrotado."),
 }
 
 
@@ -234,9 +242,95 @@ def obturador() -> np.ndarray:
     return _stereo(x, 0, 0, 0.2)
 
 
+def _lp(x: np.ndarray, fc: float) -> np.ndarray:
+    """Paso bajo suave hecho en frecuencia (rápido también con sonidos largos)."""
+    n = len(x)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    return np.fft.irfft(np.fft.rfft(x) / (1 + (f / fc) ** 4), n)
+
+
+def disparo() -> np.ndarray:
+    n = int(0.7 * SR)
+    t = _t(0.7)
+    crack = _noise(n, 31) * _env(n, 0.0004, 0.025)
+    cuerpo = _lp(_noise(n, 32), 900) * _env(n, 0.001, 0.09) * 1.6
+    boom = np.sin(2 * np.pi * np.cumsum(70 + 140 * np.exp(-t * 40)) / SR) * _env(n, 0.001, 0.12) * 0.9
+    return _stereo(_reverb(crack + cuerpo + boom, 0.6, 0.18), 0, 0, 0.3)
+
+
+def punetazo() -> np.ndarray:
+    n = int(0.3 * SR)
+    t = _t(0.3)
+    golpe_ = np.sin(2 * np.pi * np.cumsum(60 + 120 * np.exp(-t * 45)) / SR) * _env(n, 0.0008, 0.06)
+    chasquido = _sweep_band(_noise(n, 41), np.full(n, 1800.0), 0.8) * _env(n, 0.0004, 0.012) * 1.4
+    return _stereo(_reverb(golpe_ + chasquido, 0.3, 0.1), 0, 0, 0.15)
+
+
+def explosion() -> np.ndarray:
+    n = int(2.2 * SR)
+    t = _t(2.2)
+    ruido = _lp(_noise(n, 51), 700) * _env(n, 0.004, 0.45) * 2.0
+    boom = np.sin(2 * np.pi * np.cumsum(28 + 70 * np.exp(-t * 6)) / SR) * _env(n, 0.003, 0.6)
+    crujido = _noise(n, 52) * _env(n, 0.0005, 0.04) * 0.5
+    return _stereo(_reverb(ruido + boom + crujido, 1.8, 0.3), 0, 0, 0.6)
+
+
+def pasos() -> np.ndarray:
+    n = int(1.6 * SR)
+    out = np.zeros((n, 2))
+    k = int(0.035 * SR)
+    for j, t0 in enumerate(np.arange(0.02, 1.55, 0.19)):
+        i = int(t0 * SR)
+        tt = np.arange(k) / SR
+        paso = (np.sin(2 * np.pi * (90 + 40 * np.exp(-tt * 60)) * tt) * 0.8 +
+                _lp(_noise(k, 60 + j), 2500) * 0.7) * _env(k, 0.001, 0.02)
+        pan = -0.35 if j % 2 else 0.35
+        m = min(k, n - i)
+        out[i:i + m] += _stereo(paso[:m], pan, pan, 0.0)
+    return out
+
+
+def susto() -> np.ndarray:
+    n = int(1.4 * SR)
+    t = _t(1.4)
+    x = np.zeros(n)
+    for f in (196.0, 207.7, 277.2, 415.3, 587.3):          # (un racimo disonante)
+        fase = 2 * np.pi * f * t
+        x += (np.sin(fase) + 0.5 * np.sin(2 * fase) + 0.33 * np.sin(3 * fase)) * 0.2
+    x *= _env(n, 0.004, 0.45)
+    golpe_ = _lp(_noise(n, 71), 1500) * _env(n, 0.001, 0.05)
+    return _stereo(_reverb(x + golpe_, 1.4, 0.35), -0.2, 0.2, 0.5)
+
+
+def _nota(f: float, dur: float, brillo_: float = 0.5) -> np.ndarray:
+    t = _t(dur)
+    fase = 2 * np.pi * f * t
+    x = np.sin(fase) + brillo_ * np.sin(3 * fase) / 3 + brillo_ * np.sin(5 * fase) / 5
+    return x * _env(len(t), 0.008, dur * 0.6)
+
+
+def victoria() -> np.ndarray:
+    partes = [_nota(f, 0.13) for f in (523.3, 659.3, 784.0)] + [_nota(1046.5, 0.9)]
+    x = np.concatenate(partes)
+    return _stereo(_reverb(x * 0.6, 1.2, 0.25), -0.1, 0.1, 0.4)
+
+
+def derrota() -> np.ndarray:
+    partes = []
+    for f, d in ((233.1, 0.38), (220.0, 0.38), (207.7, 0.38)):
+        partes.append(_lp(_nota(f, d, 0.9), 1400))
+    t = _t(1.1)
+    vib = 196.0 * (1 + 0.012 * np.sin(2 * np.pi * 5.5 * t))
+    fase = 2 * np.pi * np.cumsum(vib) / SR
+    ultima = (np.sin(fase) + 0.9 * np.sin(3 * fase) / 3 + 0.9 * np.sin(5 * fase) / 5) * _env(len(t), 0.01, 0.6)
+    partes.append(_lp(ultima, 1400))
+    return _stereo(np.concatenate(partes) * 0.7, 0, 0, 0.3)
+
+
 GENERATORS = {
     "whoosh": whoosh, "whoosh_largo": lambda: whoosh(1.4, 250, 2500, 2), "swoosh_grave": swoosh_grave,
     "impacto": impacto, "golpe": golpe, "sub_drop": sub_drop, "riser": riser,
     "riser_largo": lambda: riser(6.0), "caida": caida, "glitch": glitch, "clic": clic, "brillo": brillo,
-    "obturador": obturador,
+    "obturador": obturador, "disparo": disparo, "punetazo": punetazo, "explosion": explosion, "pasos": pasos,
+    "susto": susto, "victoria": victoria, "derrota": derrota,
 }

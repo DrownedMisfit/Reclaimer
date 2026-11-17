@@ -135,6 +135,18 @@ def _remap_clip(c, f):
     for key in ("zoom_kf", "layout_kf", "vol_kf", "op_kf"):
         kf = get(key) or []
         put(key, [dict(k, t=f(float(k["t"]))) for k in kf])
+    try:                                          # 🎯 recorridos de seguimiento y 🙈 lo tapado que los sigue
+        trks = get("motion_tracks") or []
+    except AttributeError:
+        trks = []
+    if trks:
+        put("motion_tracks", [dict(x, auto=[[f(float(r[0]))] + list(r[1:]) for r in x.get("auto") or []],
+                                   manual=[[f(float(r[0]))] + list(r[1:]) for r in x.get("manual") or []],
+                                   lost=[[f(float(a)), f(float(b))] for a, b in x.get("lost") or []]) for x in trks])
+    fx = get("fx") or {}
+    if fx.get("tracked_blur"):
+        put("fx", dict(fx, tracked_blur=[dict(r, kf=[dict(k, t=f(float(k["t"]))) for k in r.get("kf") or []])
+                                         for r in fx["tracked_blur"]]))
 
 
 def _encode_piece(src: str, a: float, b: float, out: str, cancelled) -> float:

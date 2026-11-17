@@ -35,7 +35,7 @@ def amarillos(img, r) -> int:
     n = 0
     y0, y1 = int(r.bottom() - 24), int(r.bottom() - 1)
     for y in range(max(0, y0), min(img.height(), y1)):
-        for x in range(int(r.left()) + 2, min(img.width(), int(r.right()) - 2), 2):
+        for x in range(int(r.left()) + 48, min(img.width(), int(r.right()) - 2), 2):   # (sin los iconos de la esquina)
             c = QColor(img.pixel(x, y))
             if (c.red() > 220 and c.green() > 180 and c.blue() < 140) or \
                     (c.blue() > 220 and c.green() > 180 and c.red() < 120):

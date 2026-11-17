@@ -2,6 +2,8 @@
 Créditos de los clips: de dónde sale cada clip usado en el proyecto.
 
 Un clip con créditos tiene «<video>.creditos.json» al lado ({"title", "channel", "url", …}).
+Una narración de 🗣 Voz IA cuya voz pide atribución (CC BY) lleva el suyo con {"tipo": "voz", "title", "url"}: sale
+en su propio apartado «🗣 Voz:».
 
   collect(project)            -> [créditos] de los medios del proyecto que lo tengan (sin duplicados)
   text(credits)               -> texto en español para la descripción de YouTube ("" si no hay)
@@ -37,8 +39,15 @@ def collect(project) -> list[dict]:
 
 def text(credits: list[dict]) -> str:
     lineas: list[str] = []
+    voces: list[str] = []
     vistos: set[str] = set()
     for c in credits or []:
+        if c.get("tipo") == "voz":                       # 🗣 voz sintética con licencia que pide atribución
+            linea = "• " + (c.get("title") or "Voz sintética") + (f": {c['url']}" if c.get("url") else "")
+            if linea not in vistos:
+                vistos.add(linea)
+                voces.append(linea)
+            continue
         titulo = c.get("title") or "Sin título"
         canal = c.get("channel") or ""
         video = c.get("url") or ""                       # (el enlace del VIDEO usado, como se suele acreditar)
@@ -47,9 +56,12 @@ def text(credits: list[dict]) -> str:
             continue
         vistos.add(linea)
         lineas.append(linea)
-    if not lineas:
-        return ""
-    return "🎬 Clips usados en este video:\n" + "\n".join(lineas)
+    partes = []
+    if lineas:
+        partes.append("🎬 Clips usados en este video:\n" + "\n".join(lineas))
+    if voces:
+        partes.append("🗣 Voz:\n" + "\n".join(voces))
+    return "\n\n".join(partes)
 
 
 def save_next_to(export_path: str, project) -> str | None:

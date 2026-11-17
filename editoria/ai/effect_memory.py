@@ -10,6 +10,7 @@ Momentos que reconoce (en tiempo de la timeline):
   golpe       golpe fuerte de la música               drop      el drop (y «antes_drop» para subidas)
   senala      dices «miren», «fíjense»…               pasado    hablas del pasado («hace años», «en 2007»…)
   negativo    «error», «desastre», «bug»…             positivo  «increíble», «brutal», «épico»…
+  triste      «falleció», «despidos», «mala noticia»… (léxico de ai/context_effects.py, con negaciones)
   inicio/final del video                              accion / calma / oscuro: lo que se ve en el clip
 """
 from __future__ import annotations
@@ -47,10 +48,10 @@ LOOK_PRIOR = {
     "invert": {"drop": .75, "golpe": .3},
     "fade_in": {"inicio": .9, "tema": .45},
     "fade_out": {"final": .9, "tema": .35},
-    "bw": {"pasado": .75, "negativo": .25, "oscuro": .3},
+    "bw": {"pasado": .75, "negativo": .25, "oscuro": .3, "triste": .8},
     "oldfilm": {"pasado": .9},
     "warm": {"pasado": .45, "calma": .4, "positivo": .25},
-    "cold": {"oscuro": .65, "negativo": .35},
+    "cold": {"oscuro": .65, "negativo": .35, "triste": .35},
     "vignette": {"calma": .45, "oscuro": .5, "inicio": .3, "pasado": .3},
     "grain": {"pasado": .5, "calma": .25, "oscuro": .3},
     "blur": {"calma": .15},
@@ -81,7 +82,7 @@ CTX_ES = {"tema": "cambio de tema", "corte": "corte entre clips", "golpe": "golp
           "pasado": "hablas del pasado («{w}»)", "negativo": "algo negativo («{w}»)",
           "positivo": "algo impresionante («{w}»)", "inicio": "inicio del video", "final": "final del video",
           "accion": "se ve acción", "calma": "plano tranquilo", "oscuro": "escena oscura o tensa",
-          "elegido": "clip elegido por ti"}
+          "elegido": "clip elegido por ti", "triste": "tono triste o noticia dura («{w}»)"}
 FREQ = {"pocos": (0.55, 10.0), "normal": (0.42, 5.0), "muchos": (0.3, 2.5)}   # (nota mínima, separación s)
 
 WORD_RULES = [
@@ -309,6 +310,10 @@ def find_moments(p: Project, clip_vecs: dict, rhythm: dict, *, scope: tuple[floa
         words = [(a, b, txt) for a, b, txt, _i in subtitles.timeline_words(p, mid)]
         for kind, t, st, phrase in _word_hits(words):
             add(t, kind, st, word=phrase)
+        from .context_effects import tone_hits      # ✨ tono triste / noticia fuerte / tema difícil
+        for h in tone_hits(words):
+            if h["w"] >= 0.9:                       # (solo lo inequívoco: «falleció», «despidos»…)
+                add(h["t"], "triste", h["w"], word=h["word"])
     # lo que se ve
     if text_vecs:
         vis = [c for c in clips if lo - 1e-3 <= c.start <= hi and (not chosen or c.id in clip_ids)]

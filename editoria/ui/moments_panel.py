@@ -19,7 +19,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem, QPushButton,
-                               QSplitter, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
+                               QSizePolicy, QSplitter, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
 from ..ai import moments as MO
 from ..core import media as media_tools
@@ -251,6 +251,10 @@ class _DragFrame(QLabel):
         self._press = None
         self.setCursor(Qt.OpenHandCursor)
 
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(176, 99)                       # (con sitio, 176×99; estrecho, hasta 144×81)
+
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._press = e.position().toPoint()
@@ -454,11 +458,18 @@ class MomentsPanel(QWidget):
 
         # --- qué puedes hacer
         box = QGroupBox("Aparición seleccionada")
-        bl = QGridLayout(box)
+        # (la imagen a la izquierda y lo demás a su lado; en un panel estrecho, lo demás baja debajo de la imagen:
+        # ↔ responsive, nada se corta)
+        bl = QVBoxLayout(box)
         bl.setContentsMargins(6, 4, 6, 4)
-        bl.setVerticalSpacing(3)
+        bl.setSpacing(3)
+        arriba = QHBoxLayout()
+        marco = QGridLayout()
+        der = QVBoxLayout()
+        der.setSpacing(3)
         self.video = QVideoWidget()
-        self.video.setFixedSize(176, 99)
+        self.video.setMinimumSize(144, 81)          # (176×99; hasta 144 px si el panel es muy estrecho)
+        self.video.setMaximumSize(176, 99)
         self.player = QMediaPlayer(self)
         self.player.setVideoOutput(self.video)
         self.player.positionChanged.connect(self._loop_check)
@@ -467,17 +478,23 @@ class MomentsPanel(QWidget):
         self.video.setToolTip("Arrástralo a la línea de tiempo para ponerlo donde lo sueltes")
         self._vpress = None
         self.frame = _DragFrame(self)
-        self.frame.setFixedSize(176, 99)
+        self.frame.setMinimumSize(144, 81)
+        self.frame.setMaximumSize(176, 99)
+        self.frame.setProperty("responsive_una_linea", True)
         self.frame.setToolTip("Arrástrala a la línea de tiempo para ponerla donde la sueltes")
         self.frame.setAlignment(Qt.AlignCenter)
         self.frame.setStyleSheet("background:#000;")
-        bl.addWidget(self.frame, 0, 0, 4, 1)
-        bl.addWidget(self.video, 0, 0, 4, 1)
+        marco.addWidget(self.frame, 0, 0)
+        marco.addWidget(self.video, 0, 0)
         self.video.hide()
+        arriba.addLayout(marco)
+        arriba.addLayout(der, 1)
+        bl.addLayout(arriba)
         self.info = QLabel("")
         self.info.setWordWrap(True)
-        bl.addWidget(self.info, 0, 1, 1, 3)
-        bl.addWidget(QLabel("Desde"), 1, 1)
+        der.addWidget(self.info)
+        tiempos = QHBoxLayout()
+        tiempos.addWidget(QLabel("Desde"))
         self.t_in = QDoubleSpinBox()
         self.t_out = QDoubleSpinBox()
         for sp in (self.t_in, self.t_out):
@@ -487,9 +504,10 @@ class MomentsPanel(QWidget):
             sp.setRange(0, 1e6)
         self.t_in.setToolTip("Recorta el inicio antes de insertarlo")
         self.t_out.setToolTip("Recorta el final antes de insertarlo")
-        bl.addWidget(self.t_in, 1, 2)
-        bl.addWidget(QLabel("hasta"), 1, 3)
-        bl.addWidget(self.t_out, 1, 4)
+        tiempos.addWidget(self.t_in)
+        tiempos.addWidget(QLabel("hasta"))
+        tiempos.addWidget(self.t_out)
+        der.addLayout(tiempos)
         self.b_play = QPushButton("▶ Ver")
         self.b_play.clicked.connect(self.preview)
         b_src = QPushButton("📂 Ver en medios")
@@ -498,9 +516,12 @@ class MomentsPanel(QWidget):
         self.b_fav = QPushButton("⭐")
         self.b_fav.setToolTip("Guardar en favoritos (o quitar)")
         self.b_fav.clicked.connect(self._toggle_fav)
-        bl.addWidget(self.b_play, 2, 1)
-        bl.addWidget(b_src, 2, 2)
-        bl.addWidget(self.b_fav, 2, 3)
+        ver = QHBoxLayout()
+        ver.addWidget(self.b_play)
+        ver.addWidget(b_src)
+        ver.addWidget(self.b_fav)
+        der.addLayout(ver)
+        der.addStretch(1)
         acts = QHBoxLayout()
         for text, mode, tip in (("⤓ Usar: insertar en el cabezal", "insert", "En el cabezal (o en la frase que elegiste), "
                                  "en una pista de video libre: no tapa nada."),
@@ -511,10 +532,10 @@ class MomentsPanel(QWidget):
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, m=mode: self.place(m))
             acts.addWidget(b)
-        bl.addLayout(acts, 4, 0, 1, 5)
+        bl.addLayout(acts)
         for b in box.findChildren(QPushButton):
-            b.setFixedHeight(26)
-        box.setMaximumHeight(190)
+            b.setMinimumHeight(26)                  # (estrecho, su texto se parte en dos líneas: sin alto fijo)
+        box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)   # (estrecho, lo de dentro baja: sin tope)
         split.addWidget(box)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)

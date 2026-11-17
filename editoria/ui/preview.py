@@ -293,6 +293,10 @@ class TrackLayer:
         blend = getattr(self, "_blend", "normal")
         regions = self.live_regions if self.live_regions is not None else effects.blur_regions(fx)
         rkey = tuple(tuple(sorted(r.items())) for r in regions)
+        trk = getattr(self, "_trk_regs", None) or []     # 🙈 zonas que siguen a un objeto (se mueven en set_effects)
+        if trk:
+            rkey = rkey + tuple((r["shape"], r["mode"], r["w"], r["h"], r["amount"]) for r in trk)
+            regions = list(regions) + trk
         from ..core import chroma as CK
         from ..core import motion_key as MKY
         chroma = CK.of(fx)
@@ -351,8 +355,16 @@ class TrackLayer:
         """Destello / fundido / temblor del clip en el instante t (desde su inicio)."""
         r0 = self.box.rect()                         # 🔍 entrar enfocando: sigma en fracción del ancho de la caja
         self._focus = effects.focus_sigma(fx, t, min(r0.width(), r0.height())) / max(1.0, r0.width())
+        from ..core import motion_track as _MT
+        self._trk_regs = _MT.regions_at(fx, src_t) if (fx and fx.get("tracked_blur")) else []
         self._set_look(fx)
         eff = self.box.graphicsEffect()
+        if self._trk_regs and isinstance(eff, LookEffect):     # 🙈 la zona acompaña al objeto en cada fotograma
+            base = [r for r in eff.regions if "mode" not in r]
+            nuevas = base + self._trk_regs
+            if nuevas != eff.regions:
+                eff.regions = nuevas
+                eff.update()
         if isinstance(eff, LookEffect) and abs(eff.focus - self._focus) > 1e-9:
             eff.focus = self._focus
             eff.update()
@@ -2245,9 +2257,15 @@ def _blur_regions_impl(self, px, w, h, tr, off):
             continue
         sub_ = rgba[y0:y1, x0:x1]
         sw, sh = x1 - x0, y1 - y0
-        f = max(2, int(min(sw, sh) * (0.04 + 0.16 * r["amount"]) / 2))     # rápido: reducir y ampliar
-        small = cv2.resize(sub_, (max(1, sw // f), max(1, sh // f)), interpolation=cv2.INTER_AREA)
-        blurred = cv2.GaussianBlur(cv2.resize(small, (sw, sh), interpolation=cv2.INTER_LINEAR), (5, 5), 0)
+        if r.get("mode") == "pixel":     # 🙈 pixelar (como el «pixelize» de la exportación: bloques del mismo tamaño)
+            from ..core.motion_track import block_px
+            bpx = block_px(sw, sh, r["amount"], "pixel")
+            small = cv2.resize(sub_, (max(1, -(-sw // bpx)), max(1, -(-sh // bpx))), interpolation=cv2.INTER_AREA)
+            blurred = cv2.resize(small, (sw, sh), interpolation=cv2.INTER_NEAREST)
+        else:
+            f = max(2, int(min(sw, sh) * (0.04 + 0.16 * r["amount"]) / 2))     # rápido: reducir y ampliar
+            small = cv2.resize(sub_, (max(1, sw // f), max(1, sh // f)), interpolation=cv2.INTER_AREA)
+            blurred = cv2.GaussianBlur(cv2.resize(small, (sw, sh), interpolation=cv2.INTER_LINEAR), (5, 5), 0)
         if r["shape"] == "ellipse":
             yy, xx = np.ogrid[:sh, :sw]
             d = np.sqrt(((xx - sw / 2) / (sw / 2)) ** 2 + ((yy - sh / 2) / (sh / 2)) ** 2)
@@ -2397,6 +2415,99 @@ class PreviewPanel(QWidget):
         QSettings("EditorIA", "EditorIA").setValue(self.guides_key(getattr(self, "_guides_space", "youtube")),
                                                    ",".join(modes))
 
+    # ---------------------------------------------------------------- ↔ cabecera que cabe siempre
+    @staticmethod
+    def _texto_corto(texto: str) -> str:
+        """«✂ Eliminar silencio» → «✂»; sin icono delante, se queda igual."""
+        t = (texto or "").strip()
+        if not t:
+            return t
+        primero = t.split(" ", 1)[0]
+        return primero if (len(t) > len(primero) and not primero[:1].isalnum()) else t
+
+    def _botones_cabecera(self):
+        from PySide6.QtWidgets import QAbstractButton
+        out = []
+        for b in self.header.findChildren(QAbstractButton):
+            if b is self.title_label or not b.isVisibleTo(self.header):
+                continue
+            if b.property("texto_completo") is None or (b.text() not in (b.property("texto_completo"),
+                                                                         self._texto_corto(b.property("texto_completo")))):
+                b.setProperty("texto_completo", b.text())     # (texto nuevo puesto por el programa: ese manda)
+            if b.property("tip_puesto") is None or b.toolTip() != b.property("tip_puesto"):
+                b.setProperty("tip_completo", b.toolTip())   # (el tooltip lo cambió el programa, no este ajuste)
+            if b.text() == b.property("texto_completo"):     # (con el nombre: su ancho real, flecha de menú incluida)
+                b.setProperty("ancho_completo", b.sizeHint().width())
+            corto = self._texto_corto(b.property("texto_completo"))
+            fm = b.fontMetrics()
+            b.setMinimumWidth(min(fm.horizontalAdvance(corto) + 22, fm.horizontalAdvance(b.property("texto_completo")) + 22))
+            out.append(b)
+        return out
+
+    def _ajustar_cabecera(self, ancho: int | None = None):
+        """Pone los botones con nombre o solo con icono según quepan (sin bailar: decide con los anchos completos)."""
+        h = getattr(self, "header", None)
+        if h is None:
+            return
+        botones = self._botones_cabecera()
+        lay = h.layout()
+        fijo = lay.contentsMargins().left() + lay.contentsMargins().right() + lay.spacing() * max(0, lay.count() - 1)
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            if it.spacerItem() is not None:
+                fijo += it.spacerItem().sizeHint().width() if it.spacerItem().expandingDirections() == 0 else 0
+        completo = fijo
+        for w in h.findChildren(QWidget):
+            if w.parentWidget() is not h and w.parentWidget() is not getattr(self, "shorts_bar", None):
+                continue
+            if not w.isVisibleTo(h) or w is getattr(self, "shorts_bar", None):
+                continue
+            t = w.property("texto_completo")
+            if t is None:
+                completo += w.sizeHint().width()
+            else:
+                completo += max(int(w.property("ancho_completo") or 0), w.fontMetrics().horizontalAdvance(t) + 24)
+        for w in (self.lbl_calidad, self.total_label):
+            if not w.isVisibleTo(h):
+                completo += w.sizeHint().width()
+        disponible = h.width() if ancho is None else ancho
+        compacta = disponible < completo + (24 if self._compacta else 0)     # (margen: no alterna en la frontera)
+        if compacta == self._compacta and not botones:
+            return
+        self._compacta = compacta
+        for b in botones:
+            largo, tip = b.property("texto_completo"), b.property("tip_completo") or ""
+            if compacta:
+                b.setText(self._texto_corto(largo))
+                b.setToolTip(largo + ("\n" + tip if tip and tip != largo else ""))
+            else:
+                b.setText(largo)
+                b.setToolTip(tip)
+            b.setProperty("tip_puesto", b.toolTip())
+        self.lbl_calidad.setVisible(not compacta)
+        self.total_label.setVisible(not compacta)
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        if obj is getattr(self, "header", None) and ev.type() == QEvent.LayoutRequest:
+            t = getattr(self, "_t_cabecera", None)       # (el tiempo cambia cada fotograma: agrupar, no recalcular cada vez)
+            if t is None:
+                from PySide6.QtCore import QTimer
+                t = self._t_cabecera = QTimer(self)
+                t.setSingleShot(True)
+                t.setInterval(120)
+                t.timeout.connect(self._ajustar_cabecera)
+            if not t.isActive():
+                t.start()
+        elif obj is getattr(self, "header", None) and ev.type() in (QEvent.Resize, QEvent.Show):
+            if not getattr(self, "_ajustando_cab", False):
+                self._ajustando_cab = True
+                try:
+                    self._ajustar_cabecera()
+                finally:
+                    self._ajustando_cab = False
+        return super().eventFilter(obj, ev)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.canvas = Canvas()
@@ -2420,6 +2531,7 @@ class PreviewPanel(QWidget):
         self.time_label = QLabel("00:00:00:00")
         self.time_label.setObjectName("timecode")
         self.time_label.setToolTip("Tiempo del cabezal (horas:minutos:segundos:fotograma)")
+        self.time_label.setMinimumWidth(self.time_label.sizeHint().width() + 4)   # (ancho fijo: no recoloca cada fotograma)
         hl.addWidget(self.title_label)
         hl.addSpacing(14)
         # Acciones rápidas (la barra de encima de la imagen, como en Resolve)
@@ -2501,7 +2613,8 @@ class PreviewPanel(QWidget):
         self.btn_comp.setMenu(cm)
         hl.addWidget(self.btn_comp)
         hl.addSpacing(10)
-        hl.addWidget(QLabel("Calidad"))
+        self.lbl_calidad = QLabel("Calidad")
+        hl.addWidget(self.lbl_calidad)
         hl.addWidget(self.quality)
         hl.addSpacing(12)
         hl.addWidget(self.zoom_label)
@@ -2512,6 +2625,12 @@ class PreviewPanel(QWidget):
         self.total_label.setToolTip("Duración total del video")
         hl.addSpacing(6)
         hl.addWidget(self.total_label)
+        # ↔ si la cabecera no cabe (visor estrecho, paneles a los lados, barra de Vertical): los botones se quedan con
+        # su icono (el nombre, en el tooltip) y se esconde lo prescindible. Así el visor nunca obliga a una ventana
+        # más ancha que la pantalla (antes pedía ~930 px y Qt cortaba la derecha de Reclaimer).
+        self.quality.setMinimumWidth(64)
+        self._compacta = None
+        header.installEventFilter(self)
 
         def btn(text, tip):
             b = QPushButton(text)
@@ -3163,6 +3282,7 @@ class PlaybackEngine(QObject):
             self._t0 = self.time
             self._clock.restart()
             if self._live_on():
+                self.live.prepare(self.time)      # (pide ya lo del punto nuevo y cancela lo de antes)
                 self.live.start(self.time)        # (salto mientras suena: la mezcla sigue desde ahí)
         elif self.live is not None:
             self.live.prepare(self.time)
@@ -3254,7 +3374,7 @@ class PlaybackEngine(QObject):
             self._live_check += 1
             if self._live_check % 30 == 0 and self._live_on():        # (cada ~1 s)
                 oido = self.live.position()
-                if oido is not None and abs(oido - t) > 0.05:
+                if oido is not None and abs(oido - t) > 0.08:          # (margen: sin resincronizar de más)
                     self.live.start(t)
         self.time_changed.emit(self.time)
         self._arm_cut()

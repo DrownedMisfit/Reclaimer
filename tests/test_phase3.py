@@ -429,6 +429,10 @@ def main():
     win.ctrl.undo_stack.setClean()
     win.ctrl._media_dirty = False
     win.close()
+    # (los trabajos que siguen en segundo plano —p. ej. «🎯 Afinar palabras», que arranca solo 3 s después de poner
+    # una transcripción— se paran antes de salir: si no, Python se cierra con ellos vivos y sale con código 127)
+    from editoria.ui.task_window import stop_all
+    stop_all(15000)
     print("TODO OK — capturas en", out)
 
 

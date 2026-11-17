@@ -245,7 +245,7 @@ class EditDialog(QDialog):
             self.cancel_btn.hide()
             ctrl.media_changed.connect(lambda: self._fill(self.song.currentData()) if self.job is None else None)
         for sec in self.sections.values():         # al abrir o cerrar una sección, el tamaño justo
-            sec.head.toggled.connect(lambda _on: QTimer.singleShot(0, self._fit))
+            sec.abierta.connect(lambda _on: QTimer.singleShot(0, self._fit))
         self._fill()
         self.style.currentIndexChanged.connect(self._style_changed)
         last = QSettings("EditorIA", "EditorIA").value("edits/estilo", "phonk")

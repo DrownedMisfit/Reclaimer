@@ -225,8 +225,7 @@ class CutFixPanel(QFrame):
         self.t = 0.0
         self.setWindowTitle("Corte de audio")
         self.setFrameShape(QFrame.StyledPanel)
-        self.setMinimumWidth(440)
-        lay = QVBoxLayout(self)
+        lay = QVBoxLayout(self)                 # (sin ancho mínimo: se adapta a cualquier ancho, ↔ responsive)
 
         # ---- lista de cortes dudosos y navegación
         nav = QHBoxLayout()

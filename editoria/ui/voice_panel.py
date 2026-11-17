@@ -309,7 +309,7 @@ class VoicePanel(QWidget):
             sec.set_expanded(True)
         untitle(auto, box3)
         self.tabs = tabbed([("Transcribir", [self.sec1]), ("Limpiar", [self.sec2, auto]),
-                            ("Sugerencias", [box3], True)])
+                            ("Sugerencias", [box3], True)], clave="limpieza")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)

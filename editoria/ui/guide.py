@@ -229,7 +229,8 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
     ("zoom", "🎯 Zoom y seguir a un personaje", "zoom encuadre clave seguir tracking", [
         ("Selecciona un clip y arrastra en el visor para encuadrar; la <b>rueda</b> hace zoom. "
          "<b>«◆ Clave aquí»</b> anima el zoom entre claves.", "w:inspector.frame_box", None),
-        ("<b>«🎯 Seguir personaje u objeto…»</b>: marcas algo y el zoom lo acompaña.", "w:inspector.btn_track",
+        ("<b>«🎯 Seguimiento…»</b>: sigue algo (solo o a mano) y úsalo para zoom, encuadre vertical, tapar o "
+         "pegarle un texto o una imagen.", "w:inspector.btn_track",
          None),
     ]),
     ("audio", "🎚 Sonido", "audio volumen ecualizador música ducking lufs", [
@@ -330,8 +331,9 @@ def _resolve_attr(root, path: str):
     return obj
 
 
-def reveal(widget: QWidget):
-    """Hace visible un control: abre su panel y las pestañas que lo contienen."""
+def reveal(widget: QWidget, traer_panel: bool = True):
+    """Hace visible un control: abre su panel y las pestañas y secciones que lo contienen. traer_panel=False: el panel
+    no se muestra ni se pone delante (solo se abren su pestaña o su sección y se lleva a la vista)."""
     chain = []
     w = widget
     while w is not None:
@@ -339,8 +341,9 @@ def reveal(widget: QWidget):
         w = w.parentWidget()
     for i, w in enumerate(chain):
         if isinstance(w, QDockWidget):
-            w.show()
-            w.raise_()
+            if traer_panel:
+                w.show()
+                w.raise_()
         elif isinstance(w, (QTabWidget, QStackedWidget)) and i >= 1:
             # el hijo directo de la pestaña que contiene al control
             for c in reversed(chain[:i]):
@@ -348,12 +351,24 @@ def reveal(widget: QWidget):
                 if idx >= 0:
                     w.setCurrentIndex(idx)
                     break
-    for w in chain:                                   # (una sección plegada del inspector: se abre)
+    for w in chain:                                   # (una sección plegada: se abre)
         if hasattr(w, "set_open") and hasattr(w, "body") and not w.body.isVisibleTo(w):
             w.set_open(True, save=False)
-    for w in chain:
-        if isinstance(w, QScrollArea) and w.widget() is not None and w.widget().isAncestorOf(widget):
-            w.ensureWidgetVisible(widget, 20, 20)
+    for w in chain:                                   # (que Qt coloque ya lo recién abierto, de dentro afuera)
+        lay = w.layout()
+        if lay is not None:
+            lay.activate()
+
+    def a_la_vista():
+        for w in chain:
+            try:
+                if isinstance(w, QScrollArea) and w.widget() is not None and w.widget().isAncestorOf(widget):
+                    w.ensureWidgetVisible(widget, 20, 20)
+            except RuntimeError:
+                pass
+    a_la_vista()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, a_la_vista)                  # (y otra vez cuando el panel ya tiene su alto nuevo)
 
 
 class Highlighter(QWidget):
@@ -484,8 +499,7 @@ class GuidePanel(QWidget):
         self.lesson = None
         self.step = 0
         self._hl: list[Highlighter] = []
-        self.setMinimumWidth(340)
-        lay = QVBoxLayout(self)
+        lay = QVBoxLayout(self)                 # (sin ancho mínimo: se adapta a cualquier ancho, ↔ responsive)
         lay.setContentsMargins(8, 8, 8, 8)
         intro = QLabel("Elige qué quieres aprender. Te llevo a cada opción y la marco en <span style='color:"
                        "#e8742f'>naranja</span>.")

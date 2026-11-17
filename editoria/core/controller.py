@@ -389,6 +389,7 @@ class ProjectController(QObject):
         self._soltar_lectura()
         try:
             result = fn(self.project)
+            self._sync_tracking(self.project)
         except EditError as exc:
             import copy as _copy
             self.project.apply_timeline_state(_copy.deepcopy(before))   # (copia: el historial no comparte listas)
@@ -521,6 +522,8 @@ class ProjectController(QObject):
         """🎞 En una IMAGEN las claves de zoom, posición/tamaño y opacidad cuentan desde el inicio del clip (en un video,
         desde el archivo). Si el inicio del contenido avanza d segundos (dividir, recortar el borde izquierdo, roll,
         slide…), las claves retroceden d para que la animación siga en su sitio. Siempre listas nuevas (no compartidas)."""
+        if c.text is not None and c.text.get("pos_kf"):     # 📌 texto pegado a un objeto: también desde su inicio
+            c.text = dict(c.text, pos_kf=[dict(k, t=round(k["t"] - d, 4)) for k in c.text["pos_kf"]])
         if not self._is_image(p, c):
             return
         for attr in ("zoom_kf", "layout_kf", "op_kf"):
@@ -1942,9 +1945,10 @@ class ProjectController(QObject):
             sfx = dict(src.get("fx") or {})
             for c in targets:
                 if "efectos" in attrs:
-                    fx = {k: v for k, v in sfx.items() if k != "trans"}
-                    if (c.fx or {}).get("trans"):
-                        fx["trans"] = c.fx["trans"]
+                    fx = {k: v for k, v in sfx.items() if k not in ("trans", "tracked_blur")}
+                    for own in ("trans", "tracked_blur"):    # (🙈 el tapado sigue al objeto de SU video: no se copia)
+                        if (c.fx or {}).get(own):
+                            fx[own] = c.fx[own]
                     c.fx = fx or None
                 if "transicion" in attrs and vis(c):
                     fx = dict(c.fx or {})
@@ -2110,6 +2114,28 @@ class ProjectController(QObject):
                          layout=self._edit_layout(p, m, v1.id, lay_mode))
                 p.clips[c.id] = c
                 out.append(c.id)
+            return out
+        return self._edit(text, fn)
+
+    def place_fill_items(self, items: list[dict], text: str, track_id: str) -> list[str] | None:
+        """✨ Autocompletar: trozos de un video en esa pista de video (sin su sonido: suena lo de debajo), con lo que se
+        hace con todo clip recién puesto (📱 relleno vertical: _tras_colocar). Nunca en una pista bloqueada. Un solo
+        paso de Ctrl+Z. Devuelve los clips nuevos."""
+        def fn(p: Project):
+            self._check_track(p, track_id)
+            out = []
+            for it in items:
+                m = p.media.get(it["media_id"])
+                if m is None:
+                    continue
+                if m.id in self.missing:
+                    raise EditError(f"No se encuentra el archivo «{m.name}».")
+                a, d = float(it["start"]), float(it["duration"])
+                self._clear_range(p, track_id, a, a + d)
+                c = Clip(new_id(), m.id, track_id, a, float(it["source_in"]), d, volume=0.0)
+                p.clips[c.id] = c
+                out.append(c.id)
+            self._tras_colocar(p, out)
             return out
         return self._edit(text, fn)
 
@@ -3160,59 +3186,130 @@ class ProjectController(QObject):
         Imagen: en ese instante (cortando el clip si cae en medio), al empezar/acabar o en todo el clip.
         Sonido: en la pista de efectos (el whoosh un poco antes del corte, la subida acaba en el momento).
         Transición: en el corte del inicio del clip."""
-        from ..ai.effect_memory import effect_info
-        from . import transitions
-        sound_media = sound_media or {}
-
         def fn(p: Project):
-            n = 0
-            for it in sorted(items, key=lambda x: x["t"]):
-                info = effect_info(it["effect"])
-                if info["type"] == "sound":
-                    m = p.media.get(sound_media.get(it["effect"], ""))
-                    if m is None or m.duration <= 0:
-                        continue
-                    t0 = it["t"]
-                    if info.get("category") == "Tensión":
-                        t0 -= m.duration
-                    elif info.get("category") == "Transiciones":
-                        t0 -= min(0.35, m.duration / 2)
-                    t0 = max(0.0, t0)
-                    pref = p.track(self._role_track(p, "efectos", create=True))
-                    if pref is None:
-                        continue
-                    tid = self._free_track(p, TRACK_AUDIO, pref.id, t0, t0 + m.duration)
-                    sc = Clip(new_id(), m.id, tid, t0, 0.0, m.duration, origin=ORIGIN_AI, note="⭐ " + info["name"])
-                    p.clips[sc.id] = sc
-                    self._tras_colocar(p, [sc.id])        # (🔊 a la mitad, como al añadirlo tú)
-                    n += 1
-                    continue
-                c = p.clips.get(it["clip_id"])
-                tr = p.track(c.track_id) if c else None
-                if c is None or c.locked or (tr and tr.locked):
-                    continue
-                if info["type"] == "transition":
-                    prev = transitions.previous(p, c)
-                    if prev is None:
-                        continue
-                    fx = dict(c.fx or {})
-                    fx["trans"] = transitions.ai_trans(info["trans"], 0.5, prev, c)
-                    c.fx = fx
-                    n += 1
-                    continue
-                if info["apply"] == "moment":
-                    t = it["t"]
-                    if t - c.start > 0.3 and c.end - t > 0.2:
-                        c = self._split_at(p, c, t)
-                fx = dict(c.fx or {})
-                fx[info["fx"]] = info["value"]
-                c.fx = fx
-                n += 1
+            n = self._put_effect_items(p, items, sound_media or {})
             if not n:
                 raise EditError("No se pudo poner ningún efecto (¿clips bloqueados o el sonido sin leer?).")
             return n
 
         return self._edit("IA · Mis efectos", fn)
+
+    def _put_effect_items(self, p: Project, items: list[dict], sound_media: dict[str, str]) -> int:
+        """El trabajo de apply_effect_items dentro de una edición ya abierta (lo usa también ✨ según lo que dices)."""
+        from ..ai.effect_memory import effect_info
+        from . import transitions
+        n = 0
+        for it in sorted(items, key=lambda x: x["t"]):
+            info = effect_info(it["effect"])
+            if info["type"] == "sound":
+                m = p.media.get(sound_media.get(it["effect"], ""))
+                if m is None or m.duration <= 0:
+                    continue
+                t0 = it["t"]
+                if info.get("category") == "Tensión":
+                    t0 -= m.duration
+                elif info.get("category") == "Transiciones":
+                    t0 -= min(0.35, m.duration / 2)
+                t0 = max(0.0, t0)
+                pref = p.track(self._role_track(p, "efectos", create=True))
+                if pref is None:
+                    continue
+                tid = self._free_track(p, TRACK_AUDIO, pref.id, t0, t0 + m.duration)
+                sc = Clip(new_id(), m.id, tid, t0, 0.0, m.duration, origin=ORIGIN_AI, note="⭐ " + info["name"])
+                p.clips[sc.id] = sc
+                self._tras_colocar(p, [sc.id])        # (🔊 a la mitad, como al añadirlo tú)
+                n += 1
+                continue
+            c = p.clips.get(it["clip_id"])
+            tr = p.track(c.track_id) if c else None
+            if c is None or c.locked or (tr and tr.locked):
+                continue
+            if info["type"] == "transition":
+                prev = transitions.previous(p, c)
+                if prev is None:
+                    continue
+                fx = dict(c.fx or {})
+                fx["trans"] = transitions.ai_trans(info["trans"], 0.5, prev, c)
+                c.fx = fx
+                n += 1
+                continue
+            if info["apply"] == "moment":
+                t = it["t"]
+                if t - c.start > 0.3 and c.end - t > 0.2:
+                    c = self._split_at(p, c, t)
+            fx = dict(c.fx or {})
+            fx[info["fx"]] = info["value"]
+            c.fx = fx
+            n += 1
+        return n
+
+    def apply_context_effects(self, items: list[dict], sound_media: dict[str, str] | None = None):
+        """✨ Efectos según lo que dices (ai/context_effects.py), todos en UN paso de deshacer:
+          {"kind": "gris", "clip_id", "track_id", "mode": "bw"|"desat", "span": (ini, fin) | None}
+              → blanco y negro (fx["bw"]) o desaturado suave (color["saturation"]); con span (clip largo) se corta
+                el clip en ese tramo y solo el tramo se pone gris.
+          {"kind": "zoom", "clip_id", "zoom_kf"}   → 🔍 zoom dinámico hacia la cara (si el clip no tenía zoom).
+          {"kind": "star", "effect", "t", "clip_id"} → como «⭐ Mis efectos para la IA»."""
+        from ..ai.context_effects import DESAT
+        from . import transform
+
+        def libre(p, c):
+            tr = p.track(c.track_id) if c else None
+            return c is not None and not c.locked and not (tr and tr.locked)
+
+        def fn(p: Project):
+            n = 0
+            cortados: set = set()        # clips que el gris parte en tramos: ahí no va un zoom de toda la foto
+            for it in sorted((x for x in items if x.get("kind") == "gris"), key=lambda x: x.get("t", 0.0)):
+                c = p.clips.get(it["clip_id"])
+                span = it.get("span")
+                if span:
+                    a, b = float(span[0]), float(span[1])
+                    mid = (a + b) / 2
+                    if c is None or not (c.start - 1e-3 <= mid < c.end):      # (ya se cortó por otro tramo)
+                        c = p.clip_at(it.get("track_id") or (c.track_id if c else ""), mid)
+                    if not libre(p, c):
+                        continue
+                    cortados.add(it["clip_id"])
+                    if a - c.start > 0.3 and c.end - a > 0.3:
+                        c = self._split_at(p, c, a)
+                    if c.end - b > 0.3 and b - c.start > 0.3:
+                        self._split_at(p, c, b)                  # (c se queda con la parte de la izquierda)
+                elif not libre(p, c):
+                    continue
+                if it.get("mode") == "desat":
+                    col = dict(c.color or {})
+                    col["saturation"] = min(float(col.get("saturation", 0.0) or 0.0), DESAT)
+                    c.color = col
+                else:
+                    c.fx = dict(c.fx or {}, bw=1.0)
+                n += 1
+            for it in items:
+                if it.get("kind") != "zoom":
+                    continue
+                c = p.clips.get(it["clip_id"])
+                if it["clip_id"] in cortados or not libre(p, c) or transform.is_zoomed(c.zoom_kf or []):
+                    continue
+                kf = [dict(k) for k in it["zoom_kf"]]
+                kf[-1]["t"] = round(max(0.5, c.duration), 3)    # (por si cambió la duración)
+                c.zoom_kf = kf
+                n += 1
+            stars = []
+            for x in items:
+                if x.get("kind") != "star":
+                    continue
+                c = p.clips.get(x.get("clip_id"))
+                if c is not None and not (c.start - 1e-3 <= x["t"] < c.end) and x.get("track_id"):
+                    otro = p.clip_at(x["track_id"], x["t"])     # (el gris cortó ese clip: el trozo de ese momento)
+                    x = dict(x, clip_id=otro.id) if otro is not None else x
+                stars.append(x)
+            if stars:
+                n += self._put_effect_items(p, stars, sound_media or {})
+            if not n:
+                raise EditError("No se pudo poner ningún efecto (¿clips bloqueados?).")
+            return n
+
+        return self._edit("✨ Efectos según lo que dices", fn)
 
     def add_rhythm_markers(self, clip_ids, bars: bool = False) -> int:
         """Marcadores en el drop y donde empieza cada parte de la canción (intro, subida, pausa…).
@@ -4349,16 +4446,322 @@ class ProjectController(QObject):
         def fn(p: Project):
             c = p.clips[clip_id]
             self._check_clip(p, c)
-            if kf:
-                lay = {k: v for k, v in (c.layout or transform.FULL).items() if k not in ("flip",)}
-                lay.update(fit="cover", follow=[dict(k) for k in kf])
-                lay.pop("bg", None)
-                c.layout = lay
-                if (c.fx or {}).get("relleno"):          # (llena la pantalla: un relleno detrás no se vería)
-                    c.fx = {k: v for k, v in c.fx.items() if k != "relleno"} or None
-            elif c.layout and "follow" in c.layout:
-                c.layout = {k: v for k, v in c.layout.items() if k != "follow"}
+            self._apply_follow(c, kf)
         return self._edit(text, fn)
+
+    @staticmethod
+    def _apply_follow(c, kf: list[dict] | None):
+        from . import transform
+        if kf:
+            lay = {k: v for k, v in (c.layout or transform.FULL).items() if k not in ("flip",)}
+            lay.update(fit="cover", follow=[dict(k) for k in kf])
+            lay.pop("bg", None)
+            c.layout = lay
+            if (c.fx or {}).get("relleno"):          # (llena la pantalla: un relleno detrás no se vería)
+                c.fx = {k: v for k, v in c.fx.items() if k != "relleno"} or None
+        elif c.layout and "follow" in c.layout:
+            c.layout = {k: v for k, v in c.layout.items() if k != "follow"}
+
+    # ------------------------------------------------- 🎯 SEGUIMIENTO: recorridos guardados en el clip y sus usos
+    # (core/motion_track.py). Cada uso puede guardar a la vez el recorrido (save=…): todo en UN paso de Ctrl+Z.
+    def _put_track(self, p: Project, c: Clip, trk: dict):
+        from . import motion_track as MT
+        t = MT.clean(trk)
+        t["v"] = new_id()                           # (versión: lo que lo usa sabe que tiene que recalcularse)
+        lst = MT.tracks_of(c)
+        for i, x in enumerate(lst):
+            if x.get("id") == t["id"]:
+                lst[i] = t
+                break
+        else:
+            lst.append(t)
+        c.motion_tracks = lst                       # (lista nueva: nunca compartida con otro clip)
+
+    def _video_for_track(self, p: Project, clip_id: str):
+        c = p.clips.get(clip_id)
+        if c is None:
+            raise EditError("Ese clip ya no está en la línea de tiempo.")
+        m = p.media_of(c)
+        if m is None or m.kind != KIND_VIDEO or c.text is not None:
+            raise EditError("El seguimiento es para clips de video.")
+        return c, m
+
+    def _track_of(self, p: Project, c: Clip, track_id: str | None, save: dict | None) -> dict:
+        from . import motion_track as MT
+        if save is not None:
+            self._put_track(p, c, save)
+            track_id = save["id"]
+        trk = MT.find(c, track_id) if track_id else (MT.tracks_of(c) or [None])[-1]
+        if trk is None or MT.is_empty(trk):
+            raise EditError("Ese clip no tiene ese recorrido: primero 🎯 sigue algo (clic derecho → 🎯 Seguimiento…).")
+        return trk
+
+    def set_motion_track(self, clip_id: str, trk: dict | None, track_id: str | None = None,
+                         text: str | None = None):
+        """🎯 Guarda un recorrido en el clip (trk); con trk=None, borra el recorrido track_id (y lo que lo usa en
+        ese mismo clip: el desenfoque que lo acompaña). Un paso de Ctrl+Z."""
+        from . import motion_track as MT
+
+        def fn(p: Project):
+            c, _m = self._video_for_track(p, clip_id)
+            self._check_clip(p, c)
+            if trk is not None:
+                self._put_track(p, c, trk)
+                return trk["id"]
+            c.motion_tracks = [x for x in MT.tracks_of(c) if x.get("id") != track_id]
+            if (c.fx or {}).get("tracked_blur"):
+                left = [r for r in c.fx["tracked_blur"] if r.get("track") != track_id]
+                c.fx = {k: v for k, v in c.fx.items() if k != "tracked_blur"} | ({"tracked_blur": left} if left else {})
+                c.fx = c.fx or None
+            return track_id
+        name = (trk or {}).get("name", "")
+        return self._edit(text or (f"🎯 Recorrido «{name}»" if trk is not None else "🎯 Quitar recorrido"), fn)
+
+    def set_motion_tracks(self, clip_id: str, trks: list[dict], text: str = "🎯 Recorridos del seguimiento"):
+        """Varios recorridos del mismo clip de una vez (al cerrar la ventana): un solo paso de Ctrl+Z."""
+        def fn(p: Project):
+            c, _m = self._video_for_track(p, clip_id)
+            self._check_clip(p, c)
+            for trk in trks:
+                self._put_track(p, c, trk)
+        return self._edit(text, fn)
+
+    @staticmethod
+    def _pieces(p: Project, track_id: str, first=None) -> list:
+        """Los trozos de video que tienen ese recorrido (tras dividir un clip, todos): [(clip, recorrido)]."""
+        from . import motion_track as MT
+        out = [(c, MT.find(c, track_id)) for c in sorted(p.clips.values(), key=lambda x: x.start)
+               if MT.find(c, track_id) is not None]
+        if first is not None:
+            out.sort(key=lambda x: x[0].id != first.id)
+        return out
+
+    TRIM_MARGIN = 1.0      # al dividir o recortar, cada trozo guarda su recorrido y 1 s más por cada lado
+
+    def _sync_tracking(self, p: Project):
+        """🎯 Dentro de cada edición: (1) cada clip guarda solo el recorrido de su tramo; (2) el 🙈 tapado se recalcula
+        si cambió el zoom, el encuadre, el formato o el recorrido; (3) lo 📌 pegado se recalcula si se movió el clip o
+        su video. Nunca para una edición: si algo falla aquí, se deja como estaba."""
+        from . import motion_track as MT
+        try:
+            con_rec = [c for c in p.clips.values() if c.motion_tracks]
+            if not con_rec:
+                return
+            for c in con_rec:
+                if not self._libre(p, c):
+                    continue
+                a, b = sorted((c.src_at(0.0), c.src_at(c.duration)))
+                nuevo = [MT.trim_track(x, a - self.TRIM_MARGIN, b + self.TRIM_MARGIN) for x in c.motion_tracks]
+                if any(x is not y for x, y in zip(nuevo, c.motion_tracks)):
+                    c.motion_tracks = nuevo
+            for c in con_rec:
+                regs = (c.fx or {}).get("tracked_blur")
+                if not regs or not self._libre(p, c):
+                    continue
+                out, cambio = [], False
+                for r in regs:
+                    trk = MT.find(c, r.get("track"))
+                    sig = MT.sig_of(p, c, trk) if trk is not None else None
+                    if trk is not None and r.get("sig") != sig:
+                        nr = MT.blur_plan(p, c, trk, r.get("shape", "rect"), r.get("mode", "blur"),
+                                          float(r.get("amount", 0.7)), float(r.get("pad", 1.25)))
+                        if nr is not None:
+                            r, cambio = nr, True
+                    out.append(r)
+                if cambio:
+                    c.fx = dict(c.fx, tracked_blur=out)
+            for oc in list(p.clips.values()):
+                info = self.pinned_info(oc)
+                if not info or "dx" not in info or not self._libre(p, oc):
+                    continue
+                pieces = [(c, t) for c, t in self._pieces(p, info.get("track"))
+                          if c.end > oc.start and c.start < oc.end]       # (también si el video se dividió)
+                if not pieces:
+                    continue
+                sig = MT.pin_sig(p, pieces, oc)
+                if sig == info.get("sig"):
+                    continue
+                plan = MT.pin_apply(p, pieces, oc, info)
+                if plan is None:
+                    continue
+                ninfo = dict(info, clip=pieces[0][0].id, sig=sig)
+                if oc.text is not None:
+                    oc.text = dict(oc.text, pos_kf=plan["pos_kf"], pegado=ninfo)
+                else:
+                    oc.layout = dict(oc.layout or {}, pegado=ninfo)
+                    oc.layout_kf = plan["layout_kf"]
+        except Exception:  # noqa: BLE001 - lo del seguimiento nunca rompe otra edición
+            import traceback
+            traceback.print_exc()
+
+    def track_zoom(self, clip_id: str, track_id: str | None = None, zoom: float | None = None,
+                   ease: bool = True, save: dict | None = None):
+        """🔍 Zoom que acompaña al objeto (fotogramas clave de zoom, editables como cualquier otro)."""
+        from ..ai import tracking
+        from . import motion_track as MT
+        from . import transform
+
+        def fn(p: Project):
+            c, _m = self._video_for_track(p, clip_id)
+            self._check_clip(p, c)
+            trk = self._track_of(p, c, track_id, save)
+            a, b = sorted((c.src_at(0.0), c.src_at(c.duration)))
+            samples = MT.sample(trk, a, b)
+            if len(samples) < 3:
+                raise EditError("El recorrido casi no se ve dentro del clip: síguelo un poco más.")
+            ease_from = samples[0][0] - 0.6 if ease and samples[0][0] - 0.6 >= a else None
+            kf = tracking.follow_keyframes(samples, zoom=zoom, ease_in_from=ease_from, fps=MT.fps_of(trk))
+            t0 = ease_from if ease_from is not None else samples[0][0]
+            before = [k for k in c.zoom_kf if k["t"] < t0 - 0.05]
+            after = [k for k in c.zoom_kf if k["t"] > samples[-1][0] + 0.05]
+            c.zoom_kf = transform.sorted_kf(before + kf + after)
+            return len(kf)
+        return self._edit("🎯 Zoom que sigue al objeto", fn)
+
+    def track_vertical(self, clip_id: str, track_id: str | None = None, save: dict | None = None):
+        """📱 El recorte vertical (Shorts) acompaña al objeto, sin zoom."""
+        from ..ai import reframe
+        from . import motion_track as MT
+
+        def fn(p: Project):
+            c, m = self._video_for_track(p, clip_id)
+            self._check_clip(p, c)
+            trk = self._track_of(p, c, track_id, save)
+            a, b = sorted((c.src_at(0.0), c.src_at(c.duration)))
+            samples = MT.sample(trk, a, b)
+            if len(samples) < 3:
+                raise EditError("El recorrido casi no se ve dentro del clip: síguelo un poco más.")
+            box = c.layout or {"w": 1.0, "h": 1.0}
+            aspect = (box.get("w", 1.0) * p.width) / max(1e-6, box.get("h", 1.0) * p.height)
+            kf = reframe.from_samples(samples, m.width, m.height, aspect)
+            old = (c.layout or {}).get("follow") or []
+            merged = sorted([k for k in old if k["t"] < samples[0][0] - 0.05 or k["t"] > samples[-1][0] + 0.05] + kf,
+                            key=lambda k: k["t"])
+            self._apply_follow(c, merged)
+        return self._edit("🎯 Encuadre vertical que sigue al objeto", fn)
+
+    def track_blur(self, clip_id: str, track_id: str | None = None, shape: str = "rect", mode: str = "blur",
+                   amount: float = 0.7, pad: float = 1.25, save: dict | None = None):
+        """🙈 Desenfoca o pixela lo seguido con un recuadro que lo acompaña (fx["tracked_blur"]; se ve igual en el
+        visor y al exportar). Volver a aplicarlo con el mismo recorrido lo sustituye."""
+        from . import motion_track as MT
+
+        def fn(p: Project):
+            c, _m = self._video_for_track(p, clip_id)
+            self._check_clip(p, c)
+            trk = self._track_of(p, c, track_id, save)
+            reg = MT.blur_plan(p, c, trk, shape, mode, amount, pad)
+            if reg is None:
+                raise EditError("El recorrido no se ve dentro del clip.")
+            fx = dict(c.fx or {})
+            fx["tracked_blur"] = [r for r in fx.get("tracked_blur") or [] if r.get("track") != trk["id"]] + [reg]
+            c.fx = fx
+            return trk["id"]
+        return self._edit("🙈 Tapar lo que se sigue", fn)
+
+    def remove_track_blur(self, clip_id: str, track_id: str | None = None):
+        def fn(p: Project):
+            c = p.clips[clip_id]
+            self._check_clip(p, c)
+            regs = (c.fx or {}).get("tracked_blur") or []
+            left = [r for r in regs if track_id is not None and r.get("track") != track_id]
+            if len(left) == len(regs):
+                raise EditError("Ese clip no tiene nada tapado con seguimiento.")
+            fx = {k: v for k, v in (c.fx or {}).items() if k != "tracked_blur"}
+            if left:
+                fx["tracked_blur"] = left
+            c.fx = fx or None
+        return self._edit("🙈 Quitar el tapado que sigue", fn)
+
+    def tracked_under(self, overlay_id: str) -> list[tuple[str, dict]]:
+        """📌 Videos que coinciden en el tiempo con este clip y tienen recorridos: [(id del video, recorrido)]."""
+        from . import motion_track as MT
+        p = self.project
+        oc = p.clips.get(overlay_id)
+        if oc is None:
+            return []
+        out = []
+        for c in sorted(p.clips.values(), key=lambda x: (p.track_index(x.track_id), x.start)):
+            if c.id == overlay_id or c.end <= oc.start + EPS or c.start >= oc.end - EPS:
+                continue
+            for trk in MT.tracks_of(c):
+                if not MT.is_empty(trk):
+                    out.append((c.id, trk))
+        return out
+
+    def pin_to_track(self, overlay_id: str, clip_id: str, track_id: str | None = None, ref_t: float | None = None,
+                     scale: bool = False, save: dict | None = None):
+        """📌 El clip de encima (texto, imagen, emoji, flecha, título, video…) sigue al objeto: sus fotogramas clave
+        de posición salen del recorrido, conservando el desfase con el que lo colocaste en ref_t (timeline).
+        scale=True: también crece y encoge con el objeto (no en textos). Un paso de Ctrl+Z; editable después
+        (textos: mover su posición mueve todo el recorrido; imágenes: claves de posición normales)."""
+        from . import motion_track as MT
+        from . import transform
+
+        def fn(p: Project):
+            vc, _m = self._video_for_track(p, clip_id)
+            oc = p.clips.get(overlay_id)
+            if oc is None or oc.id == vc.id:
+                raise EditError("Elige otro clip para pegarlo al objeto.")
+            self._check_clip(p, oc)
+            if save is not None:
+                self._check_clip(p, vc)
+            trk = self._track_of(p, vc, track_id, save)
+            pieces = [(c, x) for c, x in self._pieces(p, trk["id"], vc) if c.end > oc.start and c.start < oc.end]
+            plan = MT.pin_plan(p, pieces or [(vc, trk)], oc, ref_t, scale)
+            if plan is None:
+                raise EditError("Ese clip no coincide en el tiempo con el recorrido del objeto.")
+            info = plan["info"]
+            if oc.text is not None:
+                oc.text = dict(oc.text, pos_kf=plan["pos_kf"], pegado=info)
+            else:
+                if p.track(oc.track_id) is None or p.track(oc.track_id).kind != TRACK_VIDEO:
+                    raise EditError("Solo se pegan textos, imágenes y videos (no sonidos).")
+                lay = dict(plan["layout"])
+                lay.pop("follow", None)
+                if lay.get("fit") in ("blurfill", "mirrorfill", "cover"):
+                    lay["fit"] = "contain"
+                lay["pegado"] = info
+                oc.layout = lay
+                oc.layout_kf = transform.sorted_kf(plan["layout_kf"])
+            return trk["id"]
+        return self._edit("📌 Pegar al objeto seguido", fn)
+
+    def unpin(self, overlay_id: str, t: float | None = None):
+        """📌 Despegar: se queda quieto donde está en el momento t (o al empezar)."""
+        from . import motion_track as MT
+        from . import transform
+
+        def fn(p: Project):
+            oc = p.clips[overlay_id]
+            self._check_clip(p, oc)
+            local = min(max((t if t is not None else oc.start) - oc.start, 0.0), oc.duration)
+            if oc.text is not None:
+                if not oc.text.get("pos_kf") and not oc.text.get("pegado"):
+                    raise EditError("Ese texto no está pegado a nada.")
+                dx, dy = MT.text_offset_at(oc.text, local)
+                txt = {k: v for k, v in oc.text.items() if k not in ("pos_kf", "pegado")}
+                txt["x"] = round(min(1.0, max(0.0, float(txt.get("x", 0.5)) + dx)), 4)
+                txt["y"] = round(min(1.0, max(0.0, float(txt.get("y", 0.5)) + dy)), 4)
+                oc.text = txt
+                return
+            if not (oc.layout or {}).get("pegado"):
+                raise EditError("Ese clip no está pegado a nada.")
+            box = transform.layout_at(oc, local, self._is_image(p, oc)) or transform.FULL
+            oc.layout = {k: v for k, v in box.items() if k != "pegado"}
+            oc.layout_kf = []
+        return self._edit("📌 Despegar del objeto", fn)
+
+    @staticmethod
+    def pinned_info(c) -> dict | None:
+        """📌 A qué recorrido está pegado el clip (o None)."""
+        if c is None:
+            return None
+        if c.text is not None:
+            return c.text.get("pegado") if c.text.get("pos_kf") else None
+        info = (c.layout or {}).get("pegado")
+        return info if info and c.layout_kf else None
+
 
     # ------------------------------------------------- 📱 Shorts: encajar videos horizontales con fondo borroso
     encuadre_auto_vertical = True    # (lo pone la ventana desde «▦ Encuadrar» → «solo al añadir videos»)
