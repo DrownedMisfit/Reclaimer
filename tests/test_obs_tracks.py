@@ -4,7 +4,7 @@ Prueba de las PISTAS DE AUDIO SEPARADAS de OBS (micrófono y juego):
     sobra; cada pista útil sale a su archivo (copia exacta);
   · al importarla NO se separa nada sola (el usuario no lo pidió); con «⋮ → 🎵 Separar audio» quedan como audios
     del proyecto («Pistas de OBS») y al ponerla en la línea de tiempo: la imagen,
-    el juego en una pista y tu voz en «🎙 Micrófono» (con mejora de voz), todo vinculado;
+    el juego en una pista y tu voz en «🎙 Micrófono» (pista nueva sin EQ ni compresor), todo vinculado;
   · solo sonó el juego (pista 1 = 2 y la 3 en silencio): no se separa y te dice por qué;
   · como tu grabación de prueba (solo hablaste, el juego en silencio): sale tu voz sola (para transcribirla);
   · con una sola pista: como siempre.
@@ -134,9 +134,11 @@ def main():
     assert len(audio) == 2 and len({x.track_id for x in audio}) == 2, [(x.media_id, x.track_id) for x in audio]
     voice = next(x for x in audio if p.media[x.media_id].path.endswith("Micrófono.m4a"))
     vt = p.track(voice.track_id)
-    assert vt.kind == TRACK_AUDIO and vt.role == "voz" and vt.fx, (vt.name, vt.role, vt.fx)
+    # (22/11) la pista NUEVA de micrófono va SIN EQ ni compresor (la voz de OBS ya viene procesada: no dos veces)
+    assert vt.kind == TRACK_AUDIO and vt.role == "voz" and not any((vt.fx or {}).get(k) for k in ("eq", "compress")), \
+        (vt.name, vt.role, vt.fx)
     assert all(abs(x.start - vc.start) < 1e-6 and abs(x.duration - vc.duration) < 1e-6 for x in audio)
-    print(f"✓ en la línea de tiempo: imagen + juego + tu voz en «{vt.name}» (con mejora de voz), vinculados")
+    print(f"✓ en la línea de tiempo: imagen + juego + tu voz en «{vt.name}» (sin EQ ni compresor), vinculados")
     ctrl.split_at_times(vc.id, [5.0])
     pieces = [x for x in p.clips.values() if p.media_of(x) and p.media_of(x).id in {t["media_id"] for t in m.audio_tracks}]
     assert len(pieces) == 4, "al cortar, se cortan los tres (vinculados)"

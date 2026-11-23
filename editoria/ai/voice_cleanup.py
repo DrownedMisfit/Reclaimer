@@ -64,7 +64,8 @@ class CleanupOptions:
     min_silence: float = 0.8   # silencios más largos que esto…
     keep_pause: float = 0.25   # …se reducen a esta pausa (nunca se quitan del todo)
     noises: bool = True
-    fillers: bool = True
+    fillers: bool = True       # muletillas seguras (eh, mmm…) y las tuyas
+    soft_fillers: bool = True  # posibles muletillas (este, bueno, o sea… con pausa detrás)
     repeated_words: bool = True
     retakes: bool = True
     similar: bool = True       # «suena parecido»: frases seguidas que dicen lo mismo con otras palabras
@@ -73,9 +74,10 @@ class CleanupOptions:
     my_fillers: tuple = ()     # tus muletillas («¿por qué?», «la verdad»…)
 
     def kinds(self) -> set[str]:
+        """Los tipos que este análisis busca (las sugerencias pendientes de esos tipos se sustituyen)."""
         return {k for k, on in (("silence", self.silences), ("noise", self.noises),
-                                ("filler", self.fillers), ("repeat", self.repeated_words),
-                                ("retake", self.retakes), ("doubt", self.doubtful),
+                                ("filler", self.fillers or self.soft_fillers), ("repeat", self.repeated_words),
+                                ("retake", self.retakes or self.similar), ("doubt", self.doubtful),
                                 ("clipping", self.clipping)) if on}
 
 
@@ -137,13 +139,19 @@ def analyze(samples: np.ndarray, sr: int, words: list | None, opts: CleanupOptio
 
     if words:
         report(progress, 0.7, "Buscando muletillas y repeticiones…")
-        if opts.fillers:
-            out += [dict(d, kind="filler") for d in rep.find_fillers(words, opts.my_fillers)]
+        if opts.fillers or opts.soft_fillers:
+            # (seguras y posibles se marcan por separado; las tuyas, con cualquiera de las dos)
+            for d in rep.find_fillers(words, opts.my_fillers):
+                posible = d.get("label", "").startswith("Posible")
+                tuya = d.get("label", "").startswith("Muletilla tuya")
+                if opts.soft_fillers if posible else (opts.fillers or tuya):
+                    out.append(dict(d, kind="filler"))
         if opts.repeated_words:
             out += [dict(d, kind="repeat") for d in rep.find_repeated_words(words)]
-        if opts.retakes:
-            takes = rep.find_retakes(words)
-            out += [dict(d, kind="retake") for d in takes]
+        if opts.retakes or opts.similar:
+            takes = rep.find_retakes(words)          # (también sin «tomas»: lo que ya es toma no es «parecida»)
+            if opts.retakes:
+                out += [dict(d, kind="retake") for d in takes]
             if opts.similar:
                 report(progress, 0.8, "Buscando frases que suenan parecido…")
                 out += [dict(d, kind="retake") for d in rep.find_similar(words, _sentence_encoder(), takes)]

@@ -110,10 +110,8 @@ def main():
         insp = win.inspector
         sp, _setter = insp.tw["blur_under"]
         assert abs(sp.value() - 50) < 1
-        box = sp.parentWidget()
-        while box is not None and not hasattr(box, "isCheckable"):
-            box = box.parentWidget()
-        assert box is not None and box.isChecked()
+        box = insp.secciones["texto_desenfocar"].boton     # (el ● de su sección en el Inspector)
+        assert box.isChecked()
         box.setChecked(False)
         pump(app, 0.2)
         assert p.clips[tid].text["blur_under"] == 0.0

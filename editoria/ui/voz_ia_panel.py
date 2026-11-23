@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from ..ai import tts
 from ..core.model import TRACK_AUDIO
+from . import diseno as D
 from .common import fmt_time
 from .jobs import BackgroundJob
 
@@ -90,15 +91,16 @@ class VozIAPanel(QWidget):
         st = QSettings("EditorIA", "EditorIA")
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(6)
+        lay.setContentsMargins(D.px(D.M2), D.px(D.M2), D.px(D.M2), D.px(D.M2))
+        lay.setSpacing(D.px(D.M1))
         self.aviso = QLabel()
         self.aviso.setWordWrap(True)
         self.aviso.setStyleSheet("color: #e5a50a;")
         self.aviso.setVisible(False)
         lay.addWidget(self.aviso)
-        self.b_descargar = QPushButton(f"⬇ Descargar esta voz ({tts.TAM_DESCARGA})")
+        self.b_descargar = QPushButton(f"Descargar esta voz ({tts.TAM_DESCARGA})")
         self.b_descargar.setObjectName("primary")
+        self.b_descargar.setIcon(D.icono("download"))
         self.b_descargar.clicked.connect(self.descargar)
         self.b_descargar.setVisible(False)
         lay.addWidget(self.b_descargar)
@@ -117,25 +119,23 @@ class VozIAPanel(QWidget):
         self.contador.setToolTip("Palabras del guion y cuánto durará la narración (aproximado, con la velocidad y las "
                                  "pausas elegidas).")
         fila.addWidget(self.contador, 1)
-        b_pegar = QPushButton("📋 Pegar")
-        b_pegar.setObjectName("flat")
-        b_pegar.setToolTip("Pone en el cuadro el texto que tengas copiado (sustituye lo que haya).")
+        b_pegar = D.BotonIcono("copy", "Pegar: pone en el cuadro el texto que tengas copiado (sustituye lo que "
+                                       "haya).")
         b_pegar.clicked.connect(self._pegar)
         fila.addWidget(b_pegar)
-        b_txt = QPushButton("📄 .txt")
-        b_txt.setObjectName("flat")
-        b_txt.setToolTip("Abrir el guion desde un archivo de texto (.txt o .md).")
+        b_txt = D.BotonIcono("folder-open", "Abrir .txt: el guion desde un archivo de texto (.txt o .md).")
         b_txt.clicked.connect(self._abrir_txt)
         fila.addWidget(b_txt)
-        b_vaciar = QPushButton("🗑")
-        b_vaciar.setObjectName("flat")
-        b_vaciar.setToolTip("Vaciar el cuadro del guion.")
+        b_vaciar = D.BotonIcono("trash-2", "Vaciar el cuadro del guion.")
         b_vaciar.clicked.connect(self.texto.clear)
         fila.addWidget(b_vaciar)
         lay.addLayout(fila)
 
-        form = QFormLayout()
+        form = QVBoxLayout()
         form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(D.px(D.M1))
+        # (21/11: filas del Inspector —FilaInspector—: la etiqueta en su columna y, si no cabe, ENCIMA; los
+        #  desplegables se acortan con «…» y el texto entero al pasar el ratón)
         self.voz = QComboBox()
         self.voz.setMaxVisibleItems(24)
         for grupo in tts.GRUPOS:                       # agrupado: 🎙 Narración / Kokoro / Piper (títulos sin elegir)
@@ -149,13 +149,16 @@ class VozIAPanel(QWidget):
         guardada = st.value("voz_ia/voz", tts.VOZ_DEFECTO)
         i = self.voz.findData(guardada if guardada in tts.CATALOGO else tts.VOZ_DEFECTO)
         self.voz.setCurrentIndex(i if i >= 0 else self.voz.findData(tts.VOZ_DEFECTO))
-        form.addRow("Voz", self.voz)
+        from . import responsive as _R          # (el desplegable se acorta con «…» y el texto entero al pasar el
+        _R._desplegable(self.voz)               #  ratón: así la fila baja a 200 px sin cortar nada)
+        form.addWidget(D.FilaInspector("Voz", self.voz))
         self.acento = QComboBox()
         for clave, nombre in tts.ACENTOS.items():
             self.acento.addItem(nombre, clave)
         self.acento.setCurrentIndex(max(0, self.acento.findData(st.value("voz_ia/acento", "es"))))
         self.acento.setToolTip("España: «z» y «ce/ci» como en España. Latinoamérica: con seseo.")
-        form.addRow("Acento", self.acento)
+        _R._desplegable(self.acento)
+        form.addWidget(D.FilaInspector("Acento", self.acento))
         self.velocidad = QDoubleSpinBox()
         self.velocidad.setRange(0.7, 1.6)
         self.velocidad.setSingleStep(0.05)
@@ -165,7 +168,7 @@ class VozIAPanel(QWidget):
         self.velocidad.setToolTip("Lo rápido que habla (1,00 = normal). Para Shorts suele ir bien 1,20–1,30.\n"
                                   "Se multiplica por el ritmo propio de la voz: las de «🎙 Narración» ya van más "
                                   "pausadas.")
-        form.addRow("Velocidad", self.velocidad)
+        form.addWidget(D.FilaInspector("Velocidad", self.velocidad))
         self.pausa = QDoubleSpinBox()
         self.pausa.setRange(0.0, 1.5)
         self.pausa.setSingleStep(0.05)
@@ -174,7 +177,7 @@ class VozIAPanel(QWidget):
         self.pausa.setValue(float(st.value("voz_ia/pausa", 0.25)))
         self.pausa.setToolTip("Silencio entre una frase y la siguiente (las voces de «🎙 Narración» lo alargan un "
                               "poco).")
-        form.addRow("Pausa entre frases", self.pausa)
+        form.addWidget(D.FilaInspector("Pausa entre frases", self.pausa))
         self.pausa_par = QDoubleSpinBox()
         self.pausa_par.setRange(0.0, 3.0)
         self.pausa_par.setSingleStep(0.1)
@@ -182,14 +185,14 @@ class VozIAPanel(QWidget):
         self.pausa_par.setSuffix(" s")
         self.pausa_par.setValue(float(st.value("voz_ia/pausa_parrafo", 0.6)))
         self.pausa_par.setToolTip("Silencio al cambiar de párrafo (una línea en blanco en el guion).")
-        form.addRow("Pausa entre párrafos", self.pausa_par)
+        form.addWidget(D.FilaInspector("Pausa entre párrafos", self.pausa_par))
         lay.addLayout(form)
-        self.robot = QCheckBox("🤖 Toque robótico")
+        self.robot = D.CasillaTexto("Toque robótico")
         self.robot.setChecked(st.value("voz_ia/robot", False, type=bool))
         self.robot.setToolTip("Algo más aguda, con timbre de radio y un pelín metálica (estilo Loquendo). "
                               "La duración no cambia.")
         lay.addWidget(self.robot)
-        self.afinar = QCheckBox("🎯 Afinar cada palabra con la IA")
+        self.afinar = D.CasillaTexto("Afinar cada palabra con la IA")
         self.afinar.setChecked(st.value("voz_ia/afinar", False, type=bool))
         self.afinar.setToolTip("Después de leer, el alineador escucha la narración y coloca cada palabra al centésimo "
                                "(subtítulos aún más exactos). Tarda más (más o menos lo que dura la narración).\n"
@@ -197,13 +200,13 @@ class VozIAPanel(QWidget):
         lay.addWidget(self.afinar)
 
         fila = QHBoxLayout()
-        self.b_muestra = QPushButton("▶ Muestra")
+        self.b_muestra = QPushButton("Muestra")
+        self.b_muestra.setIcon(D.icono("play"))
         self.b_muestra.setToolTip("Lee solo la primera frase para oír cómo queda la voz, la velocidad y la "
                                   "pronunciación (no se añade nada al proyecto).")
         self.b_muestra.clicked.connect(self.muestra)
         fila.addWidget(self.b_muestra)
-        self.b_crear = QPushButton("✓ Crear narración")
-        self.b_crear.setObjectName("primary")
+        self.b_crear = D.BotonPrincipal("Crear narración", "check")
         self.b_crear.setToolTip("Lee el guion entero, lo importa a Medios y lo pone en la pista de voz en el cabezal, "
                                 "ya con su transcripción (subtítulos y palabras clave al momento). Ctrl+Z lo quita.\n"
                                 "Si ya hay una narración IA en la línea de tiempo, te pregunta si reemplazarla.")
@@ -211,20 +214,19 @@ class VozIAPanel(QWidget):
         fila.addWidget(self.b_crear, 1)
         lay.addLayout(fila)
         fila = QHBoxLayout()
-        b_dic = QPushButton("📖 Pronunciación…")
-        b_dic.setObjectName("flat")
+        b_dic = QPushButton("Pronunciación…")
+        b_dic.setIcon(D.icono("book-open"))
         b_dic.setToolTip("Diccionario de pronunciación: cómo se debe leer una palabra («palabra = como suena»).")
         b_dic.clicked.connect(self.abrir_diccionario)
         fila.addWidget(b_dic)
-        b_dir = QPushButton("📂 Carpeta")
-        b_dir.setObjectName("flat")
-        b_dir.setToolTip("Abre la carpeta donde se guardan las narraciones (junto al proyecto, «Grabaciones de voz»).")
+        b_dir = D.BotonIcono("folder-open", "Carpeta: abre la carpeta donde se guardan las narraciones (junto al "
+                                            "proyecto, «Grabaciones de voz»).")
         b_dir.clicked.connect(self._abrir_carpeta)
         fila.addWidget(b_dir)
         fila.addStretch()
         lay.addLayout(fila)
-        self.b_muestras = QPushButton("🎧 Muestras de todas las voces")
-        self.b_muestras.setObjectName("flat")
+        self.b_muestras = QPushButton("Muestras de todas las voces")
+        self.b_muestras.setIcon(D.icono("headphones"))
         self.b_muestras.setToolTip(
             "Lee el mismo texto corto de narración histórica con cada voz y guarda un WAV por voz (con su nombre) y un "
             f"LEEME.txt con qué es cada una y su licencia, en:\n{tts.carpeta_muestras()}\n"
@@ -295,7 +297,7 @@ class VozIAPanel(QWidget):
         self.b_descargar.setVisible(falta)
         if falta:
             v = tts.voz_info(clave)
-            self.b_descargar.setText(f"⬇ Descargar esta voz ({tts.tam_descarga(clave)})")
+            self.b_descargar.setText(f"Descargar esta voz ({tts.tam_descarga(clave)})")
             self.b_descargar.setToolTip(
                 "Baja el modelo de voz Kokoro (Apache 2.0) de su página oficial en GitHub, una sola vez. Sirve para "
                 "Alex, Santa, Dora y sus variantes de narración." if v.motor == "kokoro" else
@@ -321,7 +323,8 @@ class VozIAPanel(QWidget):
         self.b_crear.setEnabled(ok and libre)
         self.b_muestras.setEnabled(libre)
         self.b_descargar.setEnabled(libre)
-        self.b_muestra.setText("⏹ Parar" if self._sonando() else "▶ Muestra")
+        self.b_muestra.setText("Parar" if self._sonando() else "Muestra")
+        self.b_muestra.setIcon(D.icono("square" if self._sonando() else "play"))
 
     def _contar(self):
         texto = self.texto.toPlainText()
@@ -384,7 +387,7 @@ class VozIAPanel(QWidget):
                                          text=palabra)
         if ok and suena.strip():
             tts.añadir_al_diccionario(palabra, suena)
-            self.status.setText(f"📖 «{palabra}» se leerá «{suena.strip()}». «▶ Muestra» para oírlo.")
+            self.status.setText(f"«{palabra}» se leerá «{suena.strip()}». «Muestra» para oírlo.")
 
     def abrir_diccionario(self):
         DiccionarioDialog(self).exec()
@@ -481,7 +484,7 @@ class VozIAPanel(QWidget):
 
         def hecho(rutas):
             self.ultimas_muestras = list(rutas)
-            self.status.setText(f"🎧 {len(rutas)} muestras en «{destino}» (y un LEEME.txt con cada voz y su licencia).")
+            self.status.setText(f"{len(rutas)} muestras en «{destino}» (y un LEEME.txt con cada voz y su licencia).")
             if not _sin_sonido():
                 try:
                     os.startfile(destino)      # noqa: S606
@@ -530,7 +533,7 @@ class VozIAPanel(QWidget):
                 except OSError:
                     pass
             self._muestra_ruta = res["ruta"]
-            self.status.setText(f"▶ Muestra: «{res['frases'][0]['texto'][:60]}» ({res['duracion']:.1f} s).")
+            self.status.setText(f"Muestra: «{res['frases'][0]['texto'][:60]}» ({res['duracion']:.1f} s).")
             self.reproducir(res["ruta"])
         self._empezar("muestra", work, hecho, "Preparando la muestra…")
 
@@ -647,7 +650,7 @@ class VozIAPanel(QWidget):
         if modo == "reemplazar" and anteriores:
             bloqueado = any(c.locked or (p.track(c.track_id) and p.track(c.track_id).locked) for c in anteriores)
             if bloqueado:
-                self.status.setText("🔒 La narración anterior está bloqueada: la nueva va en el cabezal.")
+                self.status.setText("La narración anterior está bloqueada: la nueva va en el cabezal.")
                 modo = "nueva"
         st = p.subtitles
         creados = None

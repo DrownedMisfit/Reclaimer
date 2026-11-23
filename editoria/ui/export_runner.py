@@ -20,6 +20,11 @@ from ..export import parallel
 def start(proc, args, opts):
     """Arranca la exportación (un QProcess de FFmpeg o un ParallelProcess). Con «Dejar libre el PC», FFmpeg va en
     prioridad baja: lo que estés usando (un juego, el propio editor) va primero."""
+    try:      # ⏸ mientras exporta, los análisis automáticos (cola única: ui/cola_analisis.py) esperan
+        from .cola_analisis import exportacion_empieza
+        exportacion_empieza(proc)
+    except Exception:  # noqa: BLE001 - nunca impide exportar
+        pass
     proc.start(args[0], args[1:])
     if getattr(opts, "low_priority", False) and not isinstance(proc, ParallelProcess):
         parallel.lower_priority(int(proc.processId() or 0))

@@ -20,6 +20,24 @@ from __future__ import annotations
 import os
 import sys
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from editoria.core.controller import ProjectController  # noqa: E402

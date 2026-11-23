@@ -113,7 +113,8 @@ class _MarkDelegate(QStyledItemDelegate):
         card = QRectF(rect).adjusted(2, 1, -2, -1)
         # fondo de la tarjeta
         if selected or hovered:
-            painter.setPen(QPen(QColor("#e8742f") if selected else QColor(255, 255, 255, 30), 1.2))
+            from .theme import acento
+            painter.setPen(QPen(acento() if selected else QColor(255, 255, 255, 30), 1.2))
             painter.setBrush(QColor(255, 255, 255, 16 if hovered and not selected else 10))
             painter.drawRoundedRect(card, 8, 8)
         if mark == "neg":
@@ -367,7 +368,7 @@ class MomentsPanel(QWidget):
         lay.addLayout(row2)
 
         # --- qué encontró
-        self.status = QLabel("Escribe lo que buscas, o elige una imagen de referencia.")
+        self.status = QLabel("")                    # (20/11: sin explicación a la vista; va en el tooltip del buscador)
         self.status.setWordWrap(True)
         self.status.setObjectName("dim")
         lay.addWidget(self.status)
@@ -388,7 +389,8 @@ class MomentsPanel(QWidget):
         gl.setContentsMargins(0, 0, 0, 0)
         self.ask_card = QFrame()
         self.ask_card.setObjectName("askcard")
-        self.ask_card.setStyleSheet("#askcard { border: 1px solid rgba(232,116,47,0.55); border-radius: 6px; }")
+        from .theme import acento_rgba
+        self.ask_card.setStyleSheet(f"#askcard {{ border: 1px solid {acento_rgba(0.55)}; border-radius: 6px; }}")
         ak = QHBoxLayout(self.ask_card)
         ak.setContentsMargins(4, 2, 4, 2)
         ak.setSpacing(6)
@@ -403,8 +405,9 @@ class MomentsPanel(QWidget):
         self.b_yes.setObjectName("primary")
         self.b_no = QPushButton("✗ No")
         self.b_skip = QPushButton("Saltar")
+        from . import diseno as _Db
         for b in (self.b_yes, self.b_no, self.b_skip):
-            b.setFixedHeight(26)
+            _Db.alto_fijo(b, _Db.ALTO_PRINCIPAL)   # (26 px sin el relleno vertical: con él se cortaba la letra)
         self.b_yes.clicked.connect(lambda: self._answer(True))
         self.b_no.clicked.connect(lambda: self._answer(False))
         self.b_skip.clicked.connect(lambda: self._answer(None))
@@ -536,12 +539,16 @@ class MomentsPanel(QWidget):
         for b in box.findChildren(QPushButton):
             b.setMinimumHeight(26)                  # (estrecho, su texto se parte en dos líneas: sin alto fijo)
         box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)   # (estrecho, lo de dentro baja: sin tope)
+        self._caja_aparicion = box             # (🎨 20/11: escondida hasta elegir un resultado: sin 250 px apagados)
+        box.setVisible(False)
         split.addWidget(box)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
         self.grid.setMinimumHeight(170)
         split.setSizes([620, 170])
         lay.addWidget(split, 1)
+        from . import diseno as _Dv           # (la lista de resultados, escondida hasta que haya alguno)
+        _Dv.ocultar_si_vacia(self.grid)
         set_help(self, "momentos")
         ctrl.media_changed.connect(self.refresh_known)
         self.refresh_known()
@@ -633,8 +640,10 @@ class MomentsPanel(QWidget):
                                 "está monetizado: úsalas bajo tu responsabilidad (p. ej. crítica o comentario) y "
                                 "revisa la licencia de cada una. ✓ = se guarda en Medios.")
         else:
-            self.status.setText("🌐 Internet: ✓ = esta es (se guarda en Medios) · ✗ = no es."
-                                if web else "Escribe lo que buscas, o elige una imagen de referencia.")
+            # (20/11: la explicación no vuelve a la vista; va en el tooltip del buscador y en el de esta línea)
+            self.status.setText("")
+            self.status.setToolTip("Internet: ✓ = esta es (se guarda en Medios) · ✗ = no es." if web else
+                                   "Escribe lo que buscas, o elige una imagen de referencia.")
 
     def _open_google(self):
         from PySide6.QtCore import QUrl as _Q
@@ -1498,6 +1507,9 @@ class MomentsPanel(QWidget):
         return self.results[i] if 0 <= i < len(self.results) else None
 
     def _select(self, _row):
+        caja = getattr(self, "_caja_aparicion", None)
+        if caja is not None and caja.isHidden() == (_row is not None and _row >= 0):
+            caja.setVisible(_row is not None and _row >= 0)
         if self._web():
             self.b_play.setText("🌐 Abrir su página")
             if 0 <= self.grid.currentRow() < len(self.web_results):

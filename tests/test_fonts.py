@@ -9,6 +9,24 @@ import os
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,7 +73,8 @@ def main():
         assert abs(app.font().pointSizeF() - 9 * 1.5 * 1.2) < 0.05
         assert abs(win.timeline.ui_k - 1.2) < 1e-6 and win.timeline.HEADER_W == 204
         assert win.timeline.track_h(0) > h0
-        assert win.findChild(QWidget, "pagebar").height() >= 46 * 1.8 - 1
+        # (barra de abajo a la mitad de alto desde la agrupación 20/11: base 30 px, crece con la letra)
+        assert win.findChild(QWidget, "pagebar").height() >= int(30 * 1.8) - 1, win.findChild(QWidget, "pagebar").height()
         print("✓ «Paneles» agranda todo menos la línea de tiempo; «Global» agranda todo (también la línea)")
         win.grab().save(os.path.join(out, "letra_grande.png"))
         d.reject()

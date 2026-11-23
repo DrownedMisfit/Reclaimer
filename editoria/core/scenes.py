@@ -24,9 +24,10 @@ import uuid
 
 from . import image_anim
 
-FONDOS = [("blur", "Desenfocado"), ("normal", "Normal"), ("dark", "Oscurecido"), ("img", "Imagen"),
-          ("img_blur", "Imagen borrosa")]       # (imagen = escena["fondo_img"], la que eligas en 🌐 Internet → Fondo)
-FONDO_POR_DEFECTO = "blur"
+FONDOS = [("nada", "Sin fondo (transparente)"), ("blur", "Desenfocado"), ("dark", "Oscurecido"),
+          ("img", "Imagen"), ("img_blur", "Imagen borrosa")]   # (imagen = escena["fondo_img"], la de 🌐 Internet → Fondo)
+# «Sin fondo»: solo se ven los personajes y lo de las pistas de debajo se ve a través (por defecto en una escena nueva)
+FONDO_POR_DEFECTO = "nada"
 BLUR = 0.6                  # como el estilo «encima, fondo desenfocado» de las imágenes
 OSCURO = -0.9               # exposición del fondo oscurecido (pasos)
 PREFIJO = "🎬 "
@@ -146,6 +147,12 @@ def piezas(escena: dict) -> list[dict]:
     a0, b0 = float(escena["a"]), float(escena["b"])
     out = []
     for actor in escena["actores"]:
+        if actor.get("oculto"):          # (👁 capa oculta en Escenas: no sale ni al aplicar ni al exportar)
+            continue
+        sombra = None
+        aj = actor.get("ajustes") or {}
+        if float(aj.get("sombra", 0) or 0) > 1e-3:    # (🎬 la sombra de la capa: fx del clip, igual que al exportar)
+            sombra = {"opacity": round(min(1.0, float(aj["sombra"])), 3), "blur": 0.02, "dx": 0.008, "dy": 0.012}
         t = a0 + max(0.0, float(actor.get("inicio", 0.0)))
         dx = dy = 0.0                    # (lo que se ha desplazado: caminar, correr, un movimiento propio…)
         ks = 1.0                         # (◆ el tamaño con el que acabó una animación a mano)
@@ -171,6 +178,8 @@ def piezas(escena: dict) -> list[dict]:
                 t += d
                 continue
             fin = min(b0, t + d)
+            if sombra is not None:
+                plan = dict(plan, fx=dict(plan.get("fx") or {}, shadow=dict(sombra)))
             out.append({"actor": actor["id"], "fase": fase, "a": round(t, 4), "b": round(fin, 4), "plan": plan})
             t += d
             if fase["anim"] in image_anim.TERMINAN:  # 💥 tras explotar (o irse corriendo) ya no está: lo de después

@@ -83,10 +83,9 @@ class MixDialog(QDialog):
         self.setWindowTitle("🎚 Analizar y proponer mezcla")
         self.resize(820, 640)
         lay = QVBoxLayout(self)
-        intro = QLabel("La IA escucha los diálogos/narración y la canción y te PROPONE cómo debe ir la música, tramo a "
-                       "tramo y con su motivo. No cambia nada hasta que aceptes. Las pistas bloqueadas nunca se tocan.")
-        intro.setWordWrap(True)
-        lay.addWidget(intro)
+        self.setToolTip("La IA escucha los diálogos/narración y la canción y te PROPONE cómo debe ir la música, tramo "
+                        "a tramo y con su motivo. No cambia nada hasta que aceptes. Las pistas bloqueadas nunca se "
+                        "tocan.")                       # (20/11, auditoría: la explicación, al tooltip)
         p = self.ctrl.project
         self.track_checks: dict[str, QCheckBox] = {}
         row = QHBoxLayout()
@@ -136,8 +135,8 @@ class MixDialog(QDialog):
         self.bar.setRange(0, 1000)
         self.bar.hide()
         lay.addWidget(self.bar)
-        self.status = QLabel("Pulsa «Analizar». Consejo: un marcador llamado «voz» o «música» le da prioridad a "
-                             "ese tramo.")
+        self.status = QLabel("Pulsa «Analizar».")
+        self.status.setToolTip("Consejo: un marcador llamado «voz» o «música» le da prioridad a ese tramo.")
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
         btns = QHBoxLayout()

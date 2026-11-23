@@ -20,20 +20,51 @@ PIX_TH = 0.05        # lo oscuro que tiene que ser un píxel para contar como ne
 PIC_TH = 0.98        # qué parte de la imagen tiene que serlo
 
 
-def detect(path: str, duration: float | None = None, progress=None, cancelled=None) -> list[list[float]]:
-    key = f"{media_tools.cache_key(path)}_{PIX_TH}_{PIC_TH}.json"
-    cf = os.path.join(str(cache_dir("negros")), key)
+FILTER = f"scale=160:-2,blackdetect=d=0:pix_th={PIX_TH}:pic_th={PIC_TH}"   # (la lectura única usa el mismo)
+
+
+def cache_file(path: str) -> str:
+    return os.path.join(str(cache_dir("negros")), f"{media_tools.cache_key(path)}_{PIX_TH}_{PIC_TH}.json")
+
+
+def cached(path: str) -> list[list[float]] | None:
     try:
-        with open(cf, encoding="utf-8") as f:
+        with open(cache_file(path), encoding="utf-8") as f:
             return [list(x) for x in json.load(f)]
     except (OSError, ValueError):
+        return None
+
+
+def save_from_log(path: str, txt: str) -> list[list[float]]:
+    """Los tramos negros que escribió blackdetect en el registro de FFmpeg; se guardan."""
+    out = [[round(float(a), 3), round(float(b), 3)]
+           for a, b in re.findall(r"black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)", txt)]
+    try:
+        with open(cache_file(path), "w", encoding="utf-8") as f:
+            json.dump(out, f)
+    except OSError:
         pass
+    return out
+
+
+def detect(path: str, duration: float | None = None, progress=None, cancelled=None) -> list[list[float]]:
+    got = cached(path)
+    if got is not None:
+        return got
+    from ..ai import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ai/lectura_unica.py)
+    if lectura_unica.usar(path, duration or 0.0, "negros"):
+        lectura_unica.asegurar_o_seguir(path, duration or 0.0, ["negros"], cancelled,
+                                        (lambda f, _t: progress(f)) if progress else None)
+        got = cached(path)
+        if got is not None:
+            return got
+    cf = cache_file(path)
     log = cf + ".log"                         # (a un archivo: por una tubería, un video con mucho negro la llenaba)
     with open(log, "w", encoding="utf-8", errors="replace") as lf:
         p = subprocess.Popen([media_tools.ffmpeg(), "-nostdin", "-v", "info", "-nostats",
                               "-skip_loop_filter", "all",   # ⚡ como en las escenas: más rápido y para esto da igual
                               "-i", path, "-an", "-sn",
-                              "-vf", f"scale=160:-2,blackdetect=d=0:pix_th={PIX_TH}:pic_th={PIC_TH}",
+                              "-vf", FILTER,
                               "-f", "null", "-progress", "pipe:1", "-"],
                              stdout=subprocess.PIPE, stderr=lf, text=True,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -56,11 +87,4 @@ def detect(path: str, duration: float | None = None, progress=None, cancelled=No
         txt = ""
     if rc != 0:
         raise RuntimeError("No se pudo leer el video: " + txt.strip()[-200:])
-    out = [[round(float(a), 3), round(float(b), 3)]
-           for a, b in re.findall(r"black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)", txt)]
-    try:
-        with open(cf, "w", encoding="utf-8") as f:
-            json.dump(out, f)
-    except OSError:
-        pass
-    return out
+    return save_from_log(path, txt)

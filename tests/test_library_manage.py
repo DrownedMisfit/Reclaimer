@@ -46,6 +46,7 @@ def main():
     from editoria.ui.theme import apply_dark_theme
     # La carpeta de imágenes de internet, dentro de la carpeta temporal (no la tuya)
     base = os.path.join(out, "imagenes_internet")
+    __import__("shutil").rmtree(base, True)      # (vacía: lo de una pasada anterior cambiaría la numeración)
     os.makedirs(base, exist_ok=True)
     WI.folder = lambda: base
 
@@ -59,13 +60,13 @@ def main():
     # 1) Nombre de lo que buscaste + número, en su carpeta
     items = [{"id": f"i{k}", "url": f"https://x/{k}.jpg", "title": f"foto {k}", "creator": "a", "license": "by",
               "license_text": "CC BY", "page": "p", "attribution": ""} for k in range(3)]
-    paths = [WI.download(it, "master chief halo") for it in items]
+    paths = [WI.download(it, "casco rojo") for it in items]
     names = [os.path.relpath(p, base) for p in paths]
-    assert names == [os.path.join("master chief halo", f"master chief halo {k}.jpg") for k in (1, 2, 3)], names
+    assert names == [os.path.join("casco rojo", f"casco rojo {k}.jpg") for k in (1, 2, 3)], names
     os.remove(paths[1])                                  # aunque borres el 2, el siguiente es el 4
-    p4 = WI.download(dict(items[0], id="i9"), "master chief halo")
-    assert p4.endswith("master chief halo 4.jpg"), p4
-    print("✓ ✓ = se guarda como «master chief halo 1.jpg», «… 2.jpg»… en su carpeta (nunca se repite el número)")
+    p4 = WI.download(dict(items[0], id="i9"), "casco rojo")
+    assert p4.endswith("casco rojo 4.jpg"), p4
+    print("✓ ✓ = se guarda como «casco rojo 1.jpg», «… 2.jpg»… en su carpeta (nunca se repite el número)")
 
     apply_dark_theme(app)
     win = MainWindow()
@@ -75,7 +76,7 @@ def main():
     ids = ctrl.import_paths([paths[0], paths[2], p4])
     while ctrl.analyzing:
         pump(app, 0.05)
-    ctrl.set_media_props(ids, category="Internet/master chief halo")
+    ctrl.set_media_props(ids, category="Internet/casco rojo")
     win.show_panel(win.library)
     pump(app, 0.2)
     tree = win.library.tree
@@ -90,29 +91,33 @@ def main():
                     out_[ch.text(0)] = [ch.child(j).data(0, Qt.UserRole) for j in range(ch.childCount())]
         return out_
     fi = folder_items()
-    key = next(k for k in fi if "master chief halo" in k)
+    key = next(k for k in fi if "casco rojo" in k)
     assert len(fi[key]) == 3, fi
     print(f"✓ en Medios: «Internet ▸ {key.strip()}»")
 
     # 2) Mover: menú (carpeta nueva) y arrastrando sobre una carpeta
-    win.library._move_to([ids[0]], "Internet/arbiter")
-    assert ctrl.project.media[ids[0]].category == "Internet/arbiter"
-    tree.move_requested.emit([ids[1]], "Internet/arbiter")
-    assert ctrl.project.media[ids[1]].category == "Internet/arbiter"
+    win.library._move_to([ids[0]], "Internet/persona azul")
+    assert ctrl.project.media[ids[0]].category == "Internet/persona azul"
+    tree.move_requested.emit([ids[1]], "Internet/persona azul")
+    assert ctrl.project.media[ids[1]].category == "Internet/persona azul"
     pump(app, 0.2)
     fi = folder_items()
-    assert any("arbiter" in k and len(v) == 2 for k, v in fi.items()), fi
+    assert any("persona azul" in k and len(v) == 2 for k, v in fi.items()), fi
     print("✓ mover a otra carpeta (menú «📂 Mover a…» y arrastrando sobre la carpeta)")
 
-    # 3) Supr = quitar de la biblioteca (el archivo sigue en el disco)
+    # 3) ⌫ Retroceso = quitar de la biblioteca (el archivo sigue en el disco); Supr ya no (se pulsaba sin querer)
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
     tree.clearSelection()
     win.library.select_media(ids[2])
     pump(app, 0.1)
     QTest.keyClick(tree, Qt.Key_Delete)
+    pump(app, 0.1)
+    assert ids[2] in ctrl.project.media, "Supr ya no quita de Medios"
+    QTest.keyClick(tree, Qt.Key_Backspace)
+    pump(app, 0.1)
     assert ids[2] not in ctrl.project.media and os.path.exists(p4)
-    print("✓ Supr quita el archivo de Medios (sin borrarlo del disco)")
+    print("✓ ⌫ quita el archivo de Medios (sin borrarlo del disco); Supr no")
 
     # 4) Eliminar el archivo → Papelera de Windows (y no si se está usando)
     ctrl.add_media([ids[0]], None, 0.0)

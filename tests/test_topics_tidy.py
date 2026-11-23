@@ -45,6 +45,8 @@ def main():
              (450, 600, "CONCLUSIÓN")]
     p.markers = [Marker(new_id(), a, lab, "#888", end=b, kind="topic") for a, b, lab in spans]
     ctrl._tidy_topics(p)
+    ctrl._bump_rev()                 # (regla de ctrl._bump_rev: lo cambiado fuera de _edit avisa; si no, el deshacer
+    #                                  reutilizaría la foto de antes de poner los temas)
     tp = sorted((m for m in p.markers if m.kind == "topic"), key=lambda m: m.time)
     assert [m.label for m in tp] == ["INTRODUCCIÓN", "HISTORIA", "CONCLUSIÓN"], [(m.label, m.time, m.end) for m in tp]
     assert tp[0].end == 126 and tp[-1].end == 600, [(m.label, m.time, m.end) for m in tp]

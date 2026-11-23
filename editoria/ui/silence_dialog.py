@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QGridLayout, QHBoxLayout,
-                               QInputDialog, QLabel, QPushButton, QRadioButton, QSlider, QSpinBox, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout,
+                               QHBoxLayout, QInputDialog, QLabel, QPushButton, QRadioButton, QSlider, QSpinBox,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from ..core import silence as S
 from ..core.model import TRACK_AUDIO, TRACK_VIDEO
@@ -24,6 +25,15 @@ from .jobs import BackgroundJob
 KEY = "silencio/ajustes"
 MORE_KEY = "silencio/mas_opciones"                  # ⚙ Más opciones: abierto o plegado (lo recuerda)
 BASICO_KEY = "silencio/basico_v1"                   # (15/11: lo extra empieza apagado; se aplicó una vez)
+CAMBIAR_KEY = "silencio/cambiar_parametro"        # ✓ «Cambiar este parámetro para todo» (lo recuerda)
+# ✋ retoques a mano: nombre y unidad de cada parámetro, tal como se ven en la ventana
+PARAMS = {"threshold_db": ("Umbral", "dB"), "before": ("Antes del inicio", "fotogramas"),
+          "after": ("Después del final", "fotogramas"), "min_frames": ("Mínimo a eliminar", "fotogramas")}
+MANUAL_TIP = ("✋ Retoque a mano: con esta ventana abierta, en la línea de tiempo pulsa y arrastra el borde de una zona "
+              "oscura (o arrastra sobre el audio) para que se quede más sonido o se corte más. Aquí arriba sale qué "
+              "parámetro explicaría ese cambio y su valor nuevo; con «✓ Cambiar este parámetro para todo» se aplica a "
+              "todos los cortes, si no, el retoque se queda solo en ese punto. Los retoques se conservan aunque muevas "
+              "los controles, se deshacen con Ctrl+Z y se respetan al pulsar «Eliminar».")
 INFO_TIP = ("Los silencios se marcan en naranja en la línea de tiempo (en rojo, la voz que se cortaría). Si sale ⚠: "
             "prueba «🎯 Respetar las palabras», la protección «Máxima» o el modo «🎚 Híbrido».")
 
@@ -79,6 +89,53 @@ class SilenceDialog(QDialog):
             if self.scope.currentData() == "pista":
                 self.clip_ids = list(self._track_all)
         self._update_who()
+        # ── ✋ retoques a mano en la línea de tiempo: qué parámetro lo explicaría (arriba, a la vista)
+        self._retouches: list[dict] = []           # anclados a clip y archivo (core/silence.anchor)
+        self._undo_ret: list[dict] = []            # {"ret": retoques de antes, "params": {clave: valor de antes}}
+        self._base: list[tuple[float, float]] | None = None    # lo que calcula plan(), sin retoques
+        self._hits: list[tuple[float, float]] = []
+        self._drag_state: dict | None = None
+        self._last_sug: dict | None = None         # la última propuesta (para aplicarla al marcar la casilla)
+        self._g = 0
+        self.man_box = QFrame()
+        self.man_box.setObjectName("silencio_retoques")
+        self.man_box.setFrameShape(QFrame.StyledPanel)
+        self.man_box.setToolTip(MANUAL_TIP)
+        mlay = QVBoxLayout(self.man_box)
+        mlay.setContentsMargins(8, 6, 8, 6)
+        self.sug_lbl = QLabel()
+        self.sug_lbl.setWordWrap(True)
+        self.sug_lbl.setTextFormat(Qt.RichText)
+        self.sug_lbl.setToolTip(MANUAL_TIP)
+        mlay.addWidget(self.sug_lbl)
+        self.sug_cb = QCheckBox("✓ Cambiar este parámetro para todo")
+        self.sug_cb.setToolTip("Marcado: al soltar el retoque se cambia ese parámetro en la ventana y se recalculan "
+                               "todos los cortes. Sin marcar: solo se retoca ese punto. Si lo marcas después de soltar, "
+                               "se aplica la última propuesta.")
+        self.sug_cb.setChecked(str(QSettings("EditorIA", "EditorIA").value(CAMBIAR_KEY, "false")).lower() == "true")
+        self.sug_cb.toggled.connect(self._cambiar_toggled)
+        mlay.addWidget(self.sug_cb)
+        rrow = QHBoxLayout()
+        self.b_undo_ret = QPushButton("↶ Deshacer retoque")
+        self.b_undo_ret.setToolTip("Quita el último retoque a mano (o el parámetro que cambió). Ctrl+Z, también en la "
+                                   "línea de tiempo mientras esta ventana está abierta.")
+        self.b_undo_ret.clicked.connect(self.sil_undo)
+        self.b_clear_ret = QPushButton("↺ Quitar retoques")
+        self.b_clear_ret.setToolTip("Quita todos los retoques a mano (vuelve a lo que deciden los controles). Ctrl+Z lo "
+                                    "deshace.")
+        self.b_clear_ret.clicked.connect(self._clear_retouches)
+        rrow.addWidget(self.b_undo_ret)
+        rrow.addWidget(self.b_clear_ret)
+        rrow.addStretch()
+        mlay.addLayout(rrow)
+        lay.addWidget(self.man_box)
+        try:
+            from . import responsive
+            responsive.adaptar(self.man_box)          # (a cualquier ancho: los textos se parten, nada cortado)
+        except Exception:  # noqa: BLE001 - sin adaptar se ve igual cuando hay sitio
+            pass
+        QShortcut(QKeySequence.Undo, self, self._undo_key)
+        self._sync_manual()
         # ── lo esencial, arriba: los 4 controles, el fundido y el resumen
         grid = QGridLayout()
         self.ctl: dict[str, tuple[QSlider, object]] = {}
@@ -280,6 +337,8 @@ class SilenceDialog(QDialog):
         self._clips_all, self._paths = clips, paths
         self._job = None
         self._start_job()
+        if hasattr(self.win.timeline, "set_silence_editor"):    # ✋ retoques a mano en la línea de tiempo
+            self.win.timeline.set_silence_editor(self)
         if hasattr(self.win, "learn_voice_pending"):      # ◈ lo apuntado al transcribir se aprende ahora, que se usa
             self.win.learn_voice_pending()
 
@@ -527,22 +586,220 @@ class SilenceDialog(QDialog):
                              and (p.media_of(c).kind == "audio" or p.media_of(c).has_audio)] or self.clip_ids
             self._update_who()
         clips = [p.clips[i] for i in self.clip_ids if i in p.clips]
-        self.regions = S.plan(p, clips, self.fps, self.settings())
+        self._base = S.plan(p, clips, self.fps, self.settings())
+        self._refresh_regions()
+
+    def _refresh_regions(self):
+        """Lo calculado por los controles + los retoques a mano → vista previa, aviso y resumen."""
+        if not self._ready or self._base is None:
+            return
+        p = self.ctrl.project
+        clips = self._clips()
+        self.regions = S.apply_retouches(self._base, S.on_timeline(p, clips, self._retouches))
         total = sum(b - a for a, b in self.regions)
         hits = S.voice_hits(p, clips, self.regions)          # ⚠ la predicción: ¿se cortaría voz?
-        # como Resolve: se oscurece solo en las pistas que se cortan (las demás llevan una marca fina en la regla)
-        tracks = list(dict.fromkeys(c.track_id for c in clips))
-        self.win.timeline.set_preview_regions(self.regions, hits, tracks=tracks or None)
+        self._hits = hits
+        if self._drag_state is None:                # (a mitad de un retoque manda lo que estás arrastrando)
+            self._show(self.regions, hits)
         if self.regions:
             hv = sum(b - a for a, b in hits)
             warn = (f"<br><span style='color:#ff6b66'><b>⚠ Cortaría {hv:.1f} s de tu voz</b></span>"
                     if hv >= 0.05 else "<br>✓ Sin tocar tu voz.")
             n = len(self.regions)
+            nr = len({r.get("g") for r in self._retouches})
             self.info.setText(f"Se quitarán <b>{n} silencio{'s' if n != 1 else ''} · {_dur(total)}</b>"
+                              + (f" (con {nr} retoque{'s' if nr != 1 else ''} a mano)" if nr else "")
                               + warn + getattr(self, "_words_note", ""))
         else:
             self.info.setText("Con estos ajustes no hay silencios que quitar." + self._why_none(p, clips))
         self.b_ok.setEnabled(bool(self.regions))
+        self._sync_manual()
+
+    def _clips(self) -> list:
+        p = self.ctrl.project
+        return [p.clips[i] for i in self.clip_ids if i in p.clips]
+
+    def _show(self, regions, hits):
+        # como Resolve: se oscurece solo en las pistas que se cortan (las demás llevan una marca fina en la regla)
+        tracks = list(dict.fromkeys(c.track_id for c in self._clips()))
+        self.win.timeline.set_preview_regions(regions, hits, tracks=tracks or None)
+
+    # ---------------------------------------------------------------- ✋ retoques a mano (desde la línea de tiempo)
+    IDLE = "✋ <b>Retoque a mano</b>: arrastra en la línea de tiempo el borde de una zona oscura"
+
+    def _sync_manual(self):
+        nr = len({r.get("g") for r in self._retouches})
+        self.b_undo_ret.setEnabled(bool(self._undo_ret))
+        self.b_clear_ret.setEnabled(bool(self._retouches))
+        self.b_clear_ret.setText("↺ Quitar retoques" + (f" ({nr})" if nr else ""))
+        if self._drag_state is None:
+            self.sug_lbl.setText(getattr(self, "_msg", None)
+                                 or self.IDLE + (f" · {nr} retoque{'s' if nr != 1 else ''}" if nr else ""))
+
+    def _say(self, html: str | None):
+        """Lo que queda escrito arriba tras soltar (la propuesta o lo que se cambió) hasta el siguiente retoque."""
+        self._msg = html
+        self._sync_manual()
+
+    def _fmt(self, key: str, v) -> str:
+        return f"{float(v):.1f}".replace(".", ",") if key == "threshold_db" else str(int(v))
+
+    def _warn_text(self, words: list[str]) -> str:
+        if not words:
+            return ""
+        from html import escape
+        return "⚠ Corta dentro de " + ", ".join(f"«{escape(w)}»" for w in words[:3]) + ("…" if len(words) > 3 else "")
+
+    def _sug_text(self, sug: dict | None, words: list[str], rich: bool = True) -> str:
+        """«Después del final: 6 → 9 fotogramas» (y el aviso si se come una palabra)."""
+        if sug:
+            name, unit = PARAMS[sug["key"]]
+            val = f"{self._fmt(sug['key'], sug['old'])} → {self._fmt(sug['key'], sug['new'])} {unit}"
+            txt = f"✎ Modificar <b>{name}</b>: {val}" if rich else f"✎ {name}: {val}"
+            if sug.get("clamped"):
+                txt += " (el límite; el resto, a mano)"
+        else:
+            txt = "✋ Solo retoque a mano (ningún parámetro lo explica)"
+        warn = self._warn_text(words)
+        if warn:
+            txt += f"<br><span style='color:#ff6b66'><b>{warn}</b></span>" if rich else "\n" + warn
+        return txt
+
+    def sil_begin(self, kind: str, t: float, region=None, side=None):
+        """La línea de tiempo empieza un retoque: "edge" (borde de un corte) o "paint" (arrastrar sobre el audio)."""
+        self._drag_state = {"kind": kind, "t0": float(t), "region": tuple(region) if region else None,
+                            "side": side, "regions": list(self.regions)}
+
+    def _drag_retouch(self, t: float):
+        ds = self._drag_state
+        if ds is None:
+            return None
+        if ds["kind"] == "edge":
+            return S.edge_retouch(ds["region"], ds["side"], t)
+        t0 = ds["t0"]
+        if abs(t - t0) < 1e-6:
+            return None
+        inside = S.region_at(ds["regions"], t0)
+        return ("keep" if inside is not None else "cut"), min(t, t0), max(t, t0)
+
+    def _analyze(self, rt) -> tuple[dict | None, list[str], list]:
+        """(propuesta de parámetro, palabras que se comería, cortes con el retoque) de un retoque."""
+        ds = self._drag_state
+        base = ds["regions"] if ds else self.regions
+        regions = S.apply_retouches(base, [rt])
+        op, a, b = rt
+        p = self.ctrl.project
+        clips = self._clips()
+        ch = S.classify(base, op, a, b, self.fps)
+        lvl = None
+        if ch["kind"] in ("start", "end", "new", "split") and self.mode.currentData() != "voz":
+            lvl = S.level_max(p, clips, a, b, self.fps)
+        sug = S.suggest(ch, self.settings(), lvl)
+        words = S.words_cut(p, clips, regions, a, b)
+        return sug, words, regions
+
+    def sil_move(self, t: float) -> str:
+        """Mientras arrastras: la zona cambia en vivo y arriba sale qué parámetro lo explicaría."""
+        if self._drag_state is None:
+            return ""
+        rt = self._drag_retouch(t)
+        if rt is None:
+            self._show(self._drag_state["regions"], self._hits)
+            self.sug_lbl.setText("✋ <b>Retoque a mano</b>: sin cambios")
+            return ""
+        sug, words, regions = self._analyze(rt)
+        hits = [(max(a, ra), min(b, rb)) for a, b in self._hits for ra, rb in regions if min(b, rb) > max(a, ra)]
+        self._show(regions, hits)
+        self.sug_lbl.setText(self._sug_text(sug, words))
+        return self._sug_text(sug, words, rich=False)
+
+    def sil_cancel(self):
+        """Clic sin arrastrar (o arrastre anulado): todo como estaba."""
+        if self._drag_state is not None:
+            self._drag_state = None
+            self._refresh_regions()
+
+    def sil_end(self, t: float):
+        """Al soltar: el retoque se queda (o, con la casilla marcada, se cambia el parámetro para todo)."""
+        if self._drag_state is None:
+            return
+        rt = self._drag_retouch(t)
+        if rt is None:
+            self.sil_cancel()
+            return
+        sug, words, _regs = self._analyze(rt)
+        self._drag_state = None
+        snap = {"ret": [dict(r) for r in self._retouches], "params": None}
+        self._undo_ret.append(snap)
+        if self.sug_cb.isChecked() and sug and not sug.get("clamped"):
+            snap["params"] = {sug["key"]: sug["old"]}
+            self._last_sug = None
+            self._set_param(sug["key"], sug["new"])
+            self._done_msg(sug, words)
+            return
+        self._g += 1
+        self._retouches += [dict(it, g=self._g) for it in S.anchor(self._clips(), *rt)]
+        if self.sug_cb.isChecked() and sug and sug.get("clamped"):     # (el parámetro, hasta su límite; el resto, a mano)
+            snap["params"] = {sug["key"]: sug["old"]}
+            self._set_param(sug["key"], sug["new"])
+            self._last_sug = None
+        else:
+            self._last_sug = {"sug": sug, "g": self._g} if sug else None
+        self._refresh_regions()
+        self._say(self._sug_text(sug, words))
+
+    def _done_msg(self, sug: dict, words: list[str] | None = None):
+        name, unit = PARAMS[sug["key"]]
+        warn = self._warn_text(words or [])
+        self._refresh_regions()
+        self._say(f"✓ <b>{name}</b> cambiado para todo: {self._fmt(sug['key'], sug['new'])} {unit}"
+                  + (f"<br><span style='color:#ff6b66'><b>{warn}</b></span>" if warn else ""))
+
+    def _set_param(self, key: str, val):
+        self.ctl[key][1].setValue(val)      # (recalcula todo, con los retoques que haya)
+
+    def _cambiar_toggled(self, on: bool):
+        QSettings("EditorIA", "EditorIA").setValue(CAMBIAR_KEY, "true" if on else "false")
+        ls = self._last_sug
+        if not on or not ls or not ls.get("sug"):
+            return
+        sug = ls["sug"]                     # marcada después de soltar: la última propuesta, para todo
+        self._undo_ret.append({"ret": [dict(r) for r in self._retouches], "params": {sug["key"]: sug["old"]}})
+        if not sug.get("clamped"):
+            self._retouches = [r for r in self._retouches if r.get("g") != ls["g"]]
+        self._last_sug = None
+        self._set_param(sug["key"], sug["new"])
+        self._done_msg(sug)
+
+    def sil_can_undo(self) -> bool:
+        return bool(self._undo_ret)
+
+    def sil_undo(self):
+        """↶ Quita el último retoque (o el parámetro que se cambió con la casilla)."""
+        if not self._undo_ret:
+            return
+        snap = self._undo_ret.pop()
+        self._retouches = snap["ret"]
+        self._last_sug = None
+        for k, v in (snap.get("params") or {}).items():
+            self._set_param(k, v)
+        self._msg = None
+        self._refresh_regions()
+        self._sync_manual()
+
+    def _undo_key(self):
+        if self._undo_ret:
+            self.sil_undo()
+
+    def _clear_retouches(self):
+        if not self._retouches:
+            return
+        self._undo_ret.append({"ret": [dict(r) for r in self._retouches], "params": None})
+        self._retouches = []
+        self._last_sug = None
+        self._msg = None
+        self._refresh_regions()
+        self._sync_manual()
 
     def _why_none(self, p, clips) -> str:
         """Por qué no se quita nada: pausas por debajo del umbral más cortas que el mínimo o que los márgenes."""
@@ -622,6 +879,8 @@ class SilenceDialog(QDialog):
             self.ctrl.project_changed.disconnect(self._changed)
         except (RuntimeError, TypeError):
             pass
+        if getattr(self.win.timeline, "sil_editor", None) is self:
+            self.win.timeline.set_silence_editor(None)
         self.win.timeline.set_preview_regions([])
         if self._job is not None and self._job.isRunning():
             self._job.wait(5000)

@@ -6,6 +6,9 @@
               y, de la palabra elegida, su carpeta en dos partes:
                 · 🌐 Descargado de internet (lo bajado, con sus créditos)  → 🗑 borrar elegidos / todo lo de la palabra
                 · 💻 De tu computadora (copiado o 🔗 enlazado)             → 🗑 quitar (lo enlazado solo se desvincula)
+                  arrastrar lo descargado a «💻 De tu computadora» (o clic derecho → «💻 Pasar a mi computadora…»)
+                  lo MUEVE a una carpeta tuya (se pregunta cuál) y queda 🔗 enlazado a la misma palabra
+              ⌫ Retroceso borra lo elegido (Supr ya no borra nada aquí).
               arriba, «🧹 Borrar todo lo descargado…» de todas las palabras (con cuánto ocupa).
 
 Todo lo borrado va a la Papelera de Windows (se puede recuperar); los archivos enlazados del PC nunca se borran.
@@ -16,7 +19,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QSettings, QSize, Qt
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListView,
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton, QSplitter, QVBoxLayout,
@@ -24,6 +27,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QGroup
 
 from ..ai import keyword_glossary as KG
 from ..core import keyword_folders as KF
+from . import diseno as _D
 from .jobs import BackgroundJob
 
 ESTADOS = [("todas", "Todas"), ("?", "Por decidir"), ("si", "👍 Me gustan (con carpeta)"), ("no", "👎 No me gustan")]
@@ -70,6 +74,142 @@ def _mb(rutas: list[str]) -> float:
     return total / (1024 * 1024)
 
 
+def _sin_palabra() -> list[str]:
+    """Lo bajado que se quedó en la carpeta «Descargas» de Reclaimer (sin carpeta de palabra)."""
+    from .descargas_panel import _descargas_dir, archivos_de
+    d = _descargas_dir()
+    return archivos_de(str(d), False, hondo=3) if d.is_dir() else []
+
+
+def a_papelera_con_creditos(rutas: list[str]) -> tuple[int, int]:
+    """Cada archivo a la Papelera de Windows (recuperable) y, detrás, su «.creditos.json». → (hechos, no se pudieron:
+    abiertos en otro programa, normalmente). Un «.creditos.json» suelto (su video ya no está) también va."""
+    from .clips_panel import _a_papelera
+    hechos = fallos = 0
+    for ruta in rutas:
+        if not os.path.exists(ruta):
+            continue
+        try:
+            ok = _a_papelera(ruta)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            fallos += 1
+            continue
+        hechos += 1
+        cred = creditos_de(ruta)
+        if not ruta.endswith(".creditos.json") and os.path.isfile(cred):
+            try:
+                _a_papelera(cred)
+            except Exception:  # noqa: BLE001
+                pass
+    return hechos, fallos
+
+
+def texto_fallos(fallos: int) -> str:
+    """El aviso de una línea cuando Windows no deja mover algo."""
+    return (f"{fallos} no se pudieron mandar a la Papelera: están abiertos en otro programa (ciérralo y vuelve a "
+            "probar)." if fallos else "")
+
+
+def creditos_huerfanos(carpetas: list[str]) -> list[str]:
+    """Los «.creditos.json» cuyo video ya no está (lo borraste fuera de Reclaimer, o quedó de antes): basura."""
+    out = []
+    for base in carpetas:
+        if not base or not os.path.isdir(base):
+            continue
+        for d, _subs, nombres in os.walk(base):
+            tallos = {os.path.splitext(n)[0] for n in nombres if not n.endswith(".creditos.json")}
+            for n in nombres:
+                if n.endswith(".creditos.json") and n[:-len(".creditos.json")] not in tallos:
+                    out.append(os.path.join(d, n))
+    return out
+
+
+class _BotonCuenta(_D.BotonIcono):
+    """El icono de «Descargas en cola» con su cuenta pequeña encima cuando hay algo bajando (y en el tooltip)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._cuenta = 0
+
+    def poner_cuenta(self, n: int):
+        n = max(0, int(n or 0))
+        if n != self._cuenta:
+            self._cuenta = n
+            self.update()
+
+    def paintEvent(self, ev):                  # noqa: N802
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QFont, QPainter
+        D = _D
+        super().paintEvent(ev)
+        n = self._cuenta
+        if not n:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        f = QFont(self.font())
+        f.setPixelSize(max(8, self.height() // 3))
+        f.setBold(True)
+        p.setFont(f)
+        txt = str(n) if n < 100 else "99+"
+        w = max(p.fontMetrics().horizontalAdvance(txt) + 4, p.fontMetrics().height())
+        caja = QRectF(self.width() - w, 0, w, p.fontMetrics().height())
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(D.colores().get("acento", "#e07a2e")))
+        p.drawRoundedRect(caja, caja.height() / 2, caja.height() / 2)
+        p.setPen(QColor("white"))
+        p.drawText(caja, Qt.AlignCenter, txt)
+        p.end()
+
+
+def borrar_todo_descargado(panel, parent, preguntar: bool = True, sin_palabra: bool = True) -> int:
+    """🧹 Todo lo bajado de internet a la Papelera de Windows (se puede recuperar), con sus créditos: lo de cada
+    palabra (su «.creditos.json» lo distingue de lo tuyo) y, con sin_palabra, lo que quedó en la carpeta «Descargas» de
+    Reclaimer. Lo de tu computadora (copiado o enlazado) nunca se toca. Devuelve cuántos archivos fueron.
+    (22/11) También los «.creditos.json» sueltos, cuyo video ya no está; y si Windows no deja mover alguno (abierto
+    en otro programa), lo dice en una línea."""
+    from .descargas_panel import _descargas_dir
+    panel._leer_carpetas()
+    de_palabras = []
+    for car in panel.carpetas:
+        de_palabras += partes(car)[0]
+    sueltos = [r for r in (_sin_palabra() if sin_palabra else []) if r not in de_palabras]
+    rutas = de_palabras + sueltos
+    bases = [car.get("own_path") for car in panel.carpetas] + ([str(_descargas_dir())] if sin_palabra else [])
+    huerfanos = creditos_huerfanos(bases)
+    if not rutas and not huerfanos:
+        panel._aviso("No hay nada descargado de internet que borrar.")
+        return 0
+    if not rutas:                              # (solo quedaban créditos sueltos: se limpian sin más preguntas)
+        a_papelera_con_creditos(huerfanos)
+        panel.recalcular()
+        panel._aviso("No hay nada descargado de internet que borrar (quité sus créditos sueltos).")
+        return 0
+    if preguntar:
+        p = panel.ctrl.project
+        ns = {os.path.normcase(os.path.abspath(r)) for r in rutas}
+        usados = sum(1 for m in p.media.values()
+                     if os.path.normcase(os.path.abspath(m.path)) in ns and p.is_media_used(m.id))
+        detalle = f"· de tus palabras: {len(de_palabras)}" + (f"\n· sin palabra (carpeta «Descargas» de Reclaimer): "
+                                                            f"{len(sueltos)}" if sueltos else "")
+        r = QMessageBox.question(
+            parent, "Borrar todo lo descargado",
+            f"¿Mandar a la Papelera los {len(rutas)} archivos bajados de internet ({_mb(rutas):.0f} MB)?\n{detalle}"
+            "\n\nLo de tu computadora no se toca. Se puede recuperar desde la Papelera."
+            + (f"\n⚠ {usados} están en tu proyecto: se quedarán sin archivo." if usados else ""),
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+        if r != QMessageBox.Yes:
+            return 0
+    hechos, fallos = a_papelera_con_creditos(rutas)
+    a_papelera_con_creditos(creditos_huerfanos(bases))
+    panel.recalcular()
+    panel._aviso(f"🧹 {hechos} archivo(s) descargado(s) a la Papelera." + (" " + texto_fallos(fallos) if fallos
+                                                                           else ""))
+    return hechos
+
+
 class KeywordsWindow(QWidget):
     def __init__(self, panel, parent=None, acoplado: bool = False):
         # acoplado=True: la pestaña «🗂 Carpetas» de la derecha (sin internet ni lista: sigue a «Dijiste…»)
@@ -113,7 +253,9 @@ class KeywordsWindow(QWidget):
         der = QWidget()
         dv = QVBoxLayout(der)
         dv.setContentsMargins(6, 0, 0, 0)
-        fila = QHBoxLayout()
+        self._fila_palabras = QWidget()        # (ventana amplia: el título de la lista y su filtro)
+        fila = QHBoxLayout(self._fila_palabras)
+        fila.setContentsMargins(0, 0, 0, 0)
         self._lbl_palabras = QLabel("<b>🔑 Tus palabras clave</b>")
         fila.addWidget(self._lbl_palabras)
         self.filtro = QComboBox()
@@ -123,12 +265,7 @@ class KeywordsWindow(QWidget):
         self.filtro.currentIndexChanged.connect(lambda _i: self.refrescar())
         fila.addWidget(self.filtro)
         fila.addStretch(1)
-        self.btn_limpiar = QPushButton("🧹 Borrar todo lo descargado…")
-        self.btn_limpiar.setToolTip("Manda a la Papelera todo lo bajado de internet de TODAS las palabras (lo de tu "
-                                    "computadora no se toca). Antes dice cuánto ocupa.")
-        self.btn_limpiar.clicked.connect(self.borrar_todo_descargado)
-        fila.addWidget(self.btn_limpiar)
-        dv.addLayout(fila)
+        dv.addWidget(self._fila_palabras)
 
         cuerpo = QSplitter(Qt.Horizontal)
         col = self._col = QWidget()
@@ -137,8 +274,10 @@ class KeywordsWindow(QWidget):
         self.lista = QListWidget()
         self.lista.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.lista.setToolTip("👍 = palabra clave (tiene carpeta) · 👎 = no lo es · ○ = por decidir. "
-                              "Elige una para ver su carpeta.")
+                              "Elige una para ver su carpeta. Clic derecho = separar o unir sus variantes.")
         self.lista.currentItemChanged.connect(lambda it, _p: self._elegir(it))
+        self.lista.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lista.customContextMenuRequested.connect(lambda pos: self._menu_lista(pos))
         cv.addWidget(self.lista, 1)
         botones = QHBoxLayout()
         self.btn_si = QPushButton("👍 Me gusta")
@@ -159,6 +298,69 @@ class KeywordsWindow(QWidget):
         car = QWidget()
         kv = QVBoxLayout(car)
         kv.setContentsMargins(6, 0, 0, 0)
+        # 🧭 (22/11, «acomodarlo para que se vea mejor») UNA cabecera: a la izquierda qué se ve (segmentado: «Esta
+        # palabra | Todo lo descargado»; con poco ancho, solo sus iconos) y a la derecha sus acciones, iconos
+        # monocromos con su nombre en el tooltip: Descargas en cola (con su cuenta) · Abrir la carpeta · Recargar ·
+        # Borrar todo lo descargado…
+        from PySide6.QtWidgets import QButtonGroup, QSizePolicy, QToolButton
+        from . import diseno as _Dk
+        from .clips_panel import HAY_INTERNET as _HAY
+        from .clips_panel import _Segmentado
+        vista = QHBoxLayout()
+        vista.setSpacing(4)
+        self._sel_vista = _Segmentado()
+        sl = QHBoxLayout(self._sel_vista)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
+        self._sel_vista.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)   # (no crece: el sitio, a los iconos)
+        self._grupo_vista = QButtonGroup(self)
+        self._grupo_vista.setExclusive(True)
+        for nombre, texto, icono, tip in (
+                ("btn_vista_palabra", "Esta palabra", "tag",
+                 "La carpeta de la palabra elegida en «Dijiste…»: lo descargado y lo de tu computadora"),
+                ("btn_vista_todo", "Todo lo descargado", "download",
+                 "Todo lo que Reclaimer ha bajado de internet (clips de cada palabra y sin palabra, sonidos e "
+                 "imágenes), con su miniatura y su duración")):
+            b = QToolButton(self._sel_vista)
+            b.setText(texto)
+            b.setIcon(_Dk.icono(icono))
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setProperty("segmento", nombre)
+            self._grupo_vista.addButton(b)
+            sl.addWidget(b)
+            self._sel_vista.botones.append(b)
+            setattr(self, nombre, b)
+        self.btn_vista_palabra.setChecked(True)
+        vista.addWidget(self._sel_vista)           # (los iconos, pegados a la derecha, se quedan el resto del ancho)
+        self.btn_descargas = _BotonCuenta("download", "Descargas en cola: se ven en «Buscar material». Clic = ir allí")
+        self.btn_descargas.clicked.connect(lambda: hasattr(self.p, "ver_descargas") and self.p.ver_descargas())
+        self.btn_descargas.setVisible(_HAY)
+        self.btn_abrir = _Dk.BotonIcono("folder-open", "Abrir la carpeta en el Explorador: la de la palabra o, en "
+                                                       "«Todo lo descargado», la elegida")
+        self.btn_abrir.clicked.connect(self._abrir_cabecera)
+        self.btn_recargar = _Dk.BotonIcono("refresh-cw", "Recargar: vuelve a leer las carpetas")
+        self.btn_recargar.clicked.connect(self._recargar)
+        self.btn_limpiar = _Dk.BotonIcono(
+            "trash-2", "Borrar todo lo descargado…: manda a la Papelera todo lo bajado de internet, de TODAS las "
+                       "palabras y lo que quedó sin palabra (lo de tu computadora no se toca). Antes pregunta y dice "
+                       "cuánto ocupa.")
+        # (con lambda: clicked(bool) pasaba «False» a «preguntar» y se borraba SIN preguntar)
+        self.btn_limpiar.clicked.connect(lambda: self.borrar_todo_descargado(True, True))
+        self._iconos_cab = _Dk.FilaFluida(espacio=4, alinear_derecha=True)   # (sin sitio: siguen en otra línea)
+        for b in (self.btn_descargas, self.btn_abrir, self.btn_recargar, self.btn_limpiar):
+            self._iconos_cab.addWidget(b)
+        vista.addWidget(self._iconos_cab, 1)
+        self.btn_vista_todo.toggled.connect(self._cambiar_vista)
+        kv.addLayout(vista)
+        self._vista_palabra = QWidget()        # (lo de la palabra: título, botones, sus dos cajas y «poner»)
+        kp = QVBoxLayout(self._vista_palabra)
+        kp.setContentsMargins(0, 0, 0, 0)
+        self.descargado = None                 # 📥 se crea la primera vez que se pide «Todo lo descargado»
+        self._kv = kv
+        kv.addWidget(self._vista_palabra, 1)
+        kv = kp
         self.titulo = QLabel()
         self.titulo.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.titulo.setWordWrap(True)
@@ -170,22 +372,29 @@ class KeywordsWindow(QWidget):
         self.btn_buscar_pc = QPushButton("💻 Buscar en tu computadora")
         self.btn_buscar_pc.setToolTip("Elige videos o imágenes de tu PC (o una carpeta entera) para esta palabra")
         self.btn_buscar_pc.clicked.connect(self._menu_pc)
-        self.btn_abrir = QPushButton("📂 Abrir carpeta")
-        self.btn_abrir.clicked.connect(self._abrir_carpeta)
-        self.btn_borrar_palabra = QPushButton("🗑 Borrar palabra y carpeta…")
+        self.btn_borrar_palabra = QPushButton("🗑 Borrar palabra y carpeta…")    # («Abrir carpeta»: en la cabecera)
         self.btn_borrar_palabra.setToolTip("Manda su carpeta a la Papelera y quita sus enlaces (lo enlazado de tu PC "
                                            "no se borra)")
-        self.btn_borrar_palabra.clicked.connect(self.borrar_palabra)
-        for b in (self.btn_buscar_net, self.btn_buscar_pc, self.btn_abrir, self.btn_borrar_palabra):
+        self.btn_borrar_palabra.clicked.connect(lambda: self.borrar_palabra(True))   # (siempre pregunta)
+        self.btn_buscar_net.setVisible(False)    # (repetido: la búsqueda está en «Buscar material» → 🌐 Internet)
+        for b in (self.btn_buscar_pc, self.btn_borrar_palabra):
             acc.addWidget(b)
         acc.addStretch(1)
         kv.addLayout(acc)
 
         self.caja_net, self.grid_net = self._caja("🌐 Descargado de internet")
+        self.grid_net.setToolTip("Doble clic = ponerlo en el cabezal · arrástralo a la línea de tiempo, o a «💻 De tu "
+                                 "computadora» para moverlo a una carpeta tuya · clic derecho = más opciones · "
+                                 "⌫ Retroceso = borrar")
+        self.grid_net.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.grid_net.customContextMenuRequested.connect(self._menu_net)
         bn = QHBoxLayout()
-        self.btn_borrar_net = QPushButton("🗑 Borrar los elegidos")
+        from . import diseno as _Dn
+        self.btn_borrar_net = QPushButton("Borrar los elegidos")
+        self.btn_borrar_net.setIcon(_Dn.icono("trash-2"))
         self.btn_borrar_net.clicked.connect(lambda: self.borrar(self._sel(self.grid_net)))
-        self.btn_borrar_net_todo = QPushButton("🗑 Borrar todo lo descargado de esta palabra")
+        self.btn_borrar_net_todo = QPushButton("Borrar todo lo descargado de esta palabra")
+        self.btn_borrar_net_todo.setIcon(_Dn.icono("trash-2"))
         self.btn_borrar_net_todo.clicked.connect(lambda: self.borrar(partes(self._car())[0]))
         bn.addWidget(self.btn_borrar_net)
         bn.addWidget(self.btn_borrar_net_todo)
@@ -194,6 +403,13 @@ class KeywordsWindow(QWidget):
         kv.addWidget(self.caja_net, 1)
 
         self.caja_pc, self.grid_pc = self._caja("💻 De tu computadora")
+        self.grid_pc.setToolTip("Doble clic = ponerlo en el cabezal · arrástralo a la línea de tiempo · suelta aquí lo "
+                                "de «🌐 Descargado de internet» para moverlo a una carpeta de tu PC (te pregunta cuál) · "
+                                "⌫ Retroceso = quitar")
+        self.grid_pc.setAcceptDrops(True)                   # (soltar aquí: lo descargado pasa a tu computadora)
+        self.grid_pc.viewport().setAcceptDrops(True)
+        self.grid_pc.soltado.disconnect()
+        self.grid_pc.soltado.connect(lambda rutas, _f: self._soltado_pc(rutas))
         bp = QHBoxLayout()
         self.btn_quitar_pc = QPushButton("🗑 Quitar los elegidos")
         self.btn_quitar_pc.setToolTip("Lo copiado va a la Papelera; lo 🔗 enlazado solo se desvincula (tu archivo "
@@ -217,7 +433,7 @@ class KeywordsWindow(QWidget):
         kv.addLayout(poner)
         self.aviso = QLabel("")
         self.aviso.setWordWrap(True)
-        kv.addWidget(self.aviso)
+        self._kv.addWidget(self.aviso)
         cuerpo.addWidget(car)
         cuerpo.setStretchFactor(0, 1)
         cuerpo.setStretchFactor(1, 3)
@@ -226,11 +442,73 @@ class KeywordsWindow(QWidget):
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
         if self.acoplado:                      # (la lista y el 👍/👎 están en «Dijiste…»; internet, en su pestaña)
-            for w in (self._izq, self._col, self._lbl_palabras, self.filtro):
+            for w in (self._izq, self._col, self._fila_palabras):
                 w.hide()
             lay.setContentsMargins(4, 4, 4, 4)
             self.btn_buscar_net.setToolTip("Busca clips de esta palabra en la pestaña «🌐 Internet» de Palabras clave "
                                            "(lo que bajes va a su carpeta)")
+
+    # ------------------------------------------------------------------ 📥 todo lo descargado
+    def _ventana(self):
+        """La ventana principal (la de Medios y la línea de tiempo), también si Carpetas o Palabras clave están
+        sueltos (su window() es entonces el panel flotante: «Todo lo descargado» no veía las carpetas de las palabras
+        ni podía poner nada en el cabezal)."""
+        w = self.p.window()
+        if hasattr(w, "ctrl") and hasattr(w, "clips"):
+            return w
+        from PySide6.QtWidgets import QApplication
+        for top in QApplication.topLevelWidgets():
+            if getattr(top, "clips", None) is self.p:
+                return top
+        return w
+
+    def _abrir_cabecera(self):
+        """📂 de la cabecera: en «Todo lo descargado», la carpeta elegida allí; si no, la de la palabra."""
+        if self.btn_vista_todo.isChecked() and self.descargado is not None:
+            self.descargado._abrir()
+        elif self._car() is not None:
+            self._abrir_carpeta()
+        else:
+            self._avisa("Esta palabra aún no tiene carpeta.")
+
+    def _recargar(self):
+        """⟳ de la cabecera: vuelve a leer las carpetas (las de las palabras y, si se ve, «Todo lo descargado»)."""
+        if self.btn_vista_todo.isChecked() and self.descargado is not None:
+            self.descargado.refrescar()
+        else:
+            self.p.recalcular()
+            self.refrescar()
+
+    def _despues_de_quitar(self):
+        """«Todo lo descargado» mandó algo a la Papelera: las carpetas de las palabras, al día."""
+        self.p.recalcular()
+        self._firma_vista = None
+        self.refrescar()
+
+    def _todo_al_dia(self):
+        """Algo se borró: «Todo lo descargado» vuelve a leer las carpetas (si ya existe)."""
+        if self.descargado is not None:
+            self.descargado.refrescar()
+
+    def _cambiar_vista(self, todo: bool):
+        if todo and self.descargado is None:
+            from .descargas_panel import DescargasPanel
+            self.descargado = DescargasPanel(self._ventana, incrustado=True)
+            self.descargado.layout().setContentsMargins(0, 0, 0, 0)
+            self.descargado.borrado.connect(self._despues_de_quitar)
+            self._kv.insertWidget(self._kv.indexOf(self._vista_palabra) + 1, self.descargado, 1)
+        self._vista_palabra.setVisible(not todo)
+        if self.descargado is not None:
+            self.descargado.setVisible(todo)
+            if todo:
+                self.descargado.refrescar()
+
+    def ver_todo(self):
+        """«Ver todo» (barra de Buscar material): Carpetas enseña todo lo descargado."""
+        if not self.btn_vista_todo.isChecked():
+            self.btn_vista_todo.setChecked(True)
+        elif self.descargado is not None:
+            self.descargado.refrescar()
 
     def _caja(self, titulo: str):
         from .clips_panel import MINI_H, MINI_W, _Lista
@@ -244,9 +522,12 @@ class KeywordsWindow(QWidget):
         g.setMovement(QListView.Static)
         g.setWordWrap(True)
         g.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        g.setToolTip("Doble clic = ponerlo en el cabezal · arrástralo a la línea de tiempo · Supr = borrar")
+        g.setToolTip("Doble clic = ponerlo en el cabezal · arrástralo a la línea de tiempo · ⌫ Retroceso = borrar")
         g.itemDoubleClicked.connect(lambda it: self.poner(True, [it.data(Qt.UserRole)]))
         g.soltado.connect(lambda rutas, _f: self._anadir(rutas))
+        g.installEventFilter(self)                          # ⌫ Retroceso borra; Supr ya no (ver eventFilter)
+        from .miniaturas import activar_vista_grande        # 🔍 vista grande al pasar el ratón (programador 2)
+        activar_vista_grande(g, lambda it: it.data(Qt.UserRole))
         v.addWidget(g)
         return caja, g
 
@@ -258,8 +539,19 @@ class KeywordsWindow(QWidget):
         super().showEvent(e)
         if not self.acoplado:
             self._tomar_internet()
+            self.refrescar()
         else:
-            self.p.ensure_fresh()              # (el panel Palabras clave pudo estar oculto con un recálculo pendiente)
+            # (acoplada, en pestaña con otros paneles: Qt la deja «visible» aunque su pestaña esté detrás, fuera de la
+            # vista; solo se pone al día si de verdad se ve. Al elegir su pestaña: visibilityChanged → _al_verse)
+            QTimer.singleShot(0, self._al_verse)
+
+    def _al_verse(self):
+        try:
+            if not self.isVisible() or self.visibleRegion().isEmpty():
+                return
+        except RuntimeError:                   # (ya borrada)
+            return
+        self.p.ensure_fresh()                  # (el panel Palabras clave pudo estar oculto con un recálculo pendiente)
         self.refrescar()
 
     def closeEvent(self, e):
@@ -339,6 +631,8 @@ class KeywordsWindow(QWidget):
             return
         filtro = self.filtro.currentData()
         actual = self.term
+        from .clips_panel import texto_variantes
+        dichas = {KG.clave(m["term"]): m for m in self.p.menciones if not m.get("no_dicha")}
         self.lista.blockSignals(True)
         self.lista.clear()
         fila = -1
@@ -354,6 +648,9 @@ class KeywordsWindow(QWidget):
                 partes_txt.append(f"· 📁 {n}")
             it = QListWidgetItem(" ".join(partes_txt))
             it.setData(Qt.UserRole, d["term"])
+            tambien = texto_variantes(dichas.get(d["clave"]) or {})
+            if tambien:                        # «También dicho: …» (cómo se oyó esa palabra)
+                it.setToolTip(tambien)
             if d["estado"] == "no":
                 it.setForeground(QColor("#6b6f78"))
             self.lista.addItem(it)
@@ -370,10 +667,7 @@ class KeywordsWindow(QWidget):
             p = self.p
             fila = next((i for i, m in enumerate(p.menciones) if KG.clave(m["term"]) == KG.clave(term)), -1)
             if fila >= 0:                      # así lo que bajes va a la misma palabra que se ve aquí
-                p.lista_menciones.blockSignals(True)
-                p.lista_menciones.setCurrentRow(fila)
-                p.lista_menciones.blockSignals(False)
-                p._elegir_mencion(fila, buscar=False)
+                p.elegir_indice(fila, buscar=False)
             else:
                 self._seguir(term)
             return
@@ -382,6 +676,19 @@ class KeywordsWindow(QWidget):
             self.filtro.setCurrentIndex(0)           # (refresca)
         else:
             self.refrescar()
+
+    def _menu_lista(self, pos):
+        """Clic derecho en una palabra: «✂ Separar…» y «🔗 Unir con…» (los mismos de «Dijiste…»)."""
+        it = self.lista.itemAt(pos)
+        if it is None:
+            return
+        term = it.data(Qt.UserRole)
+        m = next((x for x in self.p.menciones if KG.clave(x["term"]) == KG.clave(term) and not x.get("no_dicha")),
+                 None) or {"term": term, "variantes": []}
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        self.p._menu_variantes(menu, m)
+        menu.exec(self.lista.viewport().mapToGlobal(pos))
 
     def _terminos_elegidos(self) -> list[str]:
         its = self.lista.selectedItems() or ([self.lista.currentItem()] if self.lista.currentItem() else [])
@@ -444,11 +751,11 @@ class KeywordsWindow(QWidget):
         hay = bool(self.term)
         for b in (self.btn_buscar_net, self.btn_buscar_pc):
             b.setEnabled(hay)
-        for b in (self.btn_abrir, self.btn_borrar_palabra):
-            b.setEnabled(car is not None)
+        self.btn_borrar_palabra.setEnabled(car is not None)
         if not hay:
-            self.titulo.setText("Elige una palabra en «Dijiste…» (o dale 👍 a una para crearle su carpeta)"
-                                if self.acoplado else "Elige una palabra (o dale 👍 a una para crearle su carpeta)")
+            self.titulo.setText("Elige una palabra")                   # (20/11: una línea; el cómo, al tooltip)
+            self.titulo.setToolTip("Elige una palabra en «Dijiste…» (o dale 👍 a una para crearle su carpeta)"
+                                   if self.acoplado else "Elige una palabra (o dale 👍 a una para crearle su carpeta)")
         elif car is None:
             self.titulo.setText(f"«{self.term}» aún no tiene carpeta: dale 👍 o añade material y se crea sola.")
         else:
@@ -521,12 +828,35 @@ class KeywordsWindow(QWidget):
     def _sel(grid: QListWidget) -> list[str]:
         return [it.data(Qt.UserRole) for it in grid.selectedItems() if it.data(Qt.UserRole)]
 
+    _MODS = Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier | Qt.MetaModifier
+
+    def _tecla(self, e) -> bool:
+        """⌫ Retroceso borra lo elegido; Supr ya no borra nada aquí (se pulsaba sin querer). True = atendida."""
+        if e.modifiers() & self._MODS:
+            return False
+        rutas = self._sel(self.grid_net) + self._sel(self.grid_pc)
+        if e.key() == Qt.Key_Backspace and rutas:
+            self.borrar(rutas)
+            return True
+        if e.key() == Qt.Key_Delete and rutas:
+            self._avisa("Para borrar lo elegido usa ⌫ Retroceso (la tecla de encima de Intro).")
+            return True
+        return False
+
+    def eventFilter(self, obj, e):
+        if hasattr(self, "grid_pc") and obj in (self.grid_net, self.grid_pc):
+            t = e.type()
+            if (t == QEvent.ShortcutOverride and e.key() in (Qt.Key_Backspace, Qt.Key_Delete)
+                    and not (e.modifiers() & self._MODS) and (self._sel(self.grid_net) or self._sel(self.grid_pc))):
+                e.accept()                     # (con algo elegido aquí, ⌫/Supr no borran clips de la línea de tiempo)
+                return True
+            if t == QEvent.KeyPress and self._tecla(e):
+                return True
+        return super().eventFilter(obj, e)
+
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Delete:
-            rutas = self._sel(self.grid_net) + self._sel(self.grid_pc)
-            if rutas:
-                self.borrar(rutas)
-                return
+        if self._tecla(e):
+            return
         super().keyPressEvent(e)
 
     # ------------------------------------------------------------------ buscar
@@ -582,6 +912,109 @@ class KeywordsWindow(QWidget):
         self._avisa(self.p.aviso.text())
         self.refrescar()
 
+    # ------------------------------------------------------------------ pasar a mi computadora
+    def _armar_menu_net(self, rutas: list[str]) -> QMenu:
+        """Menú del clic derecho en «🌐 Descargado de internet» (aparte del exec: las pruebas lo usan sin abrirlo)."""
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        a = menu.addAction("💻 Pasar a mi computadora…" + (f" ({len(rutas)})" if len(rutas) > 1 else ""),
+                           lambda r=list(rutas): self.pasar_a_mi_pc(r))
+        a.setToolTip("Mueve el archivo (con sus créditos) a una carpeta de tu PC que eliges; sigue en esta palabra")
+        menu.addAction("⏵ Poner en el cabezal", lambda r=list(rutas): self.poner(True, r))
+        menu.addAction("🗑 Borrar…", lambda r=list(rutas): self.borrar(r))
+        return menu
+
+    def _menu_net(self, pos):
+        it = self.grid_net.itemAt(pos)
+        if it is None:
+            return
+        if not it.isSelected():
+            self.grid_net.clearSelection()
+            it.setSelected(True)
+        rutas = self._sel(self.grid_net)
+        if rutas:
+            self._armar_menu_net(rutas).exec(self.grid_net.viewport().mapToGlobal(pos))
+
+    def _soltado_pc(self, rutas: list[str]):
+        """Algo soltado en «💻 De tu computadora»: lo de «🌐 Descargado» de esta palabra se MUEVE a una carpeta tuya
+        (te pregunta cuál); lo que viene del Explorador se añade como siempre; lo que ya estaba aquí, nada."""
+        self.p._leer_carpetas()
+        net, pc = partes(self._car())
+
+        def clave(r):
+            return os.path.normcase(os.path.abspath(r))
+        k_net, k_pc = {clave(r) for r in net}, {clave(r) for r in pc}
+        desde_net = [r for r in rutas if clave(r) in k_net]
+        otras = [r for r in rutas if clave(r) not in k_net and clave(r) not in k_pc]
+        if otras:
+            self._anadir(otras)
+        if desde_net:                          # (después del soltar: un diálogo dentro del arrastre da problemas)
+            QTimer.singleShot(0, lambda r=desde_net: self.pasar_a_mi_pc(r))
+
+    def _pedir_carpeta_pc(self, n: int) -> str:
+        """Pregunta a qué carpeta de tu PC van (empieza en la última usada). "" = cancelado. (Las pruebas lo cambian.)"""
+        inicio = str(QSettings("EditorIA", "EditorIA").value("palabras_ventana/carpeta_pc", "") or "")
+        if not os.path.isdir(inicio):
+            inicio = os.path.join(os.path.expanduser("~"), "Videos")
+        titulo = (f"¿En qué carpeta de tu computadora guardo este archivo de «{self.term}»?" if n == 1 else
+                  f"¿En qué carpeta de tu computadora guardo estos {n} archivos de «{self.term}»?")
+        return QFileDialog.getExistingDirectory(self, titulo, inicio) or ""
+
+    def pasar_a_mi_pc(self, rutas: list[str], carpeta: str | None = None) -> int:
+        """💻 Lo descargado de internet se MUEVE (con sus créditos) a una carpeta tuya y queda 🔗 enlazado a la misma
+        palabra (sale en «💻 De tu computadora»). Si está en Medios, su ruta pasa a la nueva: sus clips siguen bien.
+        Devuelve cuántos se movieron."""
+        if not self.term:
+            self._avisa("Elige antes una palabra.")
+            return 0
+        self.p._leer_carpetas()                     # (lo de ahora, no lo que había al pintar la rejilla)
+        net = partes(self._car())[0]
+        k_net = {os.path.normcase(os.path.abspath(r)): r for r in net}
+        rutas = [k_net[k] for k in dict.fromkeys(os.path.normcase(os.path.abspath(r)) for r in rutas or [])
+                 if k in k_net]
+        if not rutas:
+            self.refrescar()
+            self._avisa("Elige antes archivos de «🌐 Descargado de internet» (clic; Ctrl+clic para varios).")
+            return 0
+        if carpeta is None:
+            carpeta = self._pedir_carpeta_pc(len(rutas))
+        if not carpeta:
+            self._avisa("No se movió nada (no elegiste carpeta).")
+            return 0
+        carpeta = os.path.normpath(carpeta)
+        if KF._inside(carpeta, self.p.raiz):
+            self._avisa("Esa carpeta está dentro de las carpetas de palabras clave: elige una carpeta tuya, fuera de "
+                        "ahí.")
+            return 0
+        QSettings("EditorIA", "EditorIA").setValue("palabras_ventana/carpeta_pc", carpeta)
+        try:
+            movidos, fallos = KF.move_files(rutas, carpeta)
+        except OSError as exc:
+            self._avisa(f"No pude usar esa carpeta: {exc}")
+            return 0
+        sin_enlace = 0
+        en_medios = 0
+        for src, dst in movidos:
+            try:
+                KF.link_file(self.p.raiz, self.term, dst)
+            except (OSError, ValueError):
+                sin_enlace += 1
+            if hasattr(self.ctrl, "move_media_path") and src != dst:
+                en_medios += self.ctrl.move_media_path(src, dst)
+        self.p.recalcular()
+        self.refrescar()
+        nombre = os.path.basename(carpeta.rstrip("\\/")) or carpeta
+        texto = f"💻 {len(movidos)} archivo(s) movidos a «{nombre}»; siguen en la palabra «{self.term}»"
+        if en_medios:
+            texto += " (en Medios también: sus clips siguen bien)"
+        if sin_enlace:
+            texto += f". ⚠ {sin_enlace} no se pudieron enlazar a la palabra (están en «{nombre}»)"
+        if fallos:
+            texto += f". {len(fallos)} no se pudieron mover (¿abiertos en otro programa?)"
+        self._avisa(texto + ".")
+        self.aviso.setToolTip(carpeta)
+        return len(movidos)
+
     def _abrir_carpeta(self):
         car = self._car()
         if car is not None:
@@ -601,10 +1034,7 @@ class KeywordsWindow(QWidget):
             if fila < 0:
                 self._avisa(f"«{self.term}» no sale en tu narración: usa «⏵ Poner en el cabezal».")
                 return
-            self.p.lista_menciones.blockSignals(True)
-            self.p.lista_menciones.setCurrentRow(fila)
-            self.p.lista_menciones.blockSignals(False)
-            self.p._elegir_mencion(fila, buscar=False)
+            self.p.elegir_indice(fila, buscar=False)
             ok = self.p._poner_mis(rutas)
         self._avisa(self.p.aviso.text() or ("✓ Puesto en la línea de tiempo." if ok else ""))
 
@@ -678,42 +1108,18 @@ class KeywordsWindow(QWidget):
                 fallos += 1
         self.p.recalcular()
         self.refrescar()
-        self._avisa(f"🗑 Listo: {hechos} quitado(s)" + (f"; {fallos} no se pudieron (¿abiertos en otro programa?)"
-                                                       if fallos else "") + ".")
+        self._todo_al_dia()
+        self._avisa(f"🗑 Listo: {hechos} quitado(s)" + (f"; {fallos} no se pudieron: están abiertos en otro programa "
+                                                       "(ciérralo y vuelve a probar)" if fallos else "") + ".")
         return hechos
 
-    def borrar_todo_descargado(self, preguntar: bool = True) -> int:
-        """🧹 Todo lo bajado de internet, de todas las palabras, a la Papelera."""
-        from .clips_panel import _a_papelera
-        self.p._leer_carpetas()
-        rutas = []
-        for car in self.p.carpetas:
-            rutas += partes(car)[0]
-        if not rutas:
-            self._avisa("No hay nada descargado de internet en tus carpetas de palabras.")
-            return 0
-        if preguntar:
-            usados = self._usados(rutas)
-            r = QMessageBox.question(
-                self, "🧹 Borrar todo lo descargado",
-                f"¿Mandar a la Papelera los {len(rutas)} clips bajados de internet ({_mb(rutas):.0f} MB) de todas "
-                "tus palabras?\n\nLo de tu computadora no se toca. Se puede recuperar desde la Papelera."
-                + (f"\n⚠ {usados} están en tu proyecto: se quedarán sin archivo." if usados else ""),
-                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
-            if r != QMessageBox.Yes:
-                return 0
-        hechos = 0
-        for ruta in rutas:
-            try:
-                if _a_papelera(ruta):
-                    hechos += 1
-                    if os.path.isfile(creditos_de(ruta)):
-                        _a_papelera(creditos_de(ruta))
-            except Exception:  # noqa: BLE001
-                pass
-        self.p.recalcular()
+    def borrar_todo_descargado(self, preguntar: bool = True, sin_palabra: bool = False) -> int:
+        """🧹 Todo lo bajado de internet, de todas las palabras, a la Papelera (ver borrar_todo_descargado)."""
+        hechos = borrar_todo_descargado(self.p, self, preguntar, sin_palabra)
+        self._firma_vista = None
         self.refrescar()
-        self._avisa(f"🧹 {hechos} clip(s) descargado(s) a la Papelera.")
+        self._todo_al_dia()                    # (antes «Todo lo descargado» seguía enseñando lo ya borrado)
+        self._avisa(self.p.aviso.text())
         return hechos
 
     def borrar_palabra(self, preguntar: bool = True) -> bool:

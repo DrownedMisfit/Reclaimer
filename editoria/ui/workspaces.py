@@ -51,11 +51,15 @@ class Workspaces(QObject):
                                   "cambiar, se guarda lo que llevas y se abre el otro tal como lo dejaste.")
         self.bar.setTabToolTip(1, "Edits musicales (9:16) · Ctrl+2\nSu proyecto (y su Ctrl+Z) van aparte.")
         self.bar.setTabToolTip(2, "YouTube Shorts (9:16) · Ctrl+3\nSu proyecto (y su Ctrl+Z) van aparte.")
-        self.bar.setStyleSheet(
+        # (el subrayado de la pestaña activa es del color de acento elegido —antes, un naranja fijo—: la hoja se
+        #  rehace sola al cambiar el acento o el tema, ver diseno.poner_hoja)
+        from . import diseno as D
+        from . import theme as T
+        D.poner_hoja(self.bar, lambda: (
             "QTabBar#workspacetabs::tab { padding: 4px 14px; margin: 0 2px; color: #9da2ab; border: none; "
             "border-bottom: 2px solid transparent; background: transparent; }"
-            "QTabBar#workspacetabs::tab:selected { color: #f0f1f4; border-bottom: 2px solid #e8833a; }"
-            "QTabBar#workspacetabs::tab:hover:!selected { color: #d6d9df; }")
+            f"QTabBar#workspacetabs::tab:selected {{ color: #f0f1f4; border-bottom: 2px solid {T.ACCENT}; }}"
+            "QTabBar#workspacetabs::tab:hover:!selected { color: #d6d9df; }"))
         self._guard = False
         self.started = False                     # hasta start() (al abrir Reclaimer) no toca nada guardado
         self.stacks: dict = {}                   # historial de deshacer de cada pestaña (en memoria)
@@ -184,10 +188,11 @@ class Workspaces(QObject):
             return False
         # 🗂 biblioteca común: lo que tenías en Medios aquí también estará en la otra pestaña (el usuario: «cuando me
         # paso de Shorts a YouTube y ya tengo medios, esos no se trasladan»). Sin generadores ni clips compuestos:
-        # esos son de cada proyecto.
+        # esos son de cada proyecto. Tampoco los PNG propios de 🎬 Escenas (horneados y textos): son de sus escenas.
         p = self.ctrl.project
+        from ..core.escena_ajustes import es_propia as _de_escenas
         carry = [m for m in p.media.values() if not getattr(m, "gen", None) and m.id not in (p.compounds or {})
-                 and m.id not in self.ctrl.missing]
+                 and m.id not in self.ctrl.missing and not _de_escenas(m.path)]
         vaciadas = self._vaciadas()
         if p.media and self.current in vaciadas:       # (ya importaste algo aquí: vuelve a ser parte de la común)
             vaciadas.discard(self.current)

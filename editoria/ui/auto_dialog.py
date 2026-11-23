@@ -525,7 +525,10 @@ class AutoDialog(QDialog):
             if p.track(c.track_id).kind == TRACK_VIDEO:
                 used[c.media_id] = used.get(c.media_id, 0) + 1
         vol = ai.clip_vol.value() / 100
-        taken: dict = {}             # tramos ya usados: ningún trozo de archivo se repite en el video
+        # tramos ya usados: ningún trozo de archivo se repite en el video, ni el MISMO momento desde otro archivo
+        # (🧬 huella por plano, core/repetidos.Tomados; empieza con lo que ya sale en la línea de tiempo)
+        from ..core import repetidos
+        taken = repetidos.Tomados(p, getattr(self.ctrl, "missing", set()))
 
         und = ai.understanding_for_work()
 

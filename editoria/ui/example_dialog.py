@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdi
 from ..core import media as media_tools
 from ..core.model import KIND_IMAGE
 from . import help as help_ui
+from .theme import acento as _acento
 
 
 class _FrameView(QWidget):
@@ -182,7 +183,7 @@ class _Filmstrip(QWidget):
                 p.drawText(r.adjusted(4, 2, -4, -2), Qt.AlignTop | Qt.AlignRight, "✔")
             lv = self.level(_t) if self.level else 0.0
             if lv >= 0.15:      # cuánto se parece este fotograma a lo que buscas (franja naranja arriba)
-                p.fillRect(QRectF(r.left(), r.top(), r.width() * lv, 4), QColor(232, 116, 47, int(120 + 135 * lv)))
+                p.fillRect(QRectF(r.left(), r.top(), r.width() * lv, 4), _acento(int(120 + 135 * lv)))
         if not self.frames:
             p.setPen(QColor("#888"))
             p.drawText(self.rect(), Qt.AlignCenter, "Cargando fotogramas…")
@@ -229,7 +230,7 @@ class _MatchBar(QWidget):
                 b = (t + ts[k + 1]) / 2 if k + 1 < len(ts) else self.t_max
                 if lv >= 0.12:
                     p.fillRect(QRectF(self._x(a), 0, max(1.0, self._x(b) - self._x(a)), h),
-                               QColor(232, 116, 47, int(40 + 215 * float(lv))))
+                               _acento(int(40 + 215 * float(lv))))
             p.setPen(Qt.NoPen)
             p.setBrush(QColor("white"))
             for t in self.peaks:

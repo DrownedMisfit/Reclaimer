@@ -74,8 +74,8 @@ def main():
     pg._llenar_imagenes()
 
     # 2) Local / Internet con sus dos modos
-    assert [pg.sub_img.tabText(i) for i in range(pg.sub_img.count())] == ["🗂 Local", "🌐 Internet"]
-    assert [b.text() for b in pg._grupo_web.buttons()] == ["✂ PNG recortado", "🖼 Fondo"]
+    assert [pg.sub_img.tabText(i) for i in range(pg.sub_img.count())] == ["Local", "Internet"]
+    assert [b.text() for b in pg._grupo_web.buttons()] == ["PNG recortado", "Fondo"]
     assert pg._modo_web == "png"
     print("✓ Personajes: 🗂 Local y 🌐 Internet (✂ PNG recortado / 🖼 Fondo)")
 
@@ -192,14 +192,15 @@ def main():
     print(f"✓ visor: fondo nítido (contraste {contraste(nitida)}) y borroso ({contraste(borrosa)})")
     assert pg.aplicar() is not False
     app.processEvents()
-    fondos = [c for c in win.ctrl.project.clips.values() if c.media_id == fondo.id]
+    from editoria.core import escena_clip
+    pq = escena_clip.expandir(win.ctrl.project)        # (un clip de escena: lo desplegado es lo que se pinta)
+    fondos = [c for c in pq.clips.values() if c.media_id == fondo.id]
     assert len(fondos) == 1, fondos
     c = fondos[0]
     assert (c.fx or {}).get("blur"), "«Imagen borrosa» lleva desenfoque"
     assert c.layout and c.layout.get("fit") == "cover"
-    pistas = [win.ctrl.project.track_index(x.track_id) for x in win.ctrl.project.clips.values()
-              if x.media_id == persona.id]
-    assert pistas and all(i < win.ctrl.project.track_index(c.track_id) for i in pistas), "el fondo, detrás"
+    pistas = [pq.track_index(x.track_id) for x in pq.clips.values() if x.media_id == persona.id]
+    assert pistas and all(i < pq.track_index(c.track_id) for i in pistas), "el fondo, detrás"
     print("✓ al aplicar: clip de imagen que cubre el cuadro, borroso y detrás de los personajes")
     import json
     ruta = scenes.guardar_plantilla(pg.escena, win.ctrl.project, "con fondo")

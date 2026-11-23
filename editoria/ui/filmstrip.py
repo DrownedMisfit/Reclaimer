@@ -38,18 +38,27 @@ def sprite_path(path: str, duration: float) -> str:
     return got
 
 
+def sprite_filter(duration: float) -> str:
+    """El filtro de FFmpeg que hace la tira (también lo usa la lectura única)."""
+    step = interval_for(duration)
+    n = max(1, int(math.ceil((duration or 1) / step)) + 1)
+    return f"fps=1/{step:.4f},scale=-2:{TILE_H}:flags=fast_bilinear,tile={n}x1:padding=0:margin=0"
+
+
 def make_sprite(path: str, duration: float, cancelled=None) -> str | None:
     """Crea la tira (si no existe). Devuelve su ruta o None."""
     out = sprite_path(path, duration)
     if os.path.exists(out) and os.path.getsize(out) > 0:
         return out
-    step = interval_for(duration)
-    n = max(1, int(math.ceil((duration or 1) / step)) + 1)
+    from ..ai import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ai/lectura_unica.py)
+    if lectura_unica.usar(path, duration, "tira"):     # (solo la tira: que aparezca rápido; lo demás, la cola)
+        lectura_unica.asegurar_o_seguir(path, duration, ["tira"], cancelled, None, extras=[])
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
     args = [media_tools.ffmpeg(), "-nostdin", "-v", "error", "-y"]
     if (duration or 0) > LONG:
         args += ["-skip_frame", "nokey"]
-    args += ["-i", path, "-an", "-sn", "-dn", "-vf",
-             f"fps=1/{step:.4f},scale=-2:{TILE_H}:flags=fast_bilinear,tile={n}x1:padding=0:margin=0",
+    args += ["-i", path, "-an", "-sn", "-dn", "-vf", sprite_filter(duration),
              "-frames:v", "1", "-q:v", "5", out + ".tmp.jpg"]
     try:
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -115,7 +124,7 @@ class Filmstrips(QObject):
     def _next(self):
         if self._job is not None or not self._queue:
             return
-        from .jobs import BackgroundJob
+        from .cola_analisis import ALTA, cola
         m = self._queue.pop(0)
         self._job_media = m.id
         path, dur = m.path, m.duration
@@ -123,8 +132,6 @@ class Filmstrips(QObject):
         def work(progress, cancelled):
             progress(0.0, "🎞 Miniaturas de la línea de tiempo…")
             return make_sprite(path, dur, cancelled)
-        job = BackgroundJob(work)
-        self._job = job
 
         def done(res, mid=m.id, med=m):
             self._job = None
@@ -139,9 +146,11 @@ class Filmstrips(QObject):
             self._job = None
             self._failed.add(mid)
             self._next()
-        job.done.connect(done)
-        job.failed.connect(failed)
-        job.start()
+        # ◈ por la cola única, con prioridad ALTA (la estás viendo) y sin esperar hueco: aparece enseguida
+        self._job = cola().poner(work, "🎞 Miniaturas de la línea de tiempo", ALTA, clave=("tira", m.id),
+                                 pesado=False, al_terminar=done, al_fallar=failed)
+        if self._job is None:          # (la cola ya está cerrada: Reclaimer se está cerrando)
+            self._job_media = None
 
     def forget(self):
         self._strips.clear()

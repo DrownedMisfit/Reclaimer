@@ -8,6 +8,11 @@
   · renderizar(): compone cada fotograma (PIL/numpy) sobre VERDE puro y lo manda a FFmpeg por tubería → mp4 H.264.
     En la línea de tiempo va con la 🟩 Pantalla verde (core/chroma.py): se ve igual en el visor y al exportar.
   · Mis PNGTubers: modelos guardados en datos/pngtubers/<nombre>.json (rutas de las imágenes + ajustes).
+  · 😄 Reacciones a lo que dices (17/11): según la categoría de la palabra (core/categorias_palabras.PNGTUBER: saludos,
+    felicidad, sorpresa, tristeza, enojo, risa, despedida, duda…) el avatar saluda, salta de alegría, se sobresalta,
+    se encoge, tiembla… durante ~0,7–1,2 s: eventos_reaccion() + aplicar_reacciones() ponen en cada Estado un
+    desplazamiento, giro y escala (movimiento()); si el modelo tiene la imagen opcional de esa categoría
+    («r_feliz», «r_saludo»…), se usa esa imagen mientras dura.
 
 Sin Qt: lo usa la ventana ui/pngtuber_dialog.py y las pruebas.
 """
@@ -42,6 +47,25 @@ IMAGENES = [
 ]
 OBLIGATORIAS = tuple(k for k, _n, o, _d in IMAGENES if o)
 
+
+def _reacciones_tabla() -> list[dict]:
+    from . import categorias_palabras as CP
+    return CP.PNGTUBER
+
+
+# 😄 Las reacciones: (categoría, nombre, cómo se mueve, segundos) y su imagen opcional «r_<categoría>»
+REACCIONES = [(c["clave"], c["nombre"], c["reaccion"], float(c["dur"])) for c in _reacciones_tabla()]
+IMAGENES_REACCION = [("r_" + k, n) for k, n, _r, _d in REACCIONES]
+DESC_REACCION = {"saluda": "se balancea como quien saluda con la mano", "despide": "se balancea más, diciendo adiós",
+                 "feliz": "da dos saltos de alegría y se estira (con la imagen opcional, p. ej. con los brazos arriba)",
+                 "sobresalto": "pega un brinco y se agranda de golpe", "encoge": "se encoge y se hunde un poco",
+                 "tiembla": "tiembla de rabia", "rebote": "rebota rápido, como riéndose",
+                 "inclina": "inclina la cabeza, pensando", "asiente": "asiente (sube y baja)",
+                 "miedo": "tiembla y se hace pequeño", "late": "late como un corazón"}
+# Margen que dejan las reacciones alrededor del avatar (fracción de su alto): para saltar y girar sin cortarse
+REACC_ARRIBA = 0.18
+REACC_LADO = 0.22
+
 # Frecuencia de parpadeo: segundos entre parpadeos (al azar entre los dos)
 PARPADEO = {"nunca": None, "poco": (4.0, 8.0), "normal": (2.5, 6.0), "mucho": (1.5, 3.5)}
 DURACION_PARPADEO = 0.12
@@ -50,7 +74,7 @@ DUREZA = 2.0                 # (borde del PNG: 1 = tal cual; 2 = algo más firme
 SEMILLA = 7
 
 AJUSTES = {"sensibilidad": 0.5, "parpadeo": "normal", "rebote": True, "tamano": 0.35,
-           "posicion": "abajo_derecha"}
+           "posicion": "abajo_derecha", "reacciones": [k for k, _n, _r, _d in REACCIONES]}
 
 # Dónde va en pantalla
 POSICIONES = [("abajo_derecha", "↘ Abajo a la derecha"), ("abajo_izquierda", "↙ Abajo a la izquierda"),
@@ -63,6 +87,16 @@ class Estado(NamedTuple):
     ojos_cerrados: bool
     rebote_px: float = 0.0
     media_boca: bool = False      # (con boca_abierta: está solo a medio abrir)
+    # 😄 reacción (aplicar_reacciones): desplazamiento en fracciones del alto del avatar (dy > 0 = baja), giro en grados
+    # (positivo = a la derecha, como las agujas del reloj) alrededor de su base, escala, y la categoría que lo provoca
+    dx: float = 0.0
+    dy: float = 0.0
+    giro: float = 0.0
+    escala: float = 1.0
+    reaccion: str = ""
+
+    def movido(self) -> bool:
+        return abs(self.dx) > 1e-4 or abs(self.dy) > 1e-4 or abs(self.giro) > 0.05 or abs(self.escala - 1.0) > 1e-3
 
 
 # ---------------------------------------------------------------------------------------------- estados
@@ -149,7 +183,9 @@ def estados(peaks: np.ndarray, peak_rate: int, inicio: float, fin: float, sensib
 
 
 def imagen_para(e: Estado, tiene: set[str] | dict) -> str:
-    """Qué imagen del modelo toca en ese estado (según las que haya)."""
+    """Qué imagen del modelo toca en ese estado (según las que haya; la de la reacción, si la hay)."""
+    if e.reaccion and "r_" + e.reaccion in tiene:
+        return "r_" + e.reaccion
     if e.boca_abierta:
         if e.ojos_cerrados and "ojos_abierta" in tiene:
             return "ojos_abierta"
@@ -159,6 +195,94 @@ def imagen_para(e: Estado, tiene: set[str] | dict) -> str:
     if e.ojos_cerrados and "ojos" in tiene:
         return "ojos"
     return "cerrada"
+
+
+# ---------------------------------------------------------------------------------------------- 😄 reacciones
+def _suave(x: float) -> float:
+    x = min(1.0, max(0.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def _meseta(u: float, sube: float = 0.25, baja: float = 0.75) -> float:
+    """0 → 1 (suave) → se mantiene → 1 → 0: para gestos que se sostienen (encogerse, inclinar la cabeza)."""
+    if u < sube:
+        return _suave(u / sube)
+    if u < baja:
+        return 1.0
+    return _suave((1.0 - u) / (1.0 - baja))
+
+
+def movimiento(reaccion: str, u: float, dur: float = 1.0) -> tuple[float, float, float, float]:
+    """(dx, dy, giro, escala) de la reacción en el punto u (0 → 1) de su duración «dur» (s). dx/dy en fracciones del
+    alto del avatar (dy > 0 = baja); giro en grados alrededor de la base. Empieza y acaba en reposo."""
+    u = min(1.0, max(0.0, float(u)))
+    t = u * float(dur)
+    env = math.sin(math.pi * u)
+    p = _meseta(u)
+
+    def s2(f: float) -> float:
+        return math.sin(2 * math.pi * f)
+    if reaccion == "saluda":
+        return 0.0, -0.02 * env, 8.0 * s2(2.5 * u) * env, 1.0
+    if reaccion == "despide":
+        return 0.03 * s2(2.0 * u) * env, -0.02 * env, 11.0 * s2(2.0 * u) * env, 1.0
+    if reaccion == "feliz":                            # dos saltos de alegría, estirándose
+        h = abs(s2(u))
+        return 0.0, -0.15 * h, 0.0, 1.0 + 0.06 * h
+    if reaccion == "sobresalto":
+        pico = _suave(u / 0.2) if u < 0.2 else (1.0 - (u - 0.2) / 0.8) ** 2
+        return 0.0, -0.10 * pico, 1.5 * s2(9.0 * t) * pico, 1.0 + 0.08 * pico
+    if reaccion == "encoge":
+        return 0.0, 0.07 * p, -4.0 * p, 1.0 - 0.06 * p
+    if reaccion == "tiembla":
+        return 0.022 * s2(13.0 * t) * p, 0.0, 1.5 * s2(11.0 * t) * p, 1.0 + 0.03 * p
+    if reaccion == "rebote":
+        return 0.0, -0.045 * abs(s2(3.2 * t)) * env, 3.0 * s2(1.6 * t) * env, 1.0
+    if reaccion == "inclina":
+        return 0.015 * p, 0.0, 10.0 * p, 1.0
+    if reaccion == "asiente":
+        k = math.sin(3 * math.pi * u) ** 2
+        return 0.0, 0.035 * k, 0.0, 1.0 - 0.015 * k
+    if reaccion == "miedo":
+        return 0.012 * s2(17.0 * t) * p, 0.035 * p, 0.0, 1.0 - 0.05 * p
+    if reaccion == "late":
+        return 0.0, 0.0, 0.0, 1.0 + 0.08 * abs(s2(2.0 * u)) ** 3 * env
+    return 0.0, 0.0, 0.0, 1.0
+
+
+def eventos_reaccion(palabras: list, inicio_tl: float, n: int, activas=None, fps: float = 30.0,
+                     pausa: float = 0.15) -> list[dict]:
+    """Las reacciones del avatar: [{"cat", "reaccion", "palabra", "t", "a0", "largo", "i0", "i1", "dur"}] en
+    fotogramas del video del avatar (el fotograma 0 = el segundo «inicio_tl» de la línea de tiempo; n fotogramas).
+    palabras = [(inicio, fin, texto)] de la línea de tiempo; activas = las categorías encendidas (None = todas).
+    Empiezan un poco antes de la palabra y no se pisan: la que caería encima de otra se salta."""
+    from . import categorias_palabras as CP
+    cats = [c for c in CP.PNGTUBER if activas is None or c["clave"] in set(activas)]
+    if not cats or n <= 0:
+        return []
+    out, libre = [], -10 ** 9
+    for m in CP.detectar(palabras, cats):
+        c = CP.POR_CLAVE_PNGTUBER[m["cat"]]
+        a0 = int(round((float(m["t"]) - 0.08 - float(inicio_tl)) * fps))
+        largo = max(2, int(round(float(c["dur"]) * fps)))
+        if a0 + largo <= 0 or a0 >= n or a0 < libre:
+            continue
+        out.append({"cat": m["cat"], "reaccion": c["reaccion"], "palabra": CP.dicha(m), "t": float(m["t"]),
+                    "a0": a0, "largo": largo, "i0": max(0, a0), "i1": min(n, a0 + largo), "dur": float(c["dur"])})
+        libre = a0 + largo + int(round(pausa * fps))
+    return out
+
+
+def aplicar_reacciones(estados_: list[Estado], eventos: list[dict], fps: float = 30.0) -> list[Estado]:
+    """Los estados con las reacciones puestas (una lista nueva; la boca y el parpadeo siguen igual)."""
+    out = list(estados_)
+    for ev in eventos:
+        for i in range(max(0, ev["i0"]), min(len(out), ev["i1"])):
+            u = (i - ev["a0"]) / max(1, ev["largo"] - 1)
+            dx, dy, g, s = movimiento(ev["reaccion"], u, ev.get("dur", ev["largo"] / fps))
+            out[i] = out[i]._replace(dx=round(dx, 4), dy=round(dy, 4), giro=round(g, 2), escala=round(s, 4),
+                                     reaccion=ev["cat"])
+    return out
 
 
 # ---------------------------------------------------------------------------------------------- imágenes
@@ -247,9 +371,10 @@ def _cargar(rs: dict[str, str]) -> dict:
     return out
 
 
-def medida(modelo: dict, alto: int, rebote_px: float = 0.0) -> tuple[int, int, int, int]:
+def medida(modelo: dict, alto: int, rebote_px: float = 0.0, reacciones: bool = False) -> tuple[int, int, int, int]:
     """(ancho, alto) del video para que la imagen mida «alto» px (+ el margen de arriba del rebote) y (ancho, alto)
-    de la imagen dentro. Siempre pares (H.264 4:2:0)."""
+    de la imagen dentro. Siempre pares (H.264 4:2:0). Con reacciones, el video deja sitio arriba y a los lados para
+    saltar y girar (el avatar mide lo mismo)."""
     from PIL import Image
     with Image.open(rutas(modelo)["cerrada"]) as im:
         w0, h0 = im.size
@@ -257,22 +382,28 @@ def medida(modelo: dict, alto: int, rebote_px: float = 0.0) -> tuple[int, int, i
     ih = max(8, int(alto) - margen)
     iw = max(8, int(round(w0 * ih / h0)))
     W = iw + (iw % 2)
+    if reacciones:
+        margen = max(margen, int(math.ceil(REACC_ARRIBA * ih)))
+        W = iw + 2 * int(math.ceil(REACC_LADO * ih))
+        W += W % 2
     H = ih + margen
     H += H % 2
     return W, H, iw, ih
 
 
-def preparar(modelo: dict, alto: int, rebote_px: float = 0.0, verde: str = VERDE, dureza: float = DUREZA) -> dict:
+def preparar(modelo: dict, alto: int, rebote_px: float = 0.0, verde: str = VERDE, dureza: float = DUREZA,
+             reacciones: bool = False) -> dict:
     """Las imágenes ya a su tamaño final (premultiplicadas): {"W", "H", "iw", "ih", "capas": {clave: (rgb, a)}}.
     dureza > 1: el borde semitransparente se endurece (menos mezcla con el verde = sin halo al quitarlo)."""
     from PIL import Image
     rs = rutas(modelo)
     if any(k not in rs for k in OBLIGATORIAS):
         raise ValueError("Faltan imágenes: " + ", ".join(falta(modelo)))
-    W, H, iw, ih = medida(modelo, alto, rebote_px)
-    capas = {}
+    W, H, iw, ih = medida(modelo, alto, rebote_px, reacciones)
+    capas, pils = {}, {}
     for k, im in _cargar(rs).items():
         pm = im.convert("RGBa").resize((iw, ih), Image.LANCZOS)        # (sin bordes oscuros al encoger)
+        pils[k] = pm                                    # (para las reacciones: se gira y escala desde aquí)
         arr = np.asarray(pm, dtype=np.float32)
         rgb, a = arr[..., :3], arr[..., 3:4] / 255.0
         if dureza > 1.0:
@@ -280,16 +411,61 @@ def preparar(modelo: dict, alto: int, rebote_px: float = 0.0, verde: str = VERDE
             rgb = rgb / np.maximum(a, 1e-4) * a2          # (el color propio del borde, con el alfa nuevo)
             a = a2
         capas[k] = (rgb, a)
-    return {"W": W, "H": H, "iw": iw, "ih": ih, "capas": capas, "verde": np.array(_rgb(verde), np.float32)}
+    return {"W": W, "H": H, "iw": iw, "ih": ih, "capas": capas, "pil": pils, "dureza": float(dureza),
+            "verde": np.array(_rgb(verde), np.float32)}
 
 
-def componer(prep: dict, clave: str, subir: int = 0) -> np.ndarray:
-    """Un fotograma RGB uint8 (H, W, 3): la imagen «clave» sobre el verde, pegada abajo y subida «subir» px.
+def _pegar(out: np.ndarray, rgb: np.ndarray, a: np.ndarray, x: int, y: int) -> None:
+    """Pega (premultiplicado) en out con su esquina en (x, y); lo que se sale del lienzo se recorta."""
+    H, W = out.shape[:2]
+    h, w = a.shape[:2]
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(W, x + w), min(H, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return
+    zona = out[y0:y1, x0:x1]
+    sr, sa = rgb[y0 - y:y1 - y, x0 - x:x1 - x], a[y0 - y:y1 - y, x0 - x:x1 - x]
+    zona[:] = sr + zona * (1.0 - sa)
+
+
+def _transformada(prep: dict, clave: str, escala: float, giro: float):
+    """La imagen escalada y girada alrededor de su base (centro de abajo): (rgb, a, (x, y) de la base en ella)."""
+    from PIL import Image
+    pm = prep["pil"].get(clave) or prep["pil"]["cerrada"]
+    iw, ih = pm.size
+    sw, sh = max(1, int(round(iw * escala))), max(1, int(round(ih * escala)))
+    im = pm.resize((sw, sh), Image.BILINEAR) if (sw, sh) != (iw, ih) else pm
+    if abs(giro) > 0.05:
+        r = int(math.ceil(math.hypot(sw / 2.0, sh))) + 2
+        lienzo = Image.new("RGBa", (2 * r, 2 * r), (0, 0, 0, 0))
+        lienzo.paste(im, (r - sw // 2, r - sh))
+        im = lienzo.rotate(-giro, resample=Image.BICUBIC, center=(r, r))
+        base = (r, r)
+    else:
+        base = (sw // 2, sh)
+    arr = np.asarray(im, dtype=np.float32)
+    rgb, a = arr[..., :3], arr[..., 3:4] / 255.0
+    d = float(prep.get("dureza", DUREZA))
+    if d > 1.0:
+        a2 = np.clip((a - 0.5) * d + 0.5, 0.0, 1.0)
+        rgb = rgb / np.maximum(a, 1e-4) * a2
+        a = a2
+    return rgb, a, base
+
+
+def componer(prep: dict, clave: str, subir: int = 0, e: Estado | None = None) -> np.ndarray:
+    """Un fotograma RGB uint8 (H, W, 3): la imagen «clave» sobre el verde, pegada abajo (centrada) y subida «subir»
+    px; con «e» (un Estado con reacción), además desplazada, girada y escalada alrededor de su base.
     El borde ya viene algo endurecido de preparar() (DUREZA): el croma con CHROMA lo deja limpio, sin cerco."""
     W, H, iw, ih = prep["W"], prep["H"], prep["iw"], prep["ih"]
-    rgb, a = prep["capas"].get(clave) or prep["capas"]["cerrada"]
     out = np.empty((H, W, 3), np.float32)
     out[:] = prep["verde"]
+    if e is not None and e.movido() and "pil" in prep:
+        rgb, a, (bx, by) = _transformada(prep, clave, e.escala, e.giro)
+        px = W // 2 + int(round(e.dx * ih))
+        py = H - int(subir) + int(round(e.dy * ih))
+        _pegar(out, rgb, a, px - bx, py - by)
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+    rgb, a = prep["capas"].get(clave) or prep["capas"]["cerrada"]
     x = (W - iw) // 2
     y = max(0, H - ih - int(subir))
     zona = out[y:y + ih, x:x + iw]
@@ -307,7 +483,8 @@ def renderizar(modelo: dict, estados_: list[Estado], salida_mp4: str, tamano: in
     if "ojos" not in tiene:                       # sin «ojos cerrados» no parpadea
         tiene.pop("ojos_abierta", None)
     sube = max((e.rebote_px for e in estados_), default=0.0)
-    prep = preparar(modelo, int(tamano), sube, verde, dureza)
+    reacc = any(e.reaccion or e.movido() for e in estados_)
+    prep = preparar(modelo, int(tamano), sube, verde, dureza, reacciones=reacc)
     W, H = prep["W"], prep["H"]
     n = len(estados_)
     if n == 0:
@@ -325,10 +502,13 @@ def renderizar(modelo: dict, estados_: list[Estado], salida_mp4: str, tamano: in
         for i, e in enumerate(estados_):
             clave = imagen_para(e if "ojos" in tiene else e._replace(ojos_cerrados=False), tiene)
             k = (clave, int(round(e.rebote_px)))
-            fr = cache.get(k)
-            if fr is None:
-                fr = componer(prep, clave, k[1]).tobytes()
-                cache[k] = fr
+            if e.movido():                              # (😄 reacción: cada fotograma distinto, sin caché)
+                fr = componer(prep, clave, k[1], e).tobytes()
+            else:
+                fr = cache.get(k)
+                if fr is None:
+                    fr = componer(prep, clave, k[1]).tobytes()
+                    cache[k] = fr
             try:
                 proc.stdin.write(fr)
             except (BrokenPipeError, OSError):

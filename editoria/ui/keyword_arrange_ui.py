@@ -103,6 +103,7 @@ class KeywordArranger(QObject):
         self.tl.kw_kind_requested.connect(self._kind)
         self.tl.kw_arrange_requested.connect(self.arrange)
         self.tl.kw_menu_hook = self._options_menu
+        self.tl.kw_variants_hook = self._variants_menu      # (el menú del «+N» de la regla)
         self.ctrl.project_changed.connect(self._later)
         self.ctrl.transcript_changed.connect(lambda _m: (setattr(self, "_memo", None), self._later()))
         if _on(AJUSTE_FILA, False):
@@ -214,8 +215,22 @@ class KeywordArranger(QObject):
                           "manual": manual, "term": m["folder"], "avail": pool.available() if pool else ["none"]})
         self.tl.set_kw_marks(marks)
 
-    def _options_menu(self, menu):
-        """Opciones de la secuencia (en el clic derecho de un chip); se recuerdan."""
+    def _variants_menu(self, menu, m):
+        """«✂ Separar…» y «🔗 Unir con…» de la palabra de un chip: los del panel de palabras clave (misma mención,
+        mismo glosario). Si el panel aún no la tiene en su lista, solo con su nombre."""
+        panel = getattr(self.win, "clips", None)
+        if panel is None or not hasattr(panel, "_menu_variantes") or not m or not m.get("term"):
+            return
+        from ..ai import keyword_glossary as KG
+        k = KG.clave(m["term"])
+        mencion = next((x for x in (getattr(panel, "menciones", None) or []) if KG.clave(x["term"]) == k), None)
+        panel._menu_variantes(menu, mencion if mencion is not None else {"term": m["term"], "variantes": []})
+
+    def _options_menu(self, menu, m=None):
+        """Clic derecho de un chip: variantes de su palabra (si llega la mención) y opciones de la secuencia, que se
+        recuerdan."""
+        if m is not None:
+            self._variants_menu(menu, m)
         sub = menu.addMenu("Secuencia")
         for clave, texto in ((AJUSTE_ORDEN, "Seguir el orden de los archivos (01, 02…)"),
                              (AJUSTE_CONTEXTO, "Elegir el momento por lo que dices (con las huellas de la IA)"),

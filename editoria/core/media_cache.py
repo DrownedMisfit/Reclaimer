@@ -63,14 +63,17 @@ def delete(files) -> tuple[int, int]:
     """Borra esos archivos de la caché. (borrados, no se pudieron: p. ej. en uso)."""
     base = os.path.normcase(os.path.abspath(str(app_data_dir() / "cache")))
     ok = bad = 0
-    for f in files:
-        full = os.path.normcase(os.path.abspath(f))
-        if not full.startswith(base + os.sep):          # seguridad: solo dentro de datos/cache
-            bad += 1
-            continue
-        try:
-            os.remove(f)
-            ok += 1
-        except OSError:
-            bad += 1
+    files = list(files)
+    from .soltar_archivos import soltando
+    with soltando(files):           # (🔓 una copia ligera abierta en el visor se suelta antes: si no, «en uso»)
+        for f in files:
+            full = os.path.normcase(os.path.abspath(f))
+            if not full.startswith(base + os.sep):          # seguridad: solo dentro de datos/cache
+                bad += 1
+                continue
+            try:
+                os.remove(f)
+                ok += 1
+            except OSError:
+                bad += 1
     return ok, bad

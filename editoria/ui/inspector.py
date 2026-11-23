@@ -4,9 +4,9 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QCheckBox, QInputDialog, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QSlider,
-                               QTabWidget, QGroupBox, QHBoxLayout, QLabel,
-                               QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QStackedWidget,
+from PySide6.QtWidgets import (QCheckBox, QInputDialog, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout,
+                               QGroupBox, QHBoxLayout, QLabel,
+                               QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox,
                                QVBoxLayout, QWidget)
 
 import json
@@ -16,6 +16,7 @@ import numpy as np
 from ..core import equalizer as E
 from ..core import media as media_tools
 from ..core import transform
+from . import diseno as D
 from .eq_widget import EqGraph
 from .help import set_help
 from ..core.model import FORMATS, KIND_IMAGE, ORIGIN_AI, TRACK_AUDIO
@@ -33,6 +34,21 @@ def _dim(text=""):
     # Que un texto largo (p. ej. una ruta) nunca ensanche el panel
     label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     return label
+
+
+def _vd(lo, hi, paso, dec, unidad="", entero=False, **kw) -> D.ValorDeslizable:
+    """Un número del diseño (deslizador fino + número que se escribe o se arrastra) en lugar de un QSpinBox."""
+    return D.ValorDeslizable(lo, hi, paso, dec, unidad, entero=entero, **kw)
+
+
+def _fila(etiqueta: str, control, tip: str = "") -> D.FilaInspector:
+    """Fila etiqueta/control del diseño (la etiqueta gris en su columna fija)."""
+    if not isinstance(control, QWidget):          # (un layout: dentro de un widget)
+        w = QWidget()
+        control.setContentsMargins(0, 0, 0, 0)
+        w.setLayout(control)
+        control = w
+    return D.FilaInspector(etiqueta, control, tip)
 
 
 def _muestras_espectro(path: str, src: float):
@@ -64,18 +80,21 @@ class InspectorPanel(QWidget):
         self._spectrum_timer.setSingleShot(True)
         self._spectrum_timer.setInterval(350)
         self._spectrum_timer.timeout.connect(self._update_spectrum)
-        self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_project_page())
-        self.stack.addWidget(self._build_clip_page())
-        self.stack.addWidget(self._build_multi_page())
-        self.stack.addWidget(self._build_text_page())
-        self.eq_graph.installEventFilter(self)      # al mostrarse la gráfica del ecualizador, se calcula su espectro
-
+        self._trans_id: str | None = None           # 🎞 transición elegida en la línea de tiempo (clip de la derecha)
+        self._modo = "proyecto"                     # proyecto | clip | audio | texto | varios | transicion
+        self._pestana_codigo = False                # (el código cambia de pestaña: no cuenta como elección)
+        self.secciones: dict = {}                   # clave → Seccion
+        self._aplicados: dict = {}                  # efecto → su Seccion en la pestaña Efectos
+        self._build_project_page()
+        self._build_clip_page()
+        self._build_multi_page()
+        self._texto_tmp = self._build_text_page()   # (se guarda: lo que lleva pasa a sus secciones)
         # (sin desplazamiento propio: ya se desplaza todo el panel, a lo alto, y así nunca empuja ni aplasta la
         # timeline; una sola barra en vez de dos o tres, ↔ responsive)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 6, 0, 6)
-        lay.addWidget(self.stack)
+        self._componer()
+        self.eq_graph.installEventFilter(self)      # al mostrarse la gráfica del ecualizador, se calcula su espectro
+        self.stack = _PaginaCompat(self)            # (lo de antes: 0 proyecto · 1 clip · 2 varios · 3 texto)
+        self._un_paso_por_arrastre()                # (arrastrar un número = UN solo Ctrl+Z)
         ctrl.project_changed.connect(self._refresh)
         ctrl.media_changed.connect(self._refresh)
         if engine is not None:
@@ -84,37 +103,131 @@ class InspectorPanel(QWidget):
                                                     and self._clip() is not None and self._spectrum_timer.start()))
         self._refresh()
 
+    # -------------------------------------------------------------- arrastrar un número = un solo paso
+    def _un_paso_por_arrastre(self):
+        """Mientras arrastras el número o el deslizador de un ValorDeslizable se ve en vivo, pero todo el arrastre
+        es UN solo paso de deshacer (los cambios van dentro de un «macro» del historial que se cierra al soltar).
+        La velocidad, además, no se aplica hasta soltar (cada cambio rehace la pista con su ripple)."""
+        self._paso_abierto = False
+        self._vel_inicio = None
+        for vd in self.findChildren(D.ValorDeslizable):
+            if vd is self.speed:
+                continue
+            vd.antes_de_cambiar.connect(lambda vd=vd: self._abrir_paso(vd))
+            vd.arrastre.connect(lambda on: None if on else self._cerrar_paso())
+        self.speed.arrastre.connect(self._arrastre_velocidad)
+
+    def _abrir_paso(self, vd):
+        if self._paso_abierto or self._loading or not self._ids:
+            return
+        fila = vd.parentWidget()
+        while fila is not None and not isinstance(fila, D.FilaInspector):
+            fila = fila.parentWidget()
+        nombre = fila.etiqueta.text() if fila is not None else "valor"
+        self.ctrl.undo_stack.beginMacro(f"Ajustar {nombre.lower()}")
+        self._paso_abierto = True
+
+    def _cerrar_paso(self):
+        if not self._paso_abierto:
+            return
+        self._paso_abierto = False
+        st = self.ctrl.undo_stack
+        st.endMacro()
+        cmd = st.command(st.index() - 1)
+        if cmd is not None and cmd.childCount() == 0:   # (nada cambió de verdad: sin paso vacío)
+            st.undo()
+
+    def hideEvent(self, ev):                    # noqa: N802
+        self._cerrar_paso()                     # (oculto a mitad de arrastre: el paso de deshacer nunca queda abierto)
+        super().hideEvent(ev)
+
+    def _arrastre_velocidad(self, on: bool):
+        if on:
+            self._vel_inicio = self.speed.value()
+            return
+        inicio, self._vel_inicio = self._vel_inicio, None
+        if inicio is not None and self.speed.value() != inicio:
+            self._on_speed(speed=self.speed.value() / 100)
+
     # -------------------------------------------------------------- páginas
-    def _build_project_page(self) -> QWidget:
-        w = QWidget()
+    def _build_project_page(self):
+        """«Proyecto» (con nada elegido): formato, sonoridad, mezcla y música, narración y subtítulos."""
+        w = self._g_formato = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
         set_help(w, "proyecto")
-        title = QLabel("Proyecto")
-        title.setObjectName("title")
         self.project_name = _dim()
-        form = QFormLayout()
+        from . import diseno as D                   # (🎨 20/11: las filas del Inspector —misma columna de etiquetas—)
         self.format_combo = QComboBox()
         for key, (label, _w, _h) in FORMATS.items():
             self.format_combo.addItem(label, key)
         self.format_combo.currentIndexChanged.connect(self._on_format)
-        form.addRow("Tipo", self.format_combo)
         self.res_combo = QComboBox()
         for label, _w, _h in RESOLUTIONS:
             self.res_combo.addItem(label)
         self.fps_combo = QComboBox()
         for f in FPS_OPTIONS:
             self.fps_combo.addItem(f"{f:g} fps")
-        form.addRow("Resolución", self.res_combo)
-        form.addRow("Fotogramas", self.fps_combo)
         self.res_combo.currentIndexChanged.connect(self._on_res)
         self.fps_combo.currentIndexChanged.connect(self._on_fps)
+        for cb in (self.format_combo, self.res_combo, self.fps_combo):
+            D.alto_fijo(cb)
         self.project_stats = _dim()
-        lay.addWidget(title)
+        lay.setSpacing(D.px(D.M1))
         lay.addWidget(self.project_name)
-        lay.addLayout(form)
+        lay.addWidget(D.FilaInspector("Tipo", self.format_combo, "Para qué es el video (cambia su forma)"))
+        lay.addWidget(D.FilaInspector("Resolución", self.res_combo, "El tamaño en píxeles del video exportado"))
+        lay.addWidget(D.FilaInspector("Fotogramas", self.fps_combo, "Fotogramas por segundo del video exportado"))
         lay.addWidget(self.project_stats)
-        lay.addStretch()
+        # 📊 Sonoridad
+        g = self._g_sonoridad = QWidget()
+        v = QVBoxLayout(g)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.chk_loudnorm = QCheckBox("Normalizar a −14 LUFS al exportar")
+        self.chk_loudnorm.setToolTip("Al exportar, el volumen final se ajusta solo a −14 LUFS con el pico ≤ −1 dBTP "
+                                     "(lo que piden YouTube, TikTok e Instagram)")
+        self.chk_loudnorm.toggled.connect(lambda on: self._loading or self.ctrl.set_settings(loudnorm=bool(on)))
+        self.btn_lufs = QPushButton("Medir la sonoridad (LUFS)")
+        self.btn_lufs.setToolTip("Mide toda la mezcla (en segundo plano) y te dice cuántos dB subir o bajar; puedes "
+                                 "aplicarlo con un Ctrl+Z para deshacerlo (lo mismo que «LUFS» del visor)")
+        self.btn_lufs.clicked.connect(self._medir_lufs)
+        v.addWidget(self.chk_loudnorm)
+        v.addWidget(self.btn_lufs)
+        # 🎚 Mezcla y música · 🗣 Narración · ❞ Subtítulos (sus paneles completos, a un clic)
+        self.mezcla_info = _dim()
+        self.narracion_info = _dim()
+        self.chk_subs = QCheckBox("Subtítulos en el video")
+        self.chk_subs.setToolTip("Enciende o apaga los subtítulos del proyecto (su estilo, en el panel Subtítulos)")
+        self.chk_subs.toggled.connect(lambda on: self._loading or self.ctrl.set_subtitle_style(
+            "Subtítulos " + ("activados" if on else "desactivados"), enabled=bool(on)))
+        self._g_mezcla = self._caja_panel(self.mezcla_info, "Abrir Mezcla y música", "audio_mix",
+                                          "Música, bajar la música cuando hablas y la mezcla de la IA")
+        self._g_narracion = self._caja_panel(self.narracion_info, "Abrir Voz IA (narración)", "voz_ia",
+                                             "Narración con voz sintética o grabada")
+        self._g_subtitulos = self._caja_panel(self.chk_subs, "Abrir Subtítulos", "subtitles",
+                                              "Letra, colores, posición y animación de los subtítulos")
+
+    def _caja_panel(self, arriba: QWidget, texto: str, panel: str, tip: str) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(arriba)
+        b = QPushButton(texto)
+        b.setToolTip(tip)
+        b.clicked.connect(lambda: self._abrir_panel(panel))
+        v.addWidget(b)
         return w
+
+    def _abrir_panel(self, clave: str):
+        win = self.window()
+        d = (getattr(win, "docks", None) or {}).get(clave)
+        if d is not None and hasattr(win, "show_panel"):
+            win.show_panel(getattr(d, "panel", None) or d.widget())
+
+    def _medir_lufs(self):
+        lo = getattr(self.engine, "loudness", None)
+        if lo is not None:
+            lo.start(self.window())
 
     def _build_clip_page(self) -> QWidget:
         w = QWidget()
@@ -126,6 +239,7 @@ class InspectorPanel(QWidget):
         self.clip_origin.setWordWrap(True)
         info = QGroupBox("Información")
         form = QFormLayout(info)
+        form.setRowWrapPolicy(QFormLayout.WrapAllRows)     # (cada dato debajo de su nombre: nunca se corta)
         self.clip_file = _dim()
         self.clip_track = QLabel()
         self.clip_pos = QLabel()
@@ -139,14 +253,13 @@ class InspectorPanel(QWidget):
 
         props = QGroupBox("Ajustes")
         pform = QFormLayout(props)
-        self.volume = QSpinBox()
-        self.volume.setRange(0, 200)
-        self.volume.setSuffix(" %")
-        self.volume.setKeyboardTracking(False)
+        self.volume = _vd(0, 200, 1, 0, "%", entero=True)
+        self.volume.setToolTip("Volumen del clip (100 % = como se grabó)")
         self.volume.valueChanged.connect(self._on_volume)
         self.enabled = QCheckBox("Activo (se ve y se oye)")
         self.enabled.toggled.connect(self._on_enabled)
-        self.locked = QCheckBox("🔒 Bloqueado")
+        self.locked = QCheckBox("Bloqueado")
+        self.locked.setIcon(_glifo("🔒"))
         self.locked.setToolTip("Nadie, ni la IA, podrá modificar este clip hasta que lo desbloquees.")
         self.locked.toggled.connect(self._on_locked)
         pform.addRow(self.enabled)
@@ -155,17 +268,12 @@ class InspectorPanel(QWidget):
         # --- Velocidad (como «Cambiar velocidad del clip» de Resolve, tecla R) ---
         self.speed_box = QGroupBox("Velocidad")
         sl = QVBoxLayout(self.speed_box)
-        row = QHBoxLayout()
-        self.speed = QSpinBox()
-        self.speed.setRange(10, 400)
-        self.speed.setSingleStep(5)
-        self.speed.setSuffix(" %")
-        self.speed.setKeyboardTracking(False)
-        self.speed.setFixedWidth(78)
+        self.speed = _vd(10, 400, 5, 0, "%", entero=True)
         self.speed.setToolTip("100 % = normal · 50 % = cámara lenta · 200 % = el doble de rápido.\n"
                               "El clip se alarga o se acorta; su sonido vinculado también (sin voz de ardilla).")
-        self.speed.valueChanged.connect(lambda v: self._on_speed(speed=v / 100))
-        row.addWidget(self.speed)
+        self.speed.valueChanged.connect(lambda v: None if self.speed.arrastrando() else self._on_speed(speed=v / 100))
+        sl.addWidget(_fila("Velocidad", self.speed))
+        row = QHBoxLayout()
         for pct in (25, 50, 100, 200, 400):
             b = QPushButton(f"{pct}%")
             b.setMinimumWidth(44)                   # (no fijo: con letra grande, «400%» cabe entero)
@@ -182,26 +290,28 @@ class InspectorPanel(QWidget):
         r2.addWidget(self.reverse)
         r2.addWidget(self.ripple_speed)
         sl.addLayout(r2)
-        self.smooth = QCheckBox("✨ Cámara lenta suave (inventa fotogramas; exportar tarda más)")
-        self.smooth.setToolTip("Como el Speed Warp de Resolve: al exportar, los fotogramas que faltan se crean "
-                               "analizando el movimiento. Solo por debajo del 100 %.")
+        self.smooth = QCheckBox("Cámara lenta suave")
+        self.smooth.setToolTip("Inventa fotogramas (exportar tarda más). Como el Speed Warp de Resolve: al exportar, "
+                               "los fotogramas que faltan se crean analizando el movimiento. Solo por debajo del 100 %.")
         self.smooth.toggled.connect(lambda on: self._loading or (self._ids and self.ctrl.set_clip_props(
             self._targets(), "Cámara lenta suave", smooth=on)))
         sl.addWidget(self.smooth)
         rr = QHBoxLayout()
         self.ramp = QComboBox()
-        self.ramp.addItem("📈 Rampa de velocidad…", "")
+        self.ramp.addItem("Rampa de velocidad…", "")
         for key, (name, _f) in self.ctrl.RAMPS.items():
             self.ramp.addItem(name, key)
         self.ramp.setToolTip("Divide el clip en tramos que cambian de velocidad poco a poco (típico de los edits).")
         self.ramp.activated.connect(self._on_ramp)
-        self.btn_view_speed = QPushButton("▶ Ver cómo queda")
+        self.btn_view_speed = QPushButton("Ver cómo queda")
+        self.btn_view_speed.setIcon(D.icono("play"))
         self.btn_view_speed.setToolTip("Prepara unos segundos alrededor del cabezal tal como saldrán al exportar.")
         self.btn_view_speed.clicked.connect(self._view_here)
         rr.addWidget(self.ramp, 1)
         rr.addWidget(self.btn_view_speed)
         sl.addLayout(rr)
-        self.btn_freeze = QPushButton("❄ Congelar la imagen desde el cabezal (Mayús+R)")
+        self.btn_freeze = QPushButton("Congelar la imagen (Mayús+R)")
+        self.btn_freeze.setIcon(D.icono("snowflake"))
         self.btn_freeze.setToolTip("La imagen se queda quieta desde el cabezal hasta el final del clip; "
                                    "el sonido sigue igual.")
         self.btn_freeze.clicked.connect(lambda: self._ids and self.ctrl.freeze_frame(self.engine.time, self._ids[0]))
@@ -213,38 +323,27 @@ class InspectorPanel(QWidget):
         # --- Encuadre y zoom ---
         self.frame_box = QGroupBox("Encuadre y zoom")
         fl = QFormLayout(self.frame_box)
-        self.zoom = QSpinBox()
-        self.zoom.setRange(100, 600)
-        self.zoom.setSingleStep(10)
-        self.zoom.setSuffix(" %")
-        self.zoom.setKeyboardTracking(False)
-        self.fx = QSpinBox()
-        self.fx.setRange(0, 100)
-        self.fx.setSuffix(" %")
-        self.fx.setKeyboardTracking(False)
-        self.fy = QSpinBox()
-        self.fy.setRange(0, 100)
-        self.fy.setSuffix(" %")
-        self.fy.setKeyboardTracking(False)
+        self.zoom = _vd(100, 600, 10, 0, "%", entero=True)
+        self.zoom.setToolTip("Cuánto se acerca la imagen (100 % = sin zoom)")
+        self.fx = _vd(0, 100, 1, 0, "%", entero=True)
+        self.fx.setToolTip("Centro del zoom, de izquierda a derecha")
+        self.fy = _vd(0, 100, 1, 0, "%", entero=True)
+        self.fy.setToolTip("Centro del zoom, de arriba abajo")
         for spin in (self.zoom, self.fx, self.fy):
             spin.valueChanged.connect(self._on_framing)
-        center = QHBoxLayout()
-        center.addWidget(QLabel("X"))
-        center.addWidget(self.fx)
-        center.addWidget(QLabel("Y"))
-        center.addWidget(self.fy)
         self.kf_label = QLabel()
         self.kf_label.setObjectName("dim")
-        kb = QHBoxLayout()
-        self.btn_prev_kf = QPushButton("◀")
-        self.btn_prev_kf.setToolTip("Ir al fotograma clave anterior")
-        self.btn_add_kf = QPushButton("◆ Clave aquí")
+        kb = QHBoxLayout()                          # (si no caben, bajan de fila: responsive)
+        kb.setSpacing(D.px(D.M1))
+        self.btn_prev_kf = D.BotonIcono("chevron-left", "Ir al fotograma clave anterior")
+        self.btn_add_kf = QPushButton("Clave aquí")
+        self.btn_add_kf.setIcon(D.icono("diamond-plus"))
         self.btn_add_kf.setToolTip("Añade un fotograma clave en el cabezal: el zoom se animará "
                                    "suavemente entre las claves.")
-        self.btn_del_kf = QPushButton("✕ Clave")
+        self.btn_del_kf = QPushButton("Quitar clave")
+        self.btn_del_kf.setIcon(D.icono("diamond-minus"))
         self.btn_del_kf.setToolTip("Quita el fotograma clave que está justo en el cabezal")
-        self.btn_next_kf = QPushButton("▶")
-        self.btn_next_kf.setToolTip("Ir al fotograma clave siguiente")
+        self.btn_next_kf = D.BotonIcono("chevron-right", "Ir al fotograma clave siguiente")
         for b in (self.btn_prev_kf, self.btn_add_kf, self.btn_del_kf, self.btn_next_kf):
             kb.addWidget(b)
         self.btn_prev_kf.clicked.connect(lambda: self._jump_kf(-1))
@@ -259,11 +358,13 @@ class InspectorPanel(QWidget):
             self.layout_combo.addItem(name)
         self.layout_combo.currentTextChanged.connect(self._on_layout)
         self.curve_zoom = self._curve_combo("zoom")
-        fl.addRow("Zoom", self.zoom)
-        fl.addRow("Centro", center)
+        fl.addRow(D.TituloSeccion("Zoom con claves"))
+        fl.addRow(_fila("Zoom", self.zoom))
+        fl.addRow(_fila("Centro X", self.fx))
+        fl.addRow(_fila("Centro Y", self.fy))
         fl.addRow(kb)
         fl.addRow(self.kf_label, self.btn_reset_zoom)
-        fl.addRow("Curva", self.curve_zoom)
+        fl.addRow(_fila("Curva", self.curve_zoom))
         lay_row = QHBoxLayout()
         lay_row.addWidget(self.layout_combo, 1)
         self.btn_unstretch = QPushButton("Sin deformar")
@@ -272,19 +373,20 @@ class InspectorPanel(QWidget):
         self.btn_unstretch.clicked.connect(self._unstretch)
         self.btn_unstretch.hide()
         lay_row.addWidget(self.btn_unstretch)
-        fl.addRow("En pantalla", lay_row)
+        fl.addRow(_fila("En pantalla", lay_row))
         # 🎞 Posición y tamaño animados (como los fotogramas clave de «Transformar» en Resolve)
         lk = QHBoxLayout()
-        self.btn_prev_lk = QPushButton("◀")
-        self.btn_prev_lk.setToolTip("Ir a la clave de posición/tamaño anterior")
-        self.btn_add_lk = QPushButton("◆ Clave")
+        lk.setSpacing(D.px(D.M1))
+        self.btn_prev_lk = D.BotonIcono("chevron-left", "Ir a la clave de posición/tamaño anterior")
+        self.btn_add_lk = QPushButton("Clave")
+        self.btn_add_lk.setIcon(D.icono("diamond-plus"))
         self.btn_add_lk.setToolTip("Fotograma clave de POSICIÓN Y TAMAÑO en el cabezal (la primera activa la "
                                    "animación). Después mueve el cabezal y arrastra o escala la capa en el visor: "
                                    "cada cambio crea la clave de ese momento. Entre claves, movimiento suave.")
-        self.btn_del_lk = QPushButton("✕ Clave")
+        self.btn_del_lk = QPushButton("Quitar")
+        self.btn_del_lk.setIcon(D.icono("diamond-minus"))
         self.btn_del_lk.setToolTip("Quita la clave de posición/tamaño que está justo en el cabezal")
-        self.btn_next_lk = QPushButton("▶")
-        self.btn_next_lk.setToolTip("Ir a la clave de posición/tamaño siguiente")
+        self.btn_next_lk = D.BotonIcono("chevron-right", "Ir a la clave de posición/tamaño siguiente")
         self.btn_clear_lk = QPushButton("Quitar animación")
         self.btn_clear_lk.setToolTip("Se queda quieto con la posición y el tamaño del cabezal")
         for b in (self.btn_prev_lk, self.btn_add_lk, self.btn_del_lk, self.btn_next_lk):
@@ -299,28 +401,27 @@ class InspectorPanel(QWidget):
         self.curve_lk = self._curve_combo("layout")
         self.lk_label = QLabel()
         self.lk_label.setObjectName("dim")
-        fl.addRow("Posición y tamaño", lk)
+        fl.addRow(D.TituloSeccion("Posición y tamaño animados"))
+        fl.addRow(lk)
         fl.addRow(self.lk_label, self.btn_clear_lk)
-        fl.addRow("Curva", self.curve_lk)
+        fl.addRow(_fila("Curva", self.curve_lk))
         self.track_box = self._build_track_box("clip")      # 🎯 Seguimiento (en la pestaña Video)
 
         # --- Efectos (edits): destello, fundidos y temblor ---
         self.effects_box = QGroupBox("Efectos")
         ef = QFormLayout(self.effects_box)
-        self.fx_spins: dict[str, QDoubleSpinBox] = {}
+        self.fx_spins: dict[str, D.ValorDeslizable] = {}
+        self._fx_filas: dict[str, QWidget] = {}
         for key, label in (("flash", "Destello"), ("fade_in", "Fundido de entrada"),
                            ("fade_out", "Fundido de salida"), ("shake", "Temblor"),
                            ("lines", "Destello de líneas"), ("focus_in", "Entrar enfocando")):
-            spin = QDoubleSpinBox()
-            spin.setRange(0.0, {"lines": 0.5, "focus_in": 1.5}.get(key, 5.0))   # (⚡ y 🔍: cortos por naturaleza)
-            spin.setSingleStep(0.05)
-            spin.setDecimals(2)
-            spin.setSuffix(" s")
+            spin = _vd(0.0, {"lines": 0.5, "focus_in": 1.5}.get(key, 5.0), 0.05, 2, "s")   # (cortos por naturaleza)
             spin.setSpecialValueText("—")
-            spin.setKeyboardTracking(False)
+            spin.setToolTip(f"{label}: cuántos segundos dura (— = sin él)")
             spin.valueChanged.connect(lambda v, k=key: self._on_fx(k, v))
             self.fx_spins[key] = spin
-            ef.addRow(label, spin)
+            self._fx_filas[key] = _fila(label, spin)
+            ef.addRow(self._fx_filas[key])
         set_help(self.effects_box, "efectos")
 
         note_box = QGroupBox("Nota / instrucción")
@@ -333,76 +434,90 @@ class InspectorPanel(QWidget):
         nlay.addWidget(self.note)
         nlay.addWidget(save_note, alignment=Qt.AlignRight)
 
-        lay.addWidget(self.clip_title)
-        lay.addWidget(self.clip_origin)
-        self.clip_tabs = QTabWidget()
-        tab_clip = QWidget()
-        tl = QVBoxLayout(tab_clip)
-        tl.setContentsMargins(0, 6, 0, 0)
-        tl.addWidget(info)
-        tl.addWidget(props)
-        # 🐢 Velocidad: sección plegable como en Resolve (clic en su cabecera = se abre). Con sonido va debajo del
-        # ecualizador (pestaña Audio); sin sonido, aquí
-        from .tabs import Section
+        self._g_info, self._g_props, self._g_note = info, props, note_box
+        set_help(info, "clip")
         self.speed_box.setTitle("")
         self.speed_box.setFlat(True)
-        self.speed_sec = Section("🐢  Velocidad", self.speed_box, False, "secciones/inspector/velocidad")
-        self.speed_sec.head.setToolTip("Velocidad del clip (tecla R): porcentaje, marcha atrás, congelar imagen y "
-                                       "cámara lenta suave")
-        self._tl_clip = tl
-        tl.addWidget(self.speed_sec)
-        self._vel_en = tl
-        tl.addWidget(self._build_enhance_box())
-        tl.addWidget(self.effects_box)
-        tl.addWidget(note_box)
-        tl.addStretch()
-        tab_video = QWidget()
-        tv = QVBoxLayout(tab_video)
-        tv.setContentsMargins(0, 6, 0, 0)
         from .transform_box import TransformBox
         self.transform_box = TransformBox(self)       # ⤧ Tamaño, posición, rotación, voltear y relleno, a la mano
-        tv.addWidget(self.transform_box)
-        tv.addWidget(self.frame_box)
-        tv.addWidget(self.track_box)
         from ..core.curves import BLEND_MODES
         self.blend_box = QGroupBox("Opacidad y modo de fusión")
         bf = QFormLayout(self.blend_box)
-        orow = QHBoxLayout()
-        self.opacity = QSlider(Qt.Horizontal)
-        self.opacity.setRange(0, 100)
-        self.opacity_val = QLabel("100 %")
-        self.opacity_val.setFixedWidth(46)
+        self.opacity = _vd(0, 100, 1, 0, "%", entero=True)
+        self.opacity.setToolTip("Cuánto se ve el clip (0 % = transparente)")
         self.opacity.valueChanged.connect(self._on_opacity)
-        orow.addWidget(self.opacity, 1)
-        orow.addWidget(self.opacity_val)
-        bf.addRow("Opacidad", orow)
+        bf.addRow(_fila("Opacidad", self.opacity))
         self.blend_combo = QComboBox()
         for key, name, _f, _q in BLEND_MODES:
             self.blend_combo.addItem(name, key)
         self.blend_combo.currentIndexChanged.connect(self._on_blend)
-        bf.addRow("Fusión", self.blend_combo)
+        bf.addRow(_fila("Fusión", self.blend_combo, "Cómo se mezcla con lo de debajo"))
         self.op_kf_info = _dim()
         self.op_kf_info.setWordWrap(True)
         bf.addRow(self.op_kf_info)
         set_help(self.blend_box, "fusion")
-        tv.addWidget(self.blend_box)
-        tv.addStretch()
-        set_help(tab_clip, "clip")
         set_help(self.frame_box, "encuadre")
-        self.clip_tabs.addTab(tab_clip, "Clip")
-        self.clip_tabs.addTab(tab_video, "Video")
-        self.clip_tabs.addTab(self._build_audio_tab(), "Audio")
-        self.clip_tabs.addTab(self._build_color_tab(), "Color")
-        self.clip_tabs.currentChanged.connect(lambda i: setattr(self, "_last_tab", i))
-        self._last_tab = 0
-        # Cada grupo (Información, Ajustes, Mejorar imagen, Efectos…) detrás de su título: un clic lo abre; se recuerda
-        from .tabs import plegar_grupos
-        for i in range(self.clip_tabs.count()):
-            plegar_grupos(self.clip_tabs.widget(i), "secciones/inspector",
-                          abiertas=("Información", "Ajustes", "Ecualizador", "Texto"))
-        lay.addWidget(self.clip_tabs)
-        lay.addStretch()
+        # ✂ Recorte (como el «Recorte» de DaVinci): lo mismo que «Recortar» en el visor, con números
+        self.crop_box = QGroupBox()                  # (un grupo, como las demás secciones: misma sangría)
+        cf = QFormLayout(self.crop_box)
+        self.crop_spins: dict = {}
+        for k, nombre in (("l", "Izquierda"), ("r", "Derecha"), ("t", "Arriba"), ("b", "Abajo")):
+            sp = _vd(0.0, 98.0, 1.0, 1, "%")
+            sp.setToolTip(f"Cuánto se recorta por {nombre.lower()} (también con «Recortar» en el visor)")
+            sp.valueChanged.connect(lambda v, kk=k: self._on_crop(kk, v))
+            self.crop_spins[k] = sp
+            cf.addRow(_fila(nombre, sp))
+        # 🌗 Suavizar bordes (22/11, la «Softness» de Resolve): el borde de lo que se ve se desvanece a transparente
+        tip_sv = ("El borde de la imagen (o lo recortado) se desvanece a transparente en vez de un corte seco; también "
+                  "sin recorte.\n0 = corte seco · al activarlo, un 5 % del lado corto.\nCon bordes suaves el "
+                  "contorno de color no se pinta (vuelve al quitarlo) y la sombra sigue la forma desvanecida.")
+        self.suave_on = QCheckBox("")
+        self.suave_on.setToolTip(tip_sv)
+        self.suave_on.toggled.connect(self._on_suave_on)
+        self.suave_val = _vd(0.0, 50.0, 0.5, 1, "%")
+        self.suave_val.setToolTip(tip_sv)
+        self.suave_val.valueChanged.connect(self._on_suave)
+        fila_sv = QWidget()
+        hl_sv = QHBoxLayout(fila_sv)
+        hl_sv.setContentsMargins(0, 0, 0, 0)
+        hl_sv.addWidget(self.suave_on)
+        hl_sv.addWidget(self.suave_val, 1)
+        cf.addRow(_fila("Suavizar bordes", fila_sv, tip_sv))
         return w
+
+    def _on_suave_on(self, on: bool):
+        if self._loading:
+            return
+        from ..core import decor
+        v = (self.suave_val.value() or decor.SUAVIZAR_DEFECTO * 100) if on else 0.0
+        self._loading = True
+        self.suave_val.setValue(v)
+        self._loading = False
+        self._on_suave(v)
+
+    def _on_suave(self, v: float):
+        """🌗 fx["suavizar"] (fracción del lado corto) en los clips de imagen/video elegidos. Arrastrar = un paso."""
+        if self._loading or not self._ids:
+            return
+        p = self.ctrl.project
+        ids = []
+        for cid in self._ids:
+            c = p.clips.get(cid)
+            m = p.media_of(c) if c is not None else None
+            if c is not None and c.text is None and m is not None and m.kind in ("video", "image"):
+                ids.append(cid)
+        for cid in ids:
+            c = p.clips[cid]
+            fx = dict(c.fx or {})
+            if v > 0:
+                fx["suavizar"] = round(float(v) / 100, 4)
+            else:
+                fx.pop("suavizar", None)
+            self.ctrl.set_clip_props([cid], "🌗 Suavizar bordes", fx=fx or None)
+        if self.suave_on.isChecked() != (v > 0):
+            self._loading = True
+            self.suave_on.setChecked(v > 0)
+            self._loading = False
 
     def _build_color_tab(self) -> QWidget:
         """Pestaña «Color» (como la página Color de Resolve, en sencillo). Se ve igual en el visor y al exportar."""
@@ -417,54 +532,51 @@ class InspectorPanel(QWidget):
         for k_, wh in self.color_wheels.items():
             wh.changed.connect(lambda v, kk=k_: self._on_color_wheel(kk, v))
         form.addRow(wbox)
-        self.color_sliders: dict[str, QSlider] = {}
-        self.color_values: dict[str, QLabel] = {}
+        form.addRow(D.TituloSeccion("Ajustes"))
+        self.color_sliders: dict[str, D.ValorDeslizable] = {}
         for k in C.KEYS:
-            row = QHBoxLayout()
-            sl = QSlider(Qt.Horizontal)
             lo, hi = C.RANGES.get(k, (-1.0, 1.0))
-            sl.setRange(int(lo * 100), int(hi * 100))
-            sl.setSingleStep(2)
-            sl.setPageStep(10)
-            val = QLabel("0")
-            val.setFixedWidth(42)
-            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            # (el valor, en centésimas como antes —40 = +0,40—; se ve con dos decimales)
+            sl = _vd(int(lo * 100), int(hi * 100), 2, 2, "", entero=True, factor=100, signo=True)
             sl.valueChanged.connect(lambda v, kk=k: self._on_color_slider(kk, v))
-            sl.setToolTip("Doble clic en el número = volver a 0")
-            row.addWidget(sl, 1)
-            row.addWidget(val)
-            self.color_sliders[k], self.color_values[k] = sl, val
-            form.addRow(C.LABELS[k], row)
+            nombre, _p, resto = C.LABELS[k].partition(" (")
+            sl.setToolTip(f"{nombre}{(': ' + resto.rstrip(')')) if resto else ''} (0 = sin cambio; arrastra el "
+                          "número o escríbelo)")
+            self.color_sliders[k] = sl
+            form.addRow(_fila(nombre, sl))
+        form.addRow(D.TituloSeccion("LUT"))
         lr = QHBoxLayout()
-        self.btn_lut = QPushButton("🎨 Cargar LUT (.cube)…")
+        self.btn_lut = QPushButton("Cargar LUT (.cube)…")
         self.btn_lut.setToolTip("Un «look» de color en formato .cube (los de Resolve, Premiere, cámaras…)")
         self.btn_lut.clicked.connect(self._choose_lut)
-        self.lut_name = _dim()
-        self.btn_lut_off = QPushButton("✕")
-        self.btn_lut_off.setFixedWidth(30)
-        self.btn_lut_off.setToolTip("Quitar el LUT")
+        self.lut_name = D.EtiquetaElidida("sin LUT")     # (una línea: si no cabe, «…» y entero en su tooltip)
+        D.poner_letra(self.lut_name, D.LETRA_P, D.GRIS_TITULO)
+        self.btn_lut_off = D.BotonIcono("x", "Quitar el LUT")
         self.btn_lut_off.clicked.connect(lambda: self._set_color_field(lut=None))
-        lr.addWidget(self.btn_lut)
+        lr = D.fila_fija(lr)                         # (el nombre del LUT y su ✕; el botón, en su propia fila)
         lr.addWidget(self.lut_name, 1)
         lr.addWidget(self.btn_lut_off)
+        form.addRow(self.btn_lut)
         form.addRow(lr)
-        mr = QHBoxLayout()
-        self.lut_mix = QSlider(Qt.Horizontal)
-        self.lut_mix.setRange(0, 100)
+        self.lut_mix = _vd(0, 100, 1, 0, "%", entero=True)
+        self.lut_mix.setToolTip("Cuánto se nota el LUT (100 % = entero)")
         self.lut_mix.valueChanged.connect(lambda v: self._loading or self._set_color_field(lut_mix=v / 100))
-        mr.addWidget(self.lut_mix)
-        form.addRow("Intensidad del LUT", mr)
+        form.addRow(_fila("Intensidad", self.lut_mix))
         br = QHBoxLayout()
-        self.btn_auto_color = QPushButton("✨ Color automático")
+        self.btn_auto_color = QPushButton("Color automático")
+        self.btn_auto_color.setIcon(D.icono("wand-sparkles"))
         self.btn_auto_color.setToolTip("Corrige exposición, contraste y balance de blancos mirando el fotograma "
                                        "del cabezal (suave: nunca exagera).")
         self.btn_auto_color.clicked.connect(lambda: self._ids and self.ctrl.auto_color(self._ids, self.engine.time))
-        b_reset = QPushButton("↺ Restablecer")
+        b_reset = QPushButton("Restablecer")
+        b_reset.setIcon(D.icono("rotate-ccw"))
+        b_reset.setToolTip("Quita toda la corrección de color del clip (Ctrl+Z lo deshace)")
         b_reset.clicked.connect(lambda: self._ids and self.ctrl.set_color(self._ids, None, "Quitar color"))
         br.addWidget(self.btn_auto_color)
         br.addWidget(b_reset)
         form.addRow(br)
-        self.color_bypass = QCheckBox("👁 Ver sin corrección (comparar antes / después)")
+        self.color_bypass = QCheckBox("Ver sin corrección")
+        self.color_bypass.setToolTip("Comparar antes / después: el visor enseña el clip sin la corrección de color")
         self.color_bypass.toggled.connect(self._on_color_bypass)
         form.addRow(self.color_bypass)
         self.color_box.setToolTip("Para repetir el color en otros clips: Ctrl+C en este y Alt+V en los otros → "
@@ -475,7 +587,6 @@ class InspectorPanel(QWidget):
         return w
 
     def _on_opacity(self, v: int):
-        self.opacity_val.setText(f"{v} %")
         if self._loading or not self._ids:
             return
         self.ctrl.set_curve(self._ids[0], "op", level=v / 100, text="Opacidad")
@@ -491,7 +602,6 @@ class InspectorPanel(QWidget):
             return
         self.blend_box.setEnabled(editable)
         self.opacity.setValue(int(round(c.opacity * 100)))
-        self.opacity_val.setText(f"{int(round(c.opacity * 100))} %")
         i = self.blend_combo.findData(c.blend or "normal")
         self.blend_combo.setCurrentIndex(max(0, i))
         self.op_kf_info.setText(f"〰 Curva de opacidad con {len(c.op_kf)} puntos (edítala con «〰 Curvas» en la "
@@ -503,7 +613,6 @@ class InspectorPanel(QWidget):
         return dict((c.color if c else None) or {})
 
     def _on_color_slider(self, key: str, v: int):
-        self.color_values[key].setText(f"{v / 100:+.2f}" if v else "0")
         if self._loading or not self._ids:
             return
         col = self._color_now()
@@ -562,35 +671,25 @@ class InspectorPanel(QWidget):
         for k, sl in self.color_sliders.items():
             v = int(round(float(col.get(k, 0) or 0) * 100))
             sl.setValue(v)
-            self.color_values[k].setText(f"{v / 100:+.2f}" if v else "0")
         for k, wh in self.color_wheels.items():
             wh.set_values(*C.wheel(col, k))
         lut = col.get("lut")
         self.lut_name.setText(os.path.basename(lut) if lut else "sin LUT")
-        self.lut_name.setToolTip(lut or "")
+        self.lut_name.poner_tooltip_extra(lut or "")
         self.btn_lut_off.setEnabled(bool(lut))
         self.lut_mix.setEnabled(bool(lut))
         self.lut_mix.setValue(int(round(float(col.get("lut_mix", 1.0)) * 100)))
 
-    def _build_audio_tab(self) -> QWidget:
+    def _build_audio_tab(self):
         w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 6, 0, 0)
-        top = QFormLayout()
-        top.addRow("Volumen", self.volume)
-        self.pan = QSlider(Qt.Horizontal)
-        self.pan.setRange(-100, 100)
-        self.pan.setToolTip("Balance: izquierda ← → derecha (doble clic en la etiqueta = centro)")
-        self.pan_label = QLabel("C")
-        self.pan_label.setFixedWidth(34)
+        top = QFormLayout(w)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addRow(_fila("Volumen", self.volume))
+        self.pan = _vd(-100, 100, 1, 0, "", entero=True,
+                       formato=lambda v: "C" if v == 0 else (f"I{-v}" if v < 0 else f"D{v}"))
+        self.pan.setToolTip("Balance: izquierda (−) ← → derecha (+); 0 = centro")
         self.pan.valueChanged.connect(self._on_pan)
-        prow = QHBoxLayout()
-        prow.addWidget(QLabel("I"))
-        prow.addWidget(self.pan, 1)
-        prow.addWidget(QLabel("D"))
-        prow.addWidget(self.pan_label)
-        top.addRow("Balance", prow)
-        lay.addLayout(top)
+        top.addRow(_fila("Balance", self.pan))
 
         set_help(w, "audio_clip")
         box = QGroupBox("Ecualizador")
@@ -659,7 +758,8 @@ class InspectorPanel(QWidget):
             grid.addWidget(lbl, row, E.N_BANDS)
         bl.addLayout(grid)
         brow = QHBoxLayout()
-        self.btn_monitor = QPushButton("🎧 Escuchar con EQ")
+        self.btn_monitor = QPushButton("Escuchar con EQ")
+        self.btn_monitor.setIcon(D.icono("headphones"))
         self.btn_monitor.setCheckable(True)
         self.btn_monitor.setToolTip("Repite en bucle unos segundos del cabezal con el ecualizador y se "
                                     "actualiza al momento cuando cambias algo.")
@@ -676,22 +776,19 @@ class InspectorPanel(QWidget):
         bl.addLayout(brow)
         self.monitor_status = _dim()
         bl.addWidget(self.monitor_status)
-        lay.addWidget(box)
-        self._audio_lay = lay                       # (🐢 Velocidad se coloca aquí, debajo del ecualizador)
-        lay.addStretch()
-        return w
+        box.setTitle("")
+        box.setFlat(True)
+        self._g_volumen, self._g_eq = w, box
 
     def _colocar_velocidad(self, con_sonido: bool):
-        """🐢 Con sonido: debajo del ecualizador (pestaña Audio); sin sonido: en la pestaña Clip."""
+        """🐢 Con sonido: debajo del ecualizador (pestaña Audio); sin sonido: en Video, tras Composición."""
         destino = self._audio_lay if con_sonido else self._tl_clip
         if getattr(self, "_vel_en", None) is destino:
             return
         if getattr(self, "_vel_en", None) is not None:
             self._vel_en.removeWidget(self.speed_sec)
-        if con_sonido:
-            destino.insertWidget(destino.count() - 1, self.speed_sec)     # (antes del estirable del final)
-        else:
-            destino.insertWidget(2, self.speed_sec)                       # (tras la información del clip)
+        tras = self.secciones["ecualizador"] if con_sonido else self.secciones["composicion"]
+        destino.insertWidget(destino.indexOf(tras) + 1, self.speed_sec)
         self._vel_en = destino
 
     def set_monitor(self, monitor):
@@ -782,7 +879,6 @@ class InspectorPanel(QWidget):
                 self._fill_presets()
 
     def _on_pan(self, v: int):
-        self.pan_label.setText("C" if v == 0 else (f"I{-v}" if v < 0 else f"D{v}"))
         c = self._aclip()
         if c is not None and not self._loading:
             self.ctrl.set_clip_audio([c.id], "Balance", pan=v / 100)
@@ -811,15 +907,44 @@ class InspectorPanel(QWidget):
             for wid in (typ, freq, gain, q):
                 wid.setEnabled(bool(b.get("on")))
         self.pan.setValue(int(round(c.pan * 100)))
-        self.pan_label.setText("C" if not c.pan else (f"I{-round(c.pan * 100)}" if c.pan < 0 else f"D{round(c.pan * 100)}"))
         n_same = sum(1 for o in self.ctrl.project.clips.values() if o.media_id == c.media_id)
         self.btn_eq_all.setVisible(n_same > 1)
         self.btn_eq_all.setText(f"Aplicar a los {n_same} clips de este archivo")
         if self._spectrum_key != (c.id, round(self._now(), 1)) and self.eq_graph.isVisible():
             self._spectrum_timer.start()
 
+    def _pestanas_que_caben(self):
+        """Las 7 pestañas en una fila: si no caben con su nombre, «Proyecto» (la última) se queda en su icono, con el
+        nombre en el tooltip (nada cortado ni una fila de más)."""
+        from . import diseno as D
+        bots = getattr(self, "botones_pestana", [])
+        if not bots:
+            return
+        b = bots[-1]
+        if not hasattr(b, "_nombre"):
+            b._nombre = b.text()
+            b._tip = b.toolTip()
+        lay = self.fila_pestanas.layout()
+        visibles = [x for x in bots if not x.isHidden()]
+        fm = b.fontMetrics()
+        lleno = sum(fm.horizontalAdvance(x._nombre if x is b else x.text()) + 12 for x in visibles) + \
+            lay.spacing() * max(0, len(visibles) - 1)
+        icono_solo = lleno > self.fila_pestanas.width()
+        if icono_solo and b.text():
+            b.setText("")
+            b.setIcon(D.icono("settings-2"))
+            b.setToolTip(f"{b._nombre}: {b._tip}")
+        elif not icono_solo and not b.text():
+            b.setText(b._nombre)
+            from PySide6.QtGui import QIcon
+            b.setIcon(QIcon())
+            b.setToolTip(b._tip)
+
     def eventFilter(self, obj, ev):
         from PySide6.QtCore import QEvent
+        if obj is getattr(self, "fila_pestanas", None) and ev.type() == QEvent.Resize:
+            self._pestanas_que_caben()
+            return False
         if obj is self.eq_graph and ev.type() == QEvent.Show and self._clip() is not None:
             self._spectrum_key = None                  # se acaba de mostrar: el espectro se calcula ahora
             self._spectrum_timer.start()
@@ -880,33 +1005,34 @@ class InspectorPanel(QWidget):
         lay.addWidget(self.text_origin)
         lay.addWidget(self.text_edit)
         from .spellcheck import attach as _spell
-        lay.addWidget(_spell(self.text_edit))          # ✍ ortografía (español de México / inglés / mixto)
+        self._spell_w = _spell(self.text_edit)          # ✍ ortografía (español de México / inglés / mixto)
+        lay.addWidget(self._spell_w)
         self.tw: dict = {}            # clave → (widget, cómo poner su valor)
 
         def reset_btn(keys):
-            b = QToolButton()
-            b.setText("↺")
+            b = QToolButton()                       # (↺ con su icono monocromo; plano, como los de las secciones)
+            b.setIcon(D.icono("rotate-ccw"))
             b.setToolTip("Volver al valor de fábrica")
+            b.setAccessibleName("Volver al valor de fábrica")
             b.setAutoRaise(True)
             b.clicked.connect(lambda: self._set_text(**{k: FACTORY[k] for k in keys}))
             return b
 
-        def row(form, label, widget, keys):
-            h = QHBoxLayout()
-            h.setProperty("responsive_no_baja", True)   # (el ↺ siempre al lado de su campo, que se estrecha)
+        def row(form, label, widget, keys, extra=None):
+            """(diseño nuevo: la etiqueta gris en su columna, el control y su ↺ al lado, que nunca baja de fila)"""
+            h = D.fila_fija(QHBoxLayout())
             h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(D.px(D.M1))
             h.addWidget(widget, 1)
+            if extra is not None:
+                h.addWidget(extra)
             h.addWidget(reset_btn(keys))
             holder = QWidget()
             holder.setLayout(h)
-            form.addRow(label, holder)
+            form.addRow(D.FilaInspector(label, holder))
 
-        def spin(key, lo, hi, step, suffix="", dec=1, scale=1.0):
-            sp = QDoubleSpinBox()
-            sp.setRange(lo, hi)
-            sp.setSingleStep(step)
-            sp.setDecimals(dec)
-            sp.setSuffix(suffix)
+        def spin(key, lo, hi, step, suffix="", dec=1, scale=1.0, deslizador=True):
+            sp = D.ValorDeslizable(lo, hi, step, dec, suffix.strip(), deslizador=deslizador)
             sp.valueChanged.connect(lambda v, k=key: self._set_text(**{k: round(v / scale, 4)}))
             self.tw[key] = (sp, lambda v, sp=sp: sp.setValue(float(v) * scale))
             return sp
@@ -986,9 +1112,12 @@ class InspectorPanel(QWidget):
         row(f, "Mayús./Minús.", self.text_case, ["case"])
         al = QHBoxLayout()
         self._align_btns = {}
-        for key, txt in (("left", "⯇ Izq."), ("center", "≡ Centro"), ("right", "Der. ⯈")):
+        for key, ic, txt in (("left", "align-left", "Izquierda"), ("center", "align-center", "Centro"),
+                             ("right", "align-right", "Derecha")):
             tb = QToolButton()
-            tb.setText(txt)
+            tb.setIcon(D.icono(ic))
+            tb.setToolTip(txt)
+            tb.setAccessibleName(txt)
             tb.setCheckable(True)
             tb.clicked.connect(lambda _=False, k=key: self._set_text(align=k))
             self._align_btns[key] = tb
@@ -998,46 +1127,39 @@ class InspectorPanel(QWidget):
         ha.setLayout(al)
         self.tw["align"] = (ha, lambda v: [b.setChecked(k == v) for k, b in self._align_btns.items()])
         row(f, "Justificado", ha, ["align"])
+        self._g_txt_fuente = g
+        g = QGroupBox("Posición")                    # (en su propia sección, como en DaVinci)
+        f = QFormLayout(g)
         self.text_pos = QComboBox()
         self.text_pos.addItem("Personalizada")
         for name, _x, _y in self.TEXT_POSITIONS:
             self.text_pos.addItem(name)
         self.text_pos.currentTextChanged.connect(self._on_text_pos)
         row(f, "Posición", self.text_pos, ["x", "y"])
-        xy = QHBoxLayout()
-        self.text_x = QDoubleSpinBox()
-        self.text_y = QDoubleSpinBox()
+        self.text_x = D.ValorDeslizable(-100000, 100000, 1, 0, "px", deslizador=False)
+        self.text_y = D.ValorDeslizable(-100000, 100000, 1, 0, "px", deslizador=False)
         for sp, key in ((self.text_x, "x"), (self.text_y, "y")):
-            sp.setRange(-100000, 100000)
-            sp.setDecimals(0)
             sp.valueChanged.connect(lambda v, k=key: self._set_text(**{k: round(v / self._canvas_px(k), 4)}))
+        self.text_x.setToolTip("De izquierda a derecha, en píxeles del video (arrastra el número o escríbelo)")
+        self.text_y.setToolTip("De arriba abajo, en píxeles del video")
         self.tw["x"] = (self.text_x, lambda v: self.text_x.setValue(float(v) * self._canvas_px("x")))
         self.tw["y"] = (self.text_y, lambda v: self.text_y.setValue(float(v) * self._canvas_px("y")))
-        xy.addWidget(QLabel("X"))
-        xy.addWidget(self.text_x)
-        xy.addWidget(QLabel("Y"))
-        xy.addWidget(self.text_y)
-        hxy = QWidget()
-        hxy.setLayout(xy)
-        f.addRow("", hxy)
-        zr = QHBoxLayout()
+        row(f, "X", self.text_x, ["x"])
+        row(f, "Y", self.text_y, ["y"])
         self.text_zx = spin("zoom_x", 0.05, 10, 0.05, "", 3)
         self.text_zy = spin("zoom_y", 0.05, 10, 0.05, "", 3)
-        self.text_zlink = QCheckBox("🔗")
+        self.text_zlink = D.BotonIcono("link", "Zoom igual en X e Y\nClic: por separado", D.ALTO_CONTROL, plano=True)
+        self.text_zlink.setCheckable(True)
         self.text_zlink.setChecked(True)
-        self.text_zlink.setToolTip("Zoom igual en X e Y")
+        self.text_zlink.toggled.connect(lambda on: self.text_zlink.poner_icono(
+            "link" if on else "unlink", "Zoom igual en X e Y\nClic: por separado" if on else
+            "Zoom X e Y por separado\nClic: iguales"))
         self.text_zx.valueChanged.connect(lambda v: self.text_zlink.isChecked() and not self._loading and
                                           self._set_text(zoom_x=round(v, 3), zoom_y=round(v, 3)))
-        zr.addWidget(QLabel("X"))
-        zr.addWidget(self.text_zx)
-        zr.addWidget(self.text_zlink)
-        zr.addWidget(QLabel("Y"))
-        zr.addWidget(self.text_zy)
-        hz = QWidget()
-        hz.setLayout(zr)
-        row(f, "Zoom", hz, ["zoom_x", "zoom_y"])
+        row(f, "Zoom X", self.text_zx, ["zoom_x", "zoom_y"], self.text_zlink)
+        row(f, "Zoom Y", self.text_zy, ["zoom_x", "zoom_y"])
         row(f, "Ángulo de rotación", spin("rotation", -360, 360, 1, "°", 1), ["rotation"])
-        lay.addWidget(g)
+        self._g_txt_pos = g
 
         # --- Trazo
         g = QGroupBox("Trazo")
@@ -1045,7 +1167,7 @@ class InspectorPanel(QWidget):
         row(f, "Color", color_btn("stroke_color"), ["stroke_color"])
         row(f, "Tamaño", spin("stroke_size", 0, 60, 1, " %", 0), ["stroke_size"])
         row(f, "", check("stroke_outside", "Solo afuera"), ["stroke_outside"])
-        lay.addWidget(g)
+        self._g_txt_trazo = g
 
         # --- Sombra (se activa con la casilla del título)
         g = QGroupBox("Sombra")
@@ -1054,17 +1176,11 @@ class InspectorPanel(QWidget):
         self.tw["shadow"] = (g, lambda v, g=g: g.setChecked(bool(v)))
         f = QFormLayout(g)
         row(f, "Color", color_btn("shadow_color"), ["shadow_color"])
-        so = QHBoxLayout()
-        so.addWidget(QLabel("X"))
-        so.addWidget(spin("shadow_x", -100, 100, 1, " %", 0))
-        so.addWidget(QLabel("Y"))
-        so.addWidget(spin("shadow_y", -100, 100, 1, " %", 0))
-        hso = QWidget()
-        hso.setLayout(so)
-        row(f, "Desplazamiento", hso, ["shadow_x", "shadow_y"])
+        row(f, "Desplazar X", spin("shadow_x", -100, 100, 1, " %", 0), ["shadow_x"])
+        row(f, "Desplazar Y", spin("shadow_y", -100, 100, 1, " %", 0), ["shadow_y"])
         row(f, "Desenfoque", spin("shadow_blur", 0, 100, 1, " %", 0), ["shadow_blur"])
         row(f, "Opacidad", spin("shadow_opacity", 0, 100, 5, " %", 0, 100.0), ["shadow_opacity"])
-        lay.addWidget(g)
+        self._g_txt_sombra = g
 
         # --- Fondo
         g = QGroupBox("Fondo")
@@ -1078,16 +1194,10 @@ class InspectorPanel(QWidget):
         row(f, "Ancho", spin("box_width", 0, 300, 2, " %", 0), ["box_width"])
         row(f, "Altura", spin("box_height", 0, 300, 2, " %", 0), ["box_height"])
         row(f, "Esquinas", spin("box_radius", 0, 50, 1, " %", 0), ["box_radius"])
-        bc = QHBoxLayout()
-        bc.addWidget(QLabel("X"))
-        bc.addWidget(spin("box_cx", -300, 300, 2, " %", 0))
-        bc.addWidget(QLabel("Y"))
-        bc.addWidget(spin("box_cy", -300, 300, 2, " %", 0))
-        hbc = QWidget()
-        hbc.setLayout(bc)
-        row(f, "Centro", hbc, ["box_cx", "box_cy"])
+        row(f, "Centro X", spin("box_cx", -300, 300, 2, " %", 0), ["box_cx"])
+        row(f, "Centro Y", spin("box_cy", -300, 300, 2, " %", 0), ["box_cy"])
         row(f, "Opacidad", spin("box_opacity", 0, 100, 5, " %", 0, 100.0), ["box_opacity"])
-        lay.addWidget(g)
+        self._g_txt_fondo = g
 
         # --- Desenfocar lo de debajo (mientras se ve el texto)
         g = QGroupBox("Desenfocar lo de debajo")
@@ -1105,7 +1215,41 @@ class InspectorPanel(QWidget):
             g.setChecked(float(v or 0) > 0)
             g.blockSignals(False)
         self.tw["blur_under"] = (sp_w, set_both)
-        lay.addWidget(g)
+        self._sp_set_blur = sp_set
+        self._g_txt_desenf = g
+
+        # --- 📝 Fondo borroso alrededor (un recuadro que desenfoca lo de debajo; ver core/nota_texto.py)
+        from ..core.nota_texto import ZONE_DEFAULTS
+        g = QGroupBox("Fondo borroso alrededor")
+        g.setCheckable(True)
+        g.setToolTip("Un recuadro alrededor del texto que desenfoca el video de debajo (en el visor y al exportar). "
+                     "Sigue al texto si lo mueves.")
+        g.toggled.connect(lambda v: self._set_text(zone_blur=bool(v)))
+        self.tw["zone_blur"] = (g, lambda v, g=g: g.setChecked(bool(v)))
+        f = QFormLayout(g)
+
+        def slider(key, hi, tip, especial="", maximo=""):
+            s = D.ValorDeslizable(0, hi, 1, 0, "%", entero=True)
+            if especial:
+                s.setSpecialValueText(especial)
+            if maximo:
+                s.poner_texto_maximo(maximo)
+            s.setToolTip(tip)
+            s.valueChanged.connect(lambda x, k=key: self._set_text(**{k: round(x / 100, 2)}))
+
+            def put(v, s=s, k=key):
+                v = ZONE_DEFAULTS[k] if v is None else float(v)
+                s.blockSignals(True)
+                s.setValue(int(round(v * 100)))
+                s.blockSignals(False)
+            self.tw[key] = (s, put)
+            return s
+        f.addRow(D.FilaInspector("Tamaño", slider("zone_size", 100, "A la izquierda, ajustado al texto; a la "
+                                                  "derecha crece hasta cubrir toda la pantalla.", "Ajustado",
+                                                  "Toda la pantalla")))
+        f.addRow(D.FilaInspector("Fuerza", slider("zone_strength", 100, "Cuánto se desenfoca lo de debajo.")))
+        f.addRow(D.FilaInspector("Oscurecer", slider("zone_dark", 90, "Oscurece un poco lo desenfocado.")))
+        self._g_txt_borroso = g
 
         # --- Memoria
         self.text_remember = QCheckBox("Recordar mis valores para los textos nuevos")
@@ -1114,32 +1258,43 @@ class InspectorPanel(QWidget):
                                       == "true")
         self.text_remember.toggled.connect(lambda v: QSettings("EditorIA", "EditorIA").setValue(
             "texto/recordar", "true" if v else "false"))
-        lay.addWidget(self.text_remember)
+        self._g_txt_plantilla = QWidget()
+        _pl = QVBoxLayout(self._g_txt_plantilla)
+        _pl.setContentsMargins(0, 0, 0, 0)
+        _pl.addWidget(self.text_remember)
         rr = QHBoxLayout()
-        b_mine = QPushButton("⭐ Aplicar mi estilo")
+        b_mine = QPushButton("Aplicar mi estilo")
+        b_mine.setIcon(D.icono("palette"))
         b_mine.setToolTip("Pone en este texto tus valores recordados.")
         b_mine.clicked.connect(self._apply_my_text_style)
-        b_fac = QPushButton("↺ Todo de fábrica")
+        b_fac = QPushButton("Todo de fábrica")
+        b_fac.setIcon(D.icono("rotate-ccw"))
+        b_fac.setToolTip("Todos los valores de fábrica en este texto (lo escrito se queda)")
         b_fac.clicked.connect(lambda: self._set_text(**{k: v for k, v in FACTORY.items() if k != "content"}))
         rr.addWidget(b_mine)
         rr.addWidget(b_fac)
-        lay.addLayout(rr)
+        _pl.addLayout(rr)
         tr_ = QHBoxLayout()                      # 🅣 plantillas de título
         self.text_template = QComboBox()
         self.text_template.setToolTip("Pone en este texto el estilo de una plantilla (lo que has escrito se queda).\n"
                                       "Las ★ son las tuyas.")
         self.text_template.activated.connect(self._apply_text_template)
-        self.btn_save_template = QPushButton("★ Guardar como plantilla")
+        self.btn_save_template = QPushButton("Guardar como plantilla")
+        self.btn_save_template.setIcon(D.icono("star"))
         self.btn_save_template.setToolTip("Guarda el estilo de este texto (fuente, colores, caja, posición, fundido) "
-                                          "como plantilla tuya: sale con ★ en el botón 🅣 y aquí.")
+                                          "como plantilla tuya: sale con ★ en el botón «Títulos» y aquí.")
         self.btn_save_template.clicked.connect(lambda: self.save_text_template())
         tr_.addWidget(self.text_template, 1)
         tr_.addWidget(self.btn_save_template)
-        lay.addLayout(tr_)
+        _pl.addLayout(tr_)
         self._fill_templates()
         self.text_track_box = self._build_track_box("text")   # 📌 pegar el texto a un objeto seguido
-        lay.addWidget(self.text_track_box)
-        lay.addStretch()
+        # ✨ fundido al aparecer y al irse
+        self._g_txt_anim = QWidget()
+        af = QFormLayout(self._g_txt_anim)
+        af.setContentsMargins(0, 0, 0, 0)
+        row(af, "Fundido", spin("fade", 0.0, 3.0, 0.05, " s", 2), ["fade"])
+        self.tw["fade"][0].setToolTip("Segundos de fundido al aparecer y al irse (en el visor y al exportar)")
         return outer
 
     # -------------------------------------------------------------- 🎯 seguimiento / 📌 pegar a un objeto
@@ -1224,7 +1379,7 @@ class InspectorPanel(QWidget):
         from ..core import title_templates as TT
         self.text_template.blockSignals(True)
         self.text_template.clear()
-        self.text_template.addItem("🅣 Plantilla…", None)
+        self.text_template.addItem("Plantilla…", None)
         for key, name in TT.all_templates():
             self.text_template.addItem(name, key)
         self.text_template.setCurrentIndex(0)
@@ -1252,7 +1407,7 @@ class InspectorPanel(QWidget):
             self.ctrl.message.emit(str(ex))
             return None
         self._fill_templates()
-        self.ctrl.message.emit(f"★ Plantilla «{key[1:]}» guardada: está en el botón 🅣 y en «Plantilla…».")
+        self.ctrl.message.emit(f"★ Plantilla «{key[1:]}» guardada: está en el botón «Títulos» y en «Plantilla…».")
         return key
 
     def _apply_my_text_style(self):
@@ -1269,6 +1424,9 @@ class InspectorPanel(QWidget):
             self.text_edit.setPlainText(str(t.get("content", "")))
         for key, (_w, setter) in self.tw.items():
             setter(_get(t, key) if key in FACTORY else t.get(key))
+        from .inspector_secciones import apagada as _ap
+        for k in ("texto_trazo", "texto_animacion"):
+            self.secciones[k].set_on(not _ap(c, k))
         name = next((n for n, x, y in self.TEXT_POSITIONS
                      if abs(x - t.get("x", 0.5)) < 0.01 and abs(y - t.get("y", 0.5)) < 0.01), "Personalizada")
         self.text_pos.setCurrentText(name)
@@ -1286,30 +1444,833 @@ class InspectorPanel(QWidget):
             if n == name:
                 self._set_text(x=x, y=y)
 
-    def _build_multi_page(self) -> QWidget:
-        w = QWidget()
+    def _build_multi_page(self):
+        """«Varios clips»: lo común a todos (bloquear, activar, opacidad, fusión y volumen)."""
+        w = self._g_varios_archivo = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
         self.multi_title = QLabel()
         self.multi_title.setObjectName("title")
+        self.multi_title.setWordWrap(True)
         row = QHBoxLayout()
-        b_lock = QPushButton("🔒 Bloquear todos")
-        b_unlock = QPushButton("🔓 Desbloquear todos")
+        b_lock = QPushButton("Bloquear todos")
+        b_lock.setIcon(_glifo("🔒"))
+        b_unlock = QPushButton("Desbloquear todos")
+        b_unlock.setIcon(_glifo("🔓"))
         b_lock.clicked.connect(lambda: self.ctrl.set_clip_props(self._ids, "Bloquear clips", locked=True))
         b_unlock.clicked.connect(lambda: self.ctrl.set_clip_props(self._ids, "Desbloquear clips", locked=False))
         row.addWidget(b_lock)
         row.addWidget(b_unlock)
+        row2 = QHBoxLayout()
+        b_on = QPushButton("Activar todos")
+        b_off = QPushButton("Desactivar todos")
+        b_on.setToolTip("Que se vean y se oigan")
+        b_off.setToolTip("Que no se vean ni se oigan (siguen en la línea de tiempo)")
+        b_on.clicked.connect(lambda: self.ctrl.set_clip_props(self._targets(), "Activar clips", enabled=True))
+        b_off.clicked.connect(lambda: self.ctrl.set_clip_props(self._targets(), "Desactivar clips", enabled=False))
+        row2.addWidget(b_on)
+        row2.addWidget(b_off)
         lay.addWidget(self.multi_title)
         lay.addLayout(row)
+        lay.addLayout(row2)
+        # 🎞 opacidad y fusión de todos
+        v = self._g_varios_video = QWidget()
+        vf = QFormLayout(v)
+        vf.setContentsMargins(0, 0, 0, 0)
+        self.multi_opacity = QSpinBox()
+        self.multi_opacity.setRange(0, 100)
+        self.multi_opacity.setSuffix(" %")
+        self.multi_opacity.setKeyboardTracking(False)
+        self.multi_opacity.setToolTip("La misma opacidad en todos los clips elegidos")
+        self.multi_opacity.valueChanged.connect(lambda x: self._loading or self.ctrl.set_clip_props(
+            self._visuales(), "Opacidad de varios clips", opacity=x / 100, op_kf=[]))
+        vf.addRow("Opacidad", self.multi_opacity)
+        from ..core.curves import BLEND_MODES
+        self.multi_blend = QComboBox()
+        for key, name, _f, _q in BLEND_MODES:
+            self.multi_blend.addItem(name, key)
+        self.multi_blend.activated.connect(lambda _i: self.ctrl.set_clip_props(
+            self._visuales(), "Modo de fusión de varios clips", blend=self.multi_blend.currentData()))
+        vf.addRow("Fusión", self.multi_blend)
+        # 🔊 volumen de todos
+        au = self._g_varios_audio = QWidget()
+        af = QFormLayout(au)
+        af.setContentsMargins(0, 0, 0, 0)
+        self.multi_volume = QSpinBox()
+        self.multi_volume.setRange(0, 200)
+        self.multi_volume.setSuffix(" %")
+        self.multi_volume.setKeyboardTracking(False)
+        self.multi_volume.setToolTip("El mismo volumen en todos los clips con sonido elegidos")
+        self.multi_volume.valueChanged.connect(lambda x: self._loading or self.ctrl.set_clip_props(
+            self._sonoros(), "Volumen de varios clips", volume=x / 100))
+        af.addRow("Volumen", self.multi_volume)
+        # 🎞 transición elegida en la línea de tiempo
+        t = self._g_transicion = QWidget()
+        tf = QFormLayout(t)
+        tf.setContentsMargins(0, 0, 0, 0)
+        from ..core import transitions as TR
+        self.trans_info = _dim()
+        tf.addRow(self.trans_info)
+        self.trans_tipo = QComboBox()
+        for k, n, d in TR.CATALOG:
+            self.trans_tipo.addItem(n, k)
+            self.trans_tipo.setItemData(self.trans_tipo.count() - 1, d, Qt.ToolTipRole)
+        self.trans_tipo.activated.connect(lambda _i: self._poner_transicion())
+        tf.addRow("Tipo", self.trans_tipo)
+        self.trans_dur = QDoubleSpinBox()
+        self.trans_dur.setRange(TR.MIN_DUR, TR.MAX_DUR)
+        self.trans_dur.setSingleStep(0.05)
+        self.trans_dur.setDecimals(2)
+        self.trans_dur.setSuffix(" s")
+        self.trans_dur.setKeyboardTracking(False)
+        self.trans_dur.valueChanged.connect(lambda _v: self._loading or self._poner_transicion(auto=False))
+        tf.addRow("Duración", self.trans_dur)
+        self.trans_auto = QCheckBox("Duración automática")
+        self.trans_auto.setToolTip("Según el tipo de transición y, si hay música, a ritmo")
+        self.trans_auto.toggled.connect(lambda on: self._loading or self._poner_transicion(auto=on))
+        tf.addRow(self.trans_auto)
+        tb = QHBoxLayout()
+        self.btn_trans_ver = QPushButton("▶ Ver cómo queda")
+        self.btn_trans_ver.setToolTip("Prepara unos segundos alrededor del corte tal como saldrán al exportar")
+        self.btn_trans_ver.clicked.connect(self._ver_transicion)
+        self.btn_trans_quitar = QPushButton("Quitar")
+        self.btn_trans_quitar.setIcon(_glifo("🗑"))
+        self.btn_trans_quitar.setToolTip("Quita la transición (los clips quedan igual; Ctrl+Z la devuelve)")
+        self.btn_trans_quitar.clicked.connect(lambda: self._trans_id and self.ctrl.set_transition(
+            [self._trans_id], None))
+        tb.addWidget(self.btn_trans_ver)
+        tb.addWidget(self.btn_trans_quitar)
+        tf.addRow(tb)
+        # 🎬 escena y clip compuesto (en Archivo)
+        e = self._g_escena = QWidget()
+        el = QHBoxLayout(e)
+        el.setContentsMargins(0, 0, 0, 0)
+        self.btn_editar_escena = QPushButton("Editar escena")
+        self.btn_editar_escena.setIcon(_glifo("🎬"))
+        self.btn_editar_escena.setToolTip("La abre en la página «Escenas» (también con doble clic en el clip)")
+        self.btn_editar_escena.clicked.connect(self._editar_escena)
+        self.btn_deshacer_compuesto = QPushButton("Deshacer clip compuesto")
+        self.btn_deshacer_compuesto.setToolTip("Devuelve los clips originales en su sitio (Ctrl+Z lo deshace)")
+        self.btn_deshacer_compuesto.clicked.connect(self._deshacer_compuesto)
+        el.addWidget(self.btn_editar_escena)
+        el.addWidget(self.btn_deshacer_compuesto)
+        el.addStretch(1)
+
+    # ------------------------------------------------------------- 🗂 pestañas fijas y secciones (fase 2)
+    def _componer(self):
+        """Las pestañas FIJAS (Video · Audio · Efectos · Transición · Texto · Archivo · Proyecto) con sus secciones,
+        en el orden de la tabla de PROPUESTA_INTERFAZ.md (c). Las que no aplican salen apagadas."""
+        from . import inspector_secciones as SEC
+        self._build_audio_tab()
+        self._color_tmp = self._build_color_tab()
+        self._build_enhance_box()
+        self.color_box.setTitle("")
+        self.color_box.setFlat(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 6, 0, 6)
+        lay.setSpacing(4)
+        cab = QWidget()
+        cl = QVBoxLayout(cab)
+        cl.setContentsMargins(2, 0, 2, 0)
+        cl.setSpacing(0)
+        self.clip_title = QLabel()
+        self.clip_title.setObjectName("title")
+        self.clip_title.setWordWrap(True)
+        self.clip_origin = QLabel()
+        self.clip_origin.setWordWrap(True)
+        cl.addWidget(self.clip_title)
+        cl.addWidget(self.clip_origin)
+        lay.addWidget(cab)
+        self.clip_tabs = SEC.PestanasAjustadas()
+        self.clip_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)   # (lo que sobra, al final)
+        self.clip_tabs.setDocumentMode(True)
+        self.clip_tabs.setUsesScrollButtons(True)       # (su barra va escondida: que no pida ancho)
+        self.clip_tabs.tabBar().setExpanding(False)
+        self._pag: dict = {}
+        self._lay_pag: dict = {}
+        for k, nombre, tip in SEC.PESTANAS:
+            pg = QWidget()
+            pl = QVBoxLayout(pg)
+            pl.setContentsMargins(0, 6, 0, 0)
+            pl.setSpacing(6)
+            self.clip_tabs.addTab(pg, nombre)
+            self.clip_tabs.setTabToolTip(self.clip_tabs.count() - 1, tip)
+            self._pag[k], self._lay_pag[k] = pg, pl
+        self.clip_tabs.currentChanged.connect(self._pestana_cambiada)
+        self.clip_tabs.currentChanged.connect(lambda _i: self.clip_tabs.updateGeometry())
+        # (la barra de pestañas de Qt no se parte en dos filas: botones con nombre que bajan de fila si no caben,
+        # nunca «…» ni flechas; la pestaña de Qt queda por dentro con su estado)
+        self.clip_tabs.tabBar().hide()
+        self.fila_pestanas = QWidget()
+        self.fila_pestanas.setObjectName("pestanas_inspector")
+        fp = QHBoxLayout(self.fila_pestanas)
+        fp.setContentsMargins(0, 0, 0, 0)
+        fp.setSpacing(2)
+        self.botones_pestana: list = []
+        for i, (k, nombre, tip) in enumerate(SEC.PESTANAS):
+            b = SEC.BotonPestana(nombre)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _c=False, i=i: self.clip_tabs.setCurrentIndex(i))
+            fp.addWidget(b)
+            self.botones_pestana.append(b)
+        fp.addStretch(1)
+        self.fila_pestanas.installEventFilter(self)     # (con poco ancho, «Proyecto» pasa a su icono)
+        lay.addWidget(self.fila_pestanas)
+        lay.addWidget(self.clip_tabs)
         lay.addStretch()
+
+        def sec(pagina, clave, titulo, cuerpo, abierta=False, interruptor=False, reinicio=False, vigilar=None,
+                ayuda=""):
+            caja = QWidget()                       # (lo que se pliega; dentro, el grupo con su propia visibilidad)
+            cv = QVBoxLayout(caja)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.addWidget(cuerpo)
+            if isinstance(cuerpo, QGroupBox):
+                cuerpo.setTitle("")
+                cuerpo.setFlat(True)
+                from .diseno import grupo_sin_titulo
+                grupo_sin_titulo(cuerpo)           # (sin el hueco que reservaba el título)
+            s_ = SEC.Seccion(clave, titulo, caja, abierta, interruptor, reinicio,
+                             cuerpo if vigilar is None else vigilar, ayuda)
+            s_.encendida.connect(lambda on, k=clave: self._sec_encendida(k, on))
+            s_.restablecer.connect(lambda k=clave: self._sec_restablecer(k))
+            self.secciones[clave] = s_
+            self._lay_pag[pagina].addWidget(s_)
+            return s_
+
+        # --- Video
+        sec("video", "transformar", "Transformar", self.transform_box, True, True, True,
+            ayuda="Tamaño, posición, rotación, voltear y relleno")
+        sec("video", "recorte", "Recorte", self.crop_box, True, True, True,
+            ayuda="Recortar los bordes (lo mismo que «Recortar» en el visor)")
+        sec("video", "encuadre", "Zoom dinámico y encuadre", self.frame_box, True, True, True,
+            ayuda="Zoom con fotogramas clave, centro, disposición en pantalla y posición y tamaño animados")
+        sec("video", "composicion", "Composición", self.blend_box, False, True, True,
+            ayuda="Opacidad y modo de fusión")
+        self.speed_sec = SEC.Seccion("velocidad", "Velocidad", self.speed_box, False, False, True,
+                                     ayuda="Velocidad del clip (tecla R): porcentaje, marcha atrás, congelar imagen "
+                                           "y cámara lenta suave")
+        self.speed_sec.restablecer.connect(lambda: self._sec_restablecer("velocidad"))
+        self.secciones["velocidad"] = self.speed_sec
+        self._tl_clip = self._lay_pag["video"]
+        self._tl_clip.addWidget(self.speed_sec)
+        self._vel_en = self._tl_clip
+        sec("video", "reencuadre", "Reencuadre vertical", self._caja_reencuadre(), False,
+            ayuda="En un proyecto vertical: fondo borroso arriba y abajo, o llenar la pantalla con un recorte que "
+                  "sigue la acción")
+        sec("video", "mejorar", "Mejorar imagen", self.enhance_box, False, True, True,
+            ayuda="Reducir ruido, estabilizar y detectar cortes de escena")
+        sec("video", "seguimiento", "Seguimiento", self.track_box, ayuda="Seguir un personaje u objeto y usarlo")
+        sec("video", "color", "Color", self.color_box, False, True, True,
+            ayuda="Corrección de color: ruedas, ajustes, LUT y color automático")
+        sec("video", "varios_video", "Varios clips", self._g_varios_video, True,
+            ayuda="Lo común a todos los clips elegidos")
+        # --- Audio
+        sec("audio", "volumen", "Volumen y balance", self._g_volumen, True, True, True,
+            ayuda="Apagar = silenciar el clip sin perder su volumen")
+        sec("audio", "ecualizador", "Ecualizador", self._g_eq, True, True, True)
+        self._audio_lay = self._lay_pag["audio"]
+        sec("audio", "varios_audio", "Varios clips", self._g_varios_audio, True,
+            ayuda="El mismo volumen en todos los clips con sonido elegidos")
+        # --- Efectos
+        sec("efectos", "efectos_edits", "Destello, fundidos y temblor", self.effects_box, True, True, True)
+        sec("efectos", "sombra", "Sombra", self._build_sombra_box(), True, True, True,
+            ayuda="Una sombra detrás del clip para darle profundidad, como el «Drop Shadow» de Resolve: sigue la forma "
+                  "de la imagen (un PNG recortado da su silueta) · ● = apagarla sin perderla · ↺ = la pequeña de fábrica")
+        self._aplicados_lay = self._lay_pag["efectos"]
+        self.efectos_vacio = QWidget()             # (marca dónde van los efectos aplicados; no se ve)
+        self.efectos_vacio.setFixedHeight(0)
+        self._pag["efectos"].setToolTip("Los efectos de la página Efectos que pongas en el clip salen aquí, cada uno "
+                                        "con su interruptor")
+        self._aplicados_lay.addWidget(self.efectos_vacio)
+        # --- Transición
+        sec("transicion", "transicion", "Transición", self._g_transicion, True, False, True,
+            ayuda="Tipo y duración de la transición elegida · ↺ = la de siempre")
+        self._pag["transicion"].setToolTip("Elige una transición en la línea de tiempo (el rombo entre dos clips) "
+                                           "para cambiar su tipo y su duración")
+        # --- Texto
+        cont = QWidget()
+        ccl = QVBoxLayout(cont)
+        ccl.setContentsMargins(0, 0, 0, 0)
+        for w_ in (self.text_origin, self.text_edit, self._spell_w):
+            ccl.addWidget(w_)
+        sec("texto", "texto_contenido", "Contenido", cont, True)
+        sec("texto", "texto_fuente", "Fuente y estilo", self._g_txt_fuente, True, reinicio=True)
+        sec("texto", "texto_posicion", "Posición", self._g_txt_pos, True, reinicio=True)
+        sec("texto", "texto_trazo", "Trazo", self._g_txt_trazo, False, True, True)
+        s_sombra = sec("texto", "texto_sombra", "Sombra", self._g_txt_sombra, False, True, True)
+        s_fondo = sec("texto", "texto_fondo", "Fondo", self._g_txt_fondo, False, True, True)
+        s_desenf = sec("texto", "texto_desenfocar", "Desenfocar lo de debajo", self._g_txt_desenf, False, True, True,
+                       ayuda="Mientras se ve el texto, lo de debajo se desenfoca (en el visor y al exportar)")
+        s_borroso = sec("texto", "texto_borroso", "Fondo borroso alrededor", self._g_txt_borroso, False, True, True,
+                        ayuda="Un recuadro alrededor del texto que desenfoca el video de debajo")
+        sec("texto", "texto_animacion", "Fundido y animación", self._g_txt_anim, False, True, True)
+        sec("texto", "texto_plantilla", "Plantilla y mi estilo", self._g_txt_plantilla)
+        sec("texto", "texto_pegar", "Pegar a un objeto", self.text_track_box)
+        set_help(self._pag["texto"], "texto_pantalla")
+        # (los grupos que se encendían con su casilla: ahora con el ● de su sección)
+        for s_, grupo, clave in ((s_sombra, self._g_txt_sombra, "shadow"), (s_fondo, self._g_txt_fondo, "box"),
+                                 (s_borroso, self._g_txt_borroso, "zone_blur")):
+            grupo.setCheckable(False)
+            self.tw[clave] = (s_.boton, lambda v, s_=s_: s_.set_on(bool(v)))
+        self._g_txt_desenf.setCheckable(False)
+        sp_w = self.tw["blur_under"][0]
+        self.tw["blur_under"] = (sp_w, lambda v, s_=s_desenf: (self._sp_set_blur(v), s_.set_on(float(v or 0) > 0)))
+        # --- Archivo
+        sec("archivo", "informacion", "Información", self._g_info, True)
+        sec("archivo", "ajustes", "Ajustes", self._g_props, True)
+        sec("archivo", "escena", "Escena y clip compuesto", self._g_escena, True)
+        sec("archivo", "nota", "Nota para la IA", self._g_note, False)
+        sec("archivo", "varios_archivo", "Varios clips", self._g_varios_archivo, True)
+        # --- Proyecto
+        sec("proyecto", "formato", "Formato", self._g_formato, True)
+        sec("proyecto", "sonoridad", "Sonoridad", self._g_sonoridad, True)
+        sec("proyecto", "mezcla", "Mezcla y música", self._g_mezcla, True)
+        sec("proyecto", "narracion", "Narración", self._g_narracion, False)
+        sec("proyecto", "subtitulos", "Subtítulos del proyecto", self._g_subtitulos, False)
+        for pl in self._lay_pag.values():
+            pl.addStretch(1)
+        for pg, clave in (("video", "clip"), ("archivo", "clip"), ("audio", "audio_clip"), ("efectos", "efectos"),
+                          ("transicion", "transiciones"), ("proyecto", "proyecto")):
+            set_help(self._pag[pg], clave)                  # (F1 y clic derecho: lo que no tenga la suya propia)
+        set_help(self.fila_pestanas, "clip")
+        self._con_interruptor = {k for k, s_ in self.secciones.items() if s_.boton.isEnabled()}
+
+    def poner_en(self, clave: str, widget: QWidget, arriba: bool = False) -> bool:
+        """Mete un panel que ya existe dentro de una sección del Inspector (para la ventana: p. ej. los Subtítulos
+        en «Proyecto → Subtítulos del proyecto», la Mezcla y música en «Proyecto → Mezcla y música»). True si se pudo."""
+        s_ = self.secciones.get(clave)
+        if s_ is None or widget is None:
+            return False
+        caja = s_.body.layout()
+        if arriba:
+            caja.insertWidget(0, widget)
+        else:
+            caja.addWidget(widget)
+        widget.show()
+        return True
+
+    # ---- 📍 gancho de la fase 5: el índice de marcas (ui/marcadores_panel.instalar)
+    def poner_marcadores(self, widget: QWidget) -> bool:
+        """Pone `widget` (el índice de marcas) como sección propia «Marcadores» en Proyecto, plegable como las demás
+        (se recuerda si la dejas abierta). Una vez: si ya está, no hace nada. True si quedó puesta."""
+        if widget is None or "marcadores" in self.secciones:
+            return False
+        from . import inspector_secciones as SEC
+        caja = QWidget()                           # (lo que se pliega, como en las demás secciones)
+        cv = QVBoxLayout(caja)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.addWidget(widget)
+        widget.show()
+        s_ = SEC.Seccion("marcadores", "Marcadores", caja, False, False, False, widget,
+                         "Índice de marcas en el orden del video: tomas repetidas, muletillas, cortes dudosos, marcas "
+                         "de OBS, temas, huecos, material repetido y tus marcadores. Clic en una = el cabezal allí")
+        self.secciones["marcadores"] = s_
+        lay = self._lay_pag["proyecto"]
+        lay.insertWidget(max(0, lay.count() - 1), s_)    # (antes del espacio libre del final de la página)
+        self._marcadores_w = widget
+        return True
+
+    def mostrar_marcadores(self) -> bool:
+        """«Cada acción abre su panel» (M+M = escribir la nota de un marcador): enseña el Inspector, la pestaña
+        Proyecto y la sección «Marcadores» desplegada, con el foco en su campo de nota. True si quedó a la vista."""
+        s_ = self.secciones.get("marcadores")
+        if s_ is None:
+            return False
+        if not s_.is_open():
+            s_.set_open(True, save=False)
+        nota = getattr(getattr(self, "_marcadores_w", None), "nota", None)
+        win = self.window()
+        if hasattr(win, "abrir_para_usar"):
+            return bool(win.abrir_para_usar(nota if nota is not None else s_, nota))
+        s_.show()
+        if nota is not None:
+            nota.setFocus(Qt.OtherFocusReason)
+        return s_.isVisible()
+
+    def _caja_reencuadre(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.reenc_info = _dim()
+        v.addWidget(self.reenc_info)
+        h = QHBoxLayout()
+        self.btn_reenc_borroso = QPushButton("Fondo borroso")
+        self.btn_reenc_borroso.setToolTip("El video entero en el centro y arriba y abajo su propia imagen borrosa "
+                                          "(como tus Shorts)")
+        self.btn_reenc_borroso.clicked.connect(lambda: self._clip() and self.ctrl.set_fill(
+            [self._clip().id], __import__("editoria.core.fill", fromlist=["x"]).DEFAULT))
+        self.btn_reenc_seguir = QPushButton("Seguir la acción")
+        self.btn_reenc_seguir.setToolTip("Llena la pantalla vertical y el recorte sigue lo que pasa (se analiza en "
+                                         "segundo plano; Ctrl+Z lo deshace)")
+        self.btn_reenc_seguir.clicked.connect(self._seguir_accion)
+        self.btn_reenc_quitar = QPushButton("Quitar")
+        self.btn_reenc_quitar.setToolTip("Quita el fondo borroso y el recorte que sigue la acción")
+        self.btn_reenc_quitar.clicked.connect(self._quitar_reencuadre)
+        for b in (self.btn_reenc_borroso, self.btn_reenc_seguir, self.btn_reenc_quitar):
+            h.addWidget(b)
+        h.addStretch(1)
+        v.addLayout(h)
         return w
+
+    def _seguir_accion(self):
+        c = self._clip()
+        win = self.window()
+        if c is not None and hasattr(win, "follow_action"):
+            win.follow_action([c.id])
+
+    def _quitar_reencuadre(self):
+        from ..core import fill as FILL
+        c = self._clip()
+        if c is None:
+            return
+        pila = self.ctrl.undo_stack
+        cambios = FILL.of(c.fx) is not None or bool((c.layout or {}).get("follow"))
+        if not cambios:
+            return
+        pila.beginMacro("Quitar el reencuadre vertical")
+        try:
+            if FILL.of(c.fx) is not None:
+                self.ctrl.set_fill([c.id], None)
+            if (self.ctrl.project.clips[c.id].layout or {}).get("follow"):
+                self.ctrl.set_follow(c.id, None, "Quitar «sigue la acción»")
+        finally:
+            pila.endMacro()
+
+    def _refresh_reencuadre(self, c, m, editable: bool):
+        from ..core import fill as FILL
+        relleno = FILL.of(c.fx) is not None
+        sigue = bool((c.layout or {}).get("follow"))
+        self.reenc_info.setText("Con fondo borroso." if relleno else "Sigue la acción." if sigue else
+                                "Sin reencuadre.")
+        self.btn_reenc_seguir.setEnabled(editable and bool(m and m.kind == "video")
+                                         and hasattr(self.window(), "follow_action"))
+        self.btn_reenc_borroso.setEnabled(editable and not relleno)
+        self.btn_reenc_quitar.setEnabled(editable and (relleno or sigue))
+
+    def _pestana_cambiada(self, i: int):
+        if not self._pestana_codigo:
+            self._pestana_usuario = i
+        self._sincronizar_botones()
+
+    def _sincronizar_botones(self):
+        """Las pestañas: la de delante marcada; las que no aplican, atenuadas con su porqué en el tooltip. Sin nada
+        elegido solo vale «Proyecto» (que ya es el título): la fila entera se esconde —sin seis pestañas grises que
+        parecían un fallo ni hueco bajo el título—."""
+        from .inspector_secciones import INDICE, PESTANAS
+        cur = self.clip_tabs.currentIndex()
+        bots = getattr(self, "botones_pestana", [])
+        solo_proyecto = all(not self.clip_tabs.isTabEnabled(i) for i in range(len(bots)) if i != INDICE["proyecto"])
+        for i, b in enumerate(bots):
+            activa = self.clip_tabs.isTabEnabled(i)
+            b.setEnabled(activa)
+            b.setChecked(i == cur)
+            base = PESTANAS[i][2]
+            tip = base if activa else base + "\n\n(No aplica a lo elegido: elige un clip de ese tipo en la línea de " \
+                                             "tiempo)"
+            if not b.text():                          # («Proyecto» en solo icono lleva su nombre delante)
+                tip = f"{PESTANAS[i][1]}: {tip}"
+            if b.toolTip() != tip:
+                b.setToolTip(tip)
+        fila = getattr(self, "fila_pestanas", None)
+        if fila is not None and fila.isHidden() != solo_proyecto:
+            fila.setVisible(not solo_proyecto)
+
+    def pestana_activa(self) -> str:
+        from .inspector_secciones import PESTANAS
+        return PESTANAS[self.clip_tabs.currentIndex()][0]
+
+    def ir_a(self, clave: str) -> bool:
+        """Pone delante esa pestaña (si está activa). Ej.: ir_a("audio") desde la página Audio."""
+        from .inspector_secciones import INDICE
+        i = INDICE.get(clave, -1)
+        if i < 0 or not self.clip_tabs.isTabEnabled(i):
+            return False
+        self.clip_tabs.setCurrentIndex(i)
+        return True
+
+    def _aplicar_pestanas(self, activas: set, deseada: str):
+        from .inspector_secciones import INDICE, PESTANAS
+        activas = set(activas) | {"proyecto"}
+        self._pestana_codigo = True
+        try:
+            for k, _n, _t in PESTANAS:
+                self.clip_tabs.setTabEnabled(INDICE[k], k in activas)
+            self.clip_tabs.setCurrentIndex(INDICE[deseada if deseada in activas else "proyecto"])
+        finally:
+            self._pestana_codigo = False
+        self._sincronizar_botones()
+
+    def _pestana_para(self, modo: str, activas: set, nuevo: bool, visual: bool = True, sonido: bool = False) -> str:
+        """Qué pestaña se pone delante al elegir algo: la de lo elegido; si eliges otro clip del mismo tipo, sigues
+        donde estabas (un audio siempre abre su ecualizador; un video no se queda en el ecualizador salvo en la
+        página Audio)."""
+        from .inspector_secciones import PESTANAS
+        cur = PESTANAS[self.clip_tabs.currentIndex()][0]
+        if modo in ("proyecto", "transicion", "texto"):
+            if modo == "texto" and not nuevo and cur in activas and cur != "proyecto":
+                return cur
+            return modo
+        if modo == "audio":
+            return "audio" if nuevo or cur not in activas or cur == "proyecto" else cur
+        if modo == "clip":
+            if getattr(self, "prefer_audio", False) and sonido:
+                return "audio"
+            if cur in activas and cur not in ("audio", "proyecto"):
+                return cur
+            return "video" if visual else "audio"
+        if cur in activas and cur != "proyecto":            # varios
+            return cur
+        return next((k for k in ("video", "audio", "efectos", "archivo") if k in activas), "proyecto")
+
+    def _ver_secciones(self, modo: str):
+        varios = modo == "varios"
+        for k in ("varios_video", "varios_audio", "varios_archivo"):
+            self.secciones[k].setVisible(varios)
+        for k in ("transformar", "recorte", "encuadre", "composicion", "mejorar", "seguimiento", "color",
+                  "reencuadre", "volumen", "ecualizador", "informacion", "ajustes", "nota"):
+            if varios:
+                self.secciones[k].setVisible(False)
+        if varios:
+            self.speed_sec.setVisible(False)
+        self.secciones["transicion"].setVisible(modo == "transicion")
+        if modo not in ("clip", "varios"):
+            self.secciones["sombra"].setVisible(False)       # (🌑 solo con un clip de video o imagen)
+        if varios:
+            self.secciones["escena"].setVisible(False)
+
+    # ---- ● / ↺ de cada sección
+    def _ids_para(self, clave: str) -> list[str]:
+        if clave == "volumen":
+            ac = self._aclip()
+            return [ac.id] if ac is not None else self._ids
+        if clave == "transicion":
+            return [self._trans_id] if self._trans_id else []
+        return list(self._ids)
+
+    def _sec_encendida(self, clave: str, on: bool):
+        if self._loading:
+            return
+        if clave == "ecualizador":
+            self._on_eq_on(on)
+            return
+        nativos = {"texto_sombra": "shadow", "texto_fondo": "box", "texto_borroso": "zone_blur"}
+        if clave in nativos:
+            self._set_text(**{nativos[clave]: bool(on)})
+            return
+        from . import inspector_secciones as SEC
+        p = self.ctrl.project
+        if clave == "sombra":            # 🌑 ● sin sombra guardada = poner la de fábrica; si no, apagar / encender
+            from ..core import decor
+            clips = self._sombra_clips()
+            sin_nada = [c.id for c in clips if self._sombra_de(c) is None]
+            if on:
+                cambios = [(c.id, SEC.cambios_encender(c, clave)) for c in clips if SEC.apagada(c, clave)]
+            else:
+                cambios = [(c.id, SEC.cambios_apagar(c, clave)) for c in clips if decor.shadow_of(c.fx) is not None]
+            cambios = [(i, pr) for i, pr in cambios if pr]
+            if on and sin_nada:
+                pila = self.ctrl.undo_stack
+                pila.beginMacro("Encender sombra")
+                try:
+                    self.poner_sombra(sin_nada)
+                    self._aplicar_cambios(cambios, "Encender sombra") if cambios else None
+                finally:
+                    pila.endMacro()
+            else:
+                self._aplicar_cambios(cambios, ("Encender" if on else "Apagar") + " sombra")
+            return
+        if clave == "texto_desenfocar" and on and not SEC.apagada(self._clip(), clave):
+            self._set_text(blur_under=0.5)              # (nunca tuvo: se enciende con lo de siempre)
+            return
+        nombre = self.secciones[clave].head.text() if clave in self.secciones else clave
+        cambios = []
+        for cid in self._ids_para(clave):
+            c = p.clips.get(cid)
+            props = SEC.cambios_encender(c, clave) if on else SEC.cambios_apagar(c, clave)
+            if props:
+                cambios.append((cid, props))
+        self._aplicar_cambios(cambios, ("Encender " if on else "Apagar ") + nombre)
+
+    def _aplicar_cambios(self, cambios: list, texto: str):
+        """Aplica [(clip, props)] en UN paso de Ctrl+Z (nada = ningún paso vacío; el ● vuelve a su sitio). El texto
+        del clip va por set_text_props (set_clip_props ya tiene un parámetro «text»)."""
+        if not cambios:
+            self._refresh()
+            return
+        pila = self.ctrl.undo_stack
+        pila.beginMacro(texto)
+        try:
+            for cid, props in cambios:
+                props = dict(props)
+                txt = props.pop("text", None)
+                if props:
+                    self.ctrl.set_clip_props([cid], texto, **props)
+                if txt is not None:
+                    self.ctrl.set_text_props(cid, **txt)
+        finally:
+            pila.endMacro()
+
+    def _sec_restablecer(self, clave: str):
+        if self._loading:
+            return
+        from ..core.title_render import FACTORY
+        from ..core.nota_texto import ZONE_DEFAULTS
+        texto = {"texto_fuente": ["font", "font_style", "color", "size", "tracking", "line_spacing", "bold", "italic",
+                                  "underline", "strike", "case", "align"],
+                 "texto_posicion": ["x", "y", "zoom_x", "zoom_y", "rotation"],
+                 "texto_trazo": ["stroke_color", "stroke_size", "stroke_outside"],
+                 "texto_sombra": [k for k in FACTORY if k.startswith("shadow")],
+                 "texto_fondo": [k for k in FACTORY if k.startswith("box")],
+                 "texto_desenfocar": ["blur_under"], "texto_animacion": ["fade"]}
+        if clave in texto:
+            self._set_text(**{k: FACTORY[k] for k in texto[clave]})
+            return
+        if clave == "texto_borroso":
+            self._set_text(**ZONE_DEFAULTS)
+            return
+        if clave == "velocidad":
+            if self._ids:
+                self.ctrl.set_speed(self._targets(), speed=1.0, reverse=False, ripple=self.ripple_speed.isChecked())
+            return
+        if clave == "ecualizador":
+            self._set_eq({"on": True, "bands": E.default_bands()}, "Reiniciar ecualizador")
+            return
+        if clave == "transicion":
+            from ..core import transitions as TR
+            if self._trans_id:
+                self.ctrl.set_transition([self._trans_id], TR.DEFAULT, None if TR.auto_on() else 0.5)
+            return
+        from . import inspector_secciones as SEC
+        if clave == "sombra":            # 🌑 ↺ = la pequeña de fábrica (encendida), no quitarla
+            from ..core import decor
+            changes = {}
+            for c in self._sombra_clips():
+                fx = SEC._fx_sin_apagado(dict(c.fx or {}), "sombra")
+                fx["shadow"] = decor.sombra(**decor.SOMBRA_EFECTO)
+                changes[c.id] = {"fx": fx}
+            if changes:
+                self.ctrl.batch_clip_props(changes, "Restablecer sombra")
+            return
+        p = self.ctrl.project
+        nombre = self.secciones[clave].head.text() if clave in self.secciones else clave
+        cambios = [(cid, SEC.cambios_restablecer(p.clips.get(cid), clave)) for cid in self._ids_para(clave)]
+        self._aplicar_cambios([(cid, pr) for cid, pr in cambios if pr], f"Restablecer {nombre}")
+
+    def _refrescar_interruptores(self, c):
+        """El ● de cada sección según el clip (encendida / apagada)."""
+        from . import inspector_secciones as SEC
+        for k in self._con_interruptor:
+            s_ = self.secciones.get(k)
+            if s_ is None:
+                continue
+            if k == "ecualizador":
+                on = bool(c is not None and c.eq and c.eq.get("on", True))
+                ac = self._aclip()
+                on = bool(ac is not None and ac.eq and ac.eq.get("on", True)) if ac is not None else on
+            elif k in ("texto_sombra", "texto_fondo", "texto_borroso", "texto_desenfocar"):
+                continue                               # (los pone _fill_text_page con su valor)
+            elif k == "sombra":                        # (encendida = la lleva puesta)
+                from ..core import decor
+                cs = self._sombra_clips()
+                c0 = next((x for x in cs if c is not None and x.id == c.id), cs[0] if cs else None)
+                on = bool(c0 is not None and decor.shadow_of(c0.fx) is not None)
+            elif k == "volumen":
+                ac = self._aclip()
+                on = not SEC.apagada(ac, "volumen")
+            else:
+                on = not SEC.apagada(c, k)
+            s_.set_on(on)
+
+    # ---- efectos aplicados (página Efectos), cada uno con ● y 🗑
+    def _refrescar_aplicados(self, c):
+        from ..core import effects as EFX
+        from . import inspector_secciones as SEC
+        claves = []
+        if c is not None and c.text is None:
+            claves = list(EFX.visible_of(c.fx))
+            claves = [k for k in claves if k not in ("flash", "shake", "lines", "focus_in")]   # (ya en su sección)
+            for k in ((c.fx or {}).get(SEC.APAGADO) or {}):
+                if k.startswith("efecto:") and k.split(":", 1)[1] not in claves:
+                    claves.append(k.split(":", 1)[1])
+        if list(self._aplicados) != claves:
+            for k, s_ in list(self._aplicados.items()):
+                self._aplicados_lay.removeWidget(s_)
+                s_.hide()
+                s_.deleteLater()
+                self.secciones.pop(f"efecto:{k}", None)
+            self._aplicados = {}
+            for k in claves:
+                cuerpo = QWidget()
+                h = QHBoxLayout(cuerpo)
+                h.setContentsMargins(0, 0, 0, 0)
+                h.addStretch(1)
+                b = QPushButton("Quitar")
+                b.setIcon(_glifo("🗑"))
+                b.setToolTip("Quita este efecto del clip (Ctrl+Z lo devuelve)")
+                b.clicked.connect(lambda _c=False, kk=k: QTimer.singleShot(0, lambda: self._quitar_efecto(kk)))
+                h.addWidget(b)
+                clave = f"efecto:{k}"
+                s_ = SEC.Seccion(clave, self._nombre_efecto(k), cuerpo, True, True, False,
+                                 ayuda="Sus ajustes, en la página Efectos")
+                s_.encendida.connect(lambda on, kk=clave: self._sec_encendida(kk, on))
+                self.secciones[clave] = s_
+                self._aplicados_lay.insertWidget(self._aplicados_lay.indexOf(self.efectos_vacio), s_)
+                self._aplicados[k] = s_
+        for k, s_ in self._aplicados.items():
+            s_.set_on(not SEC.apagada(c, f"efecto:{k}"))
+
+
+    @staticmethod
+    def _nombre_efecto(k: str) -> str:
+        try:
+            from .effects_panel import LOOKS
+            nombres = {kk: t for kk, t, _v, _h in LOOKS}
+        except Exception:  # noqa: BLE001
+            nombres = {}
+        return nombres.get(k, {"letterbox": "▭ Barras de cine", "invert": "◑ Negativo"}.get(k, k))
+
+    def _quitar_efecto(self, k: str):
+        from ..core import effects as EFX
+        from . import inspector_secciones as SEC
+        c = self._clip()
+        if c is None:
+            return
+        fx = EFX.without(c.fx, [k]) or {}
+        fx = SEC._fx_sin_apagado(fx, f"efecto:{k}")
+        self.ctrl.set_clip_props([c.id], f"✦ Quitar {self._nombre_efecto(k)}", fx=fx or None)
+
+    # ---- recorte
+    def _on_crop(self, k: str, v: float):
+        c = self._clip()
+        if self._loading or c is None:
+            return
+        box = dict(self.transform_box._box_now(c))
+        crop = dict(box.get("crop") or {})
+        crop[k] = round(v / 100, 4)
+        contrario = {"l": "r", "r": "l", "t": "b", "b": "t"}[k]
+        crop[k] = min(crop[k], round(0.98 - float(crop.get(contrario, 0.0)), 4))
+        crop = {kk: vv for kk, vv in crop.items() if vv > 1e-4}
+        if crop:
+            box["crop"] = crop
+        else:
+            box.pop("crop", None)
+        if c.layout is None:
+            box["bg"] = "none"
+        self.ctrl.set_clip_layout(c.id, box, self._now(), "✂ Recorte")
+
+    def _refresh_crop(self, c):
+        box = self.transform_box._box_now(c) if c is not None else {}
+        crop = box.get("crop") or {}
+        for k, sp in self.crop_spins.items():
+            sp.setValue(float(crop.get(k, 0.0)) * 100)
+        from ..core import decor
+        sv = decor.suavizar_of(c.fx) if c is not None else 0.0
+        self.suave_val.setValue(sv * 100)
+        self.suave_on.setChecked(sv > 0)
+
+    # ---- transición
+    def set_transition(self, rid: str | None):
+        """🎞 Transición elegida en la línea de tiempo (id del clip de la DERECHA del corte); None = ninguna."""
+        self._trans_id = rid
+        if rid:
+            self._ids = []
+            self._all_ids = []
+            self._audio_id = None
+        self._refresh()
+
+    def _mirar_transicion(self):
+        """(sin enganche en la ventana) la línea de tiempo elige una transición vaciando la selección y luego
+        guardando cuál: se mira justo después."""
+        tl = getattr(self.window(), "timeline", None)
+        rid = getattr(tl, "sel_trans", None)
+        if rid != self._trans_id and not self._ids:
+            self.set_transition(rid)
+
+    def _poner_transicion(self, auto: bool | None = None):
+        if self._loading or not self._trans_id:
+            return
+        if auto is None:
+            auto = self.trans_auto.isChecked()
+        self.ctrl.set_transition([self._trans_id], self.trans_tipo.currentData(),
+                                 None if auto else float(self.trans_dur.value()))
+
+    def _ver_transicion(self):
+        c = self.ctrl.project.clips.get(self._trans_id or "")
+        if c is None or self.engine is None:
+            return
+        self.engine.user_seek(c.start) if hasattr(self.engine, "user_seek") else None
+        self._view_here()
+
+    def _refresh_transicion(self):
+        from ..core import transitions as TR
+        p = self.ctrl.project
+        c = p.clips.get(self._trans_id or "")
+        t = TR.of(c) if c is not None else None
+        apag = (c.fx or {}).get("apagado", {}).get("transicion") if c is not None else None
+        if t is None and apag:
+            t = ((apag.get("fx") or {}).get("trans")) or None
+        prev = TR.previous(p, c) if c is not None else None
+        if c is None or t is None:
+            return False
+        nm = lambda x: (p.media_of(x).name if x is not None and p.media_of(x) else "¿?")   # noqa: E731
+        self.trans_info.setText(f"Entre «{nm(prev)}» y «{nm(c)}» ({fmt_time(c.start)})")
+        self.trans_tipo.setCurrentIndex(max(0, self.trans_tipo.findData(t.get("type"))))
+        self.trans_dur.setValue(float(t.get("dur", 0.5)))
+        self.trans_auto.setChecked(False)               # (la duración automática se calcula al ponerla)
+        return True
+
+    # ---- escena / clip compuesto
+    def _escena_de(self, c):
+        from ..core import scenes as _sc
+        eid = _sc.id_de_nota(c.note) if c is not None else None
+        return eid if eid and eid in self.ctrl.project.scenes else None
+
+    def _editar_escena(self):
+        eid = self._escena_de(self._clip())
+        tl = getattr(self.window(), "timeline", None)
+        if eid and tl is not None and hasattr(tl, "scene_open_requested"):
+            tl.scene_open_requested.emit(eid)
+
+    def _deshacer_compuesto(self):
+        c = self._clip()
+        if c is None or not self.ctrl.is_compound(c.id):
+            return
+        ids = self.ctrl.break_compound(c.id)
+        tl = getattr(self.window(), "timeline", None)
+        if ids and tl is not None:
+            tl.set_selection(ids)
+
+    def _visuales(self) -> list[str]:
+        p = self.ctrl.project
+        return [i for i in self._ids if i in p.clips and p.track(p.clips[i].track_id) is not None
+                and p.track(p.clips[i].track_id).kind != TRACK_AUDIO]
+
+    def _sonoros(self) -> list[str]:
+        p = self.ctrl.project
+        out = []
+        for i in self._targets():
+            c = p.clips.get(i)
+            m = p.media_of(c) if c else None
+            if c is not None and c.text is None and m is not None and (m.kind == "audio" or m.has_audio):
+                out.append(i)
+        return out
 
     # ------------------------------------------------------------- refresco
     def set_selection(self, ids: list[str]):
         """Una imagen y su sonido vinculado se muestran como un solo clip (como en Resolve):
         la pestaña Audio y el volumen actúan sobre el sonido."""
+        if getattr(self, "_paso_abierto", False):
+            self._cerrar_paso()
+        tm = getattr(self, "_txt_timer", None)
+        if tm is not None and tm.isActive():         # (lo escrito y aún sin guardar va a SU texto: nunca se pierde)
+            tm.stop()
+            self._set_text(content=self.text_edit.toPlainText())
         ids = list(ids)
+        self._nuevo = ids != list(getattr(self, "_all_ids", [])) or bool(self._trans_id)
         self._all_ids = ids
         self._audio_id = None
+        self._trans_id = None
         p = self.ctrl.project
         clips = [p.clips[i] for i in ids if i in p.clips]
         if len(clips) == 2 and clips[0].link and clips[0].link == clips[1].link:
@@ -1319,19 +2280,11 @@ class InspectorPanel(QWidget):
             if len(vis) == 1 and len(aud) == 1:
                 ids = [vis[0].id]
                 self._audio_id = aud[0].id
-        # 🎚 Al elegir OTRO clip: un audio abre su ecualizador (pestaña Audio); un video no se queda en el ecualizador
-        # (va a la pestaña general «Clip»; si estabas en Video o Color, sigues ahí)
-        if len(ids) == 1 and ids != list(getattr(self, "_ids", [])) and ids[0] in p.clips:
-            c0 = p.clips[ids[0]]
-            tr0 = p.track(c0.track_id)
-            m0 = p.media_of(c0)
-            es_audio = (tr0 is not None and tr0.kind == TRACK_AUDIO) or bool(m0 and m0.kind == "audio")
-            if es_audio:
-                self._last_tab = 2
-            elif self._last_tab == 2 and not getattr(self, "prefer_audio", False):   # (en la página Audio, se queda)
-                self._last_tab = 0
         self._ids = ids
         self._refresh()
+        self._nuevo = False
+        if not ids:
+            QTimer.singleShot(0, self._mirar_transicion)
 
     def _aclip(self):
         """El clip cuyo sonido se edita: el sonido vinculado o el propio clip."""
@@ -1343,106 +2296,200 @@ class InspectorPanel(QWidget):
         """Todos los clips seleccionados (incluido el sonido vinculado)."""
         return [i for i in getattr(self, "_all_ids", self._ids) if i in self.ctrl.project.clips] or self._ids
 
+    def _cabecera(self, titulo: str, origen: str = "", color: str = "#9aa1ad"):
+        """El nombre de lo elegido. (20/11, auditoría) «Creado por ti» y el nombre del proyecto van al tooltip del
+        nombre —unos 20 px más para lo que se ajusta—; «Creado por la IA» (naranja) se queda a la vista."""
+        self.clip_title.setText(titulo)
+        self.clip_title.setToolTip(f"{titulo}\n{origen}" if origen else titulo)
+        a_la_vista = bool(origen) and color != "#9aa1ad"
+        self.clip_origin.setText(origen if a_la_vista else "")
+        self.clip_origin.setStyleSheet(f"color: {color};")
+        self.clip_origin.setVisible(a_la_vista)
+
     def _refresh(self):
         self._loading = True
+        nuevo = getattr(self, "_nuevo", False)
         try:
             p = self.ctrl.project
             self._ids = [i for i in self._ids if i in p.clips]
-            if not self._ids:
-                self.stack.setCurrentIndex(0)
-                self.project_name.setText(p.name)
-                self.format_combo.setCurrentIndex(max(0, self.format_combo.findData(p.format)))
-                for idx, (_l, w, h) in enumerate(RESOLUTIONS):
-                    if (w, h) == (p.width, p.height):
-                        self.res_combo.setCurrentIndex(idx)
-                if p.fps in FPS_OPTIONS:
-                    self.fps_combo.setCurrentIndex(FPS_OPTIONS.index(p.fps))
-                self.project_stats.setText(
-                    f"Duración: {fmt_time(p.duration())}\n{len(p.clips)} clips · "
-                    f"{len(p.media)} archivos en la biblioteca · {len(p.markers)} marcadores")
+            if self._trans_id and (self._ids or self._trans_id not in p.clips):
+                self._trans_id = None
+            self._refresh_project(p)
+            if not self._ids and self._trans_id and self._refresh_transicion():
+                self._modo = "transicion"
+                self._cabecera("Transición")
+                self._ver_secciones("transicion")
+                self._aplicar_pestanas({"transicion"}, "transicion")
+                self._refrescar_interruptores(None)
+            elif not self._ids:
+                self._modo = "proyecto"
+                self._cabecera("Proyecto", p.name or "")
+                self._ver_secciones("proyecto")
+                self._refrescar_aplicados(None)
+                self._aplicar_pestanas(set(), "proyecto")
             elif len(self._ids) > 1:
-                self.stack.setCurrentIndex(2)
-                self.multi_title.setText(f"{len(self._ids)} clips seleccionados")
+                self._modo = "varios"
+                self._refresh_varios(p, nuevo)
             else:
                 c = p.clips[self._ids[0]]
                 if c.text is not None:
-                    self.stack.setCurrentIndex(3)
+                    self._modo = "texto"
+                    self._cabecera("Texto en pantalla", "🟧 Creado por la IA" if c.origin == ORIGIN_AI else
+                                   "Creado por ti", "#ff9f1c" if c.origin == ORIGIN_AI else "#9aa1ad")
+                    self._ver_secciones("texto")
                     self._fill_text_page(c)
-                    return
-                self.stack.setCurrentIndex(1)
-                m = p.media_of(c)
-                tr = p.track(c.track_id)
-                self.clip_title.setText(m.name if m else "¿?")
-                if c.origin == ORIGIN_AI:
-                    self.clip_origin.setText("🟧 Creado por la IA")
-                    self.clip_origin.setStyleSheet("color: #ff9f1c;")
+                    self._refrescar_aplicados(None)
+                    tr = p.track(c.track_id)
+                    self._aplicar_pestanas({"texto", "archivo"}, self._pestana_para("texto", {"texto", "archivo"},
+                                                                                    nuevo))
+                    ed = not c.locked and not (tr and tr.locked)
+                    self._pag["texto"].setEnabled(ed)
+                    self._editable(ed, ("texto",))
+                    self._refresh_archivo(c, p.media_of(c), tr)
+                    self._refrescar_interruptores(c)
                 else:
-                    self.clip_origin.setText("Creado por ti")
-                    self.clip_origin.setStyleSheet("color: #9aa1ad;")
-                self.clip_file.setText(os.path.basename(m.path) if m else "")
-                self.clip_file.setToolTip(m.path if m else "")
-                self.clip_track.setText(tr.name if tr else "")
-                self.clip_pos.setText(f"{fmt_time(c.start)} → {fmt_time(c.end)}")
-                self.clip_dur.setText(fmt_time(c.duration))
-                if m and m.kind == KIND_IMAGE:
-                    self.clip_src.setText("imagen fija")
-                else:
-                    self.clip_src.setText(f"{fmt_time(c.source_in)} → {fmt_time(c.source_in + c.src_len)}")
-                ac = self._aclip() or c
-                self.volume.setValue(round(ac.volume * 100))
-                self.enabled.setChecked(c.enabled)
-                self.locked.setChecked(c.locked)
-                if not self.note.hasFocus():
-                    self.note.setPlainText(c.note)
-                editable = not c.locked and not (tr and tr.locked)
-                self.volume.setEnabled(editable)
-                self.enabled.setEnabled(editable)
-                self.note.setReadOnly(not editable)
-                visual = bool(m and m.kind != "audio") and not (tr and tr.kind == TRACK_AUDIO)
-                self.frame_box.setVisible(visual)
-                self.frame_box.setEnabled(editable)
-                has_audio = bool(m and (m.kind == "audio" or m.has_audio))
-                if self._audio_id:
-                    self.clip_track.setText(f"{tr.name if tr else ''}  +  🔗 {p.track(ac.track_id).name}")
-                quiero = self._last_tab              # (al ocultar la pestaña actual, Qt salta a otra y la «recuerda»)
-                self.clip_tabs.setTabVisible(1, visual)
-                self.clip_tabs.setTabVisible(2, has_audio)
-                self.clip_tabs.setTabVisible(3, visual)          # (Color; antes de volver a la pestaña deseada)
-                self.clip_tabs.widget(2).setEnabled(editable)
-                if self.clip_tabs.isTabVisible(quiero):
-                    self.clip_tabs.setCurrentIndex(quiero)
-                self._last_tab = quiero
-                if has_audio:
-                    self._refresh_audio_tab(ac, m)
-                self.track_box.setVisible(visual)
-                self.track_box.setEnabled(editable)
-                self._refresh_track_box(c, m)
-                self._refresh_speed(c, m, editable)
-                self._refresh_enhance(c, m, editable)
-                self._refresh_color(c, visual, editable)
-                self._refresh_blend(c, visual, editable)
-                fxd = c.fx or {}
-                for key, spin in self.fx_spins.items():
-                    spin.setValue(float(fxd.get(key, 0.0)))
-                    spin.setEnabled(editable)
-                for key in ("flash", "shake", "lines", "focus_in"):   # en el audio solo tienen sentido los fundidos
-                    lbl = self.effects_box.layout().labelForField(self.fx_spins[key])
-                    self.fx_spins[key].setVisible(visual)
-                    if lbl:
-                        lbl.setVisible(visual)
-                name = next((n for n, lay_ in {**transform.LAYOUTS, **transform.HIDDEN_LAYOUTS}.items()
-                             if (c.layout or transform.FULL) == lay_), None)
-                for hn in transform.HIDDEN_LAYOUTS:      # los antiguos solo aparecen en el clip que los tiene
-                    i = self.layout_combo.findText(hn)
-                    if hn == name and i < 0:
-                        self.layout_combo.addItem(hn)
-                    elif hn != name and i >= 0:
-                        self.layout_combo.removeItem(i)
-                self.layout_combo.setCurrentText(name or "Pantalla completa")
-                self.btn_unstretch.setVisible((c.layout or {}).get("fit") == "stretch")
-                self._refresh_framing()
+                    self._refresh_clip(p, c, nuevo)
         finally:
             self._loading = False
+
+    def _refresh_project(self, p):
+        self.project_name.setText(p.name)
+        self.format_combo.setCurrentIndex(max(0, self.format_combo.findData(p.format)))
+        for idx, (_l, w, h) in enumerate(RESOLUTIONS):
+            if (w, h) == (p.width, p.height):
+                self.res_combo.setCurrentIndex(idx)
+        if p.fps in FPS_OPTIONS:
+            self.fps_combo.setCurrentIndex(FPS_OPTIONS.index(p.fps))
+        self.project_stats.setText(
+            f"Duración: {fmt_time(p.duration())}\n{len(p.clips)} clips · "
+            f"{len(p.media)} archivos en la biblioteca · {len(p.markers)} marcadores")
+        self.chk_loudnorm.setChecked(bool(getattr(p, "loudnorm", True)))
+        subs = getattr(p, "subtitles", None)
+        self.chk_subs.setChecked(bool(getattr(subs, "enabled", False)))
+        musica = [t for t in p.tracks if t.kind == TRACK_AUDIO and t.duck_db is not None]
+        self.mezcla_info.setText(f"{len(musica)} pista(s) de música que bajan cuando hablas." if musica else
+                                 "Ninguna pista de música baja cuando hablas.")
+        self.narracion_info.setText(f"{len(p.transcripts)} archivo(s) con la narración transcrita." if
+                                    p.transcripts else "Aún no hay narración transcrita.")
+
+    def _refresh_varios(self, p, nuevo: bool):
+        clips = [p.clips[i] for i in self._ids]
+        vis = self._visuales()
+        son = self._sonoros()
+        self._cabecera(f"{len(self._ids)} clips seleccionados", "Lo común a todos")
+        self.multi_title.setText(f"{len(self._ids)} clips seleccionados")
+        self._ver_secciones("varios")
+        self._editable(True, ("efectos",))
+        self._refrescar_aplicados(None)
+        self.multi_opacity.setValue(int(round((p.clips[vis[0]].opacity if vis else 1.0) * 100)))
+        self.multi_blend.setCurrentIndex(max(0, self.multi_blend.findData(p.clips[vis[0]].blend if vis else "normal")))
+        self.multi_volume.setValue(int(round((p.clips[son[0]].volume if son else 1.0) * 100)))
+        self.secciones["varios_video"].setVisible(bool(vis))
+        self.secciones["varios_audio"].setVisible(bool(son))
+        fxd = clips[0].fx or {}
+        for key, spin in self.fx_spins.items():
+            spin.setValue(float(fxd.get(key, 0.0)))
+        activas = {"efectos", "archivo"} | ({"video"} if vis else set()) | ({"audio"} if son else set())
+        self._aplicar_pestanas(activas, self._pestana_para("varios", activas, nuevo))
+        self._refrescar_interruptores(clips[0])
+        self._refresh_sombra(p.clips[vis[0]] if vis else None)
+
+    def _refresh_archivo(self, c, m, tr):
+        self.clip_file.setText(os.path.basename(m.path) if m else ("Texto en pantalla" if c.text is not None else ""))
+        self.clip_file.setToolTip(m.path if m else "")
+        self.clip_track.setText(tr.name if tr else "")
+        self.clip_pos.setText(f"{fmt_time(c.start)} → {fmt_time(c.end)}")
+        self.clip_dur.setText(fmt_time(c.duration))
+        if m and m.kind == KIND_IMAGE or c.text is not None:
+            self.clip_src.setText("imagen fija" if c.text is None else "—")
+        else:
+            self.clip_src.setText(f"{fmt_time(c.source_in)} → {fmt_time(c.source_in + c.src_len)}")
+        self.enabled.setChecked(c.enabled)
+        self.locked.setChecked(c.locked)
+        if not self.note.hasFocus():
+            self.note.setPlainText(c.note)
+        editable = not c.locked and not (tr and tr.locked)
+        self.enabled.setEnabled(editable)
+        self.note.setReadOnly(not editable)
+        escena = self._escena_de(c)
+        compuesto = bool(self.ctrl.is_compound(c.id)) if hasattr(self.ctrl, "is_compound") else False
+        self.btn_editar_escena.setVisible(bool(escena))
+        self.btn_deshacer_compuesto.setVisible(compuesto)
+        self.secciones["escena"].setVisible(bool(escena) or compuesto)
+        for k in ("informacion", "ajustes", "nota"):
+            self.secciones[k].setVisible(True)
+
+    def _refresh_clip(self, p, c, nuevo: bool):
+        m = p.media_of(c)
+        tr = p.track(c.track_id)
+        if c.origin == ORIGIN_AI:
+            self._cabecera(m.name if m else "¿?", "🟧 Creado por la IA", "#ff9f1c")
+        else:
+            self._cabecera(m.name if m else "¿?", "Creado por ti")
+        self._refresh_archivo(c, m, tr)
+        ac = self._aclip() or c
+        self.volume.setValue(round(ac.volume * 100))
+        editable = not c.locked and not (tr and tr.locked)
+        self.volume.setEnabled(editable)
+        visual = bool(m and m.kind != "audio") and not (tr and tr.kind == TRACK_AUDIO)
+        self._ver_secciones("clip")
+        self.frame_box.setVisible(visual)
+        self.frame_box.setEnabled(editable)
+        has_audio = bool(m and (m.kind == "audio" or m.has_audio))
+        if self._audio_id:
+            self.clip_track.setText(f"{tr.name if tr else ''}  +  🔗 {p.track(ac.track_id).name}")
+        for k in ("transformar", "recorte", "encuadre", "composicion", "seguimiento", "color", "reencuadre"):
+            self.secciones[k].setVisible(visual)
+        self.secciones["reencuadre"].setVisible(visual and p.height > p.width)
+        for k in ("volumen", "ecualizador"):
+            self.secciones[k].setVisible(has_audio)
+        self._pag["audio"].setEnabled(editable)
+        self.crop_box.setEnabled(editable)
+        if has_audio:
+            self._refresh_audio_tab(ac, m)
+        self.track_box.setVisible(visual)
+        self.track_box.setEnabled(editable)
+        self._refresh_track_box(c, m)
+        self._refresh_speed(c, m, editable)
+        self._refresh_enhance(c, m, editable)
+        self.secciones["mejorar"].setVisible(not self.enhance_box.isHidden())
+        self._refresh_reencuadre(c, m, editable)
+        self._refresh_color(c, visual, editable)
+        self._refresh_blend(c, visual, editable)
+        if visual:
+            self._refresh_crop(c)
+        fxd = c.fx or {}
+        for key, spin in self.fx_spins.items():
+            spin.setValue(float(fxd.get(key, 0.0)))
+            spin.setEnabled(editable)
+        for key in ("flash", "shake", "lines", "focus_in"):   # en el audio solo tienen sentido los fundidos
+            self._fx_filas[key].setVisible(visual)
+        name = next((n for n, lay_ in {**transform.LAYOUTS, **transform.HIDDEN_LAYOUTS}.items()
+                     if (c.layout or transform.FULL) == lay_), None)
+        for hn in transform.HIDDEN_LAYOUTS:      # los antiguos solo aparecen en el clip que los tiene
+            i = self.layout_combo.findText(hn)
+            if hn == name and i < 0:
+                self.layout_combo.addItem(hn)
+            elif hn != name and i >= 0:
+                self.layout_combo.removeItem(i)
+        self.layout_combo.setCurrentText(name or "Pantalla completa")
+        self.btn_unstretch.setVisible((c.layout or {}).get("fit") == "stretch")
+        self._refresh_framing()
+        self._refrescar_aplicados(c)
+        self._refrescar_interruptores(c)
+        self._refresh_sombra(c if visual else None, editable)
+        activas = {"efectos", "archivo"} | ({"video"} if visual else set()) | ({"audio"} if has_audio else set())
+        modo = "clip" if visual else "audio"
+        self._modo = modo
+        self._aplicar_pestanas(activas, self._pestana_para(modo, activas, nuevo, visual, has_audio))
+        self._editable(editable, ("video", "audio", "efectos"))
+        self.transform_box.setEnabled(editable)
+
+    def _editable(self, editable: bool, paginas):
+        """Un clip bloqueado: sus ●/↺ tampoco se pueden pulsar."""
+        for k, s_ in self.secciones.items():
+            if any(self._pag[pg].isAncestorOf(s_) for pg in paginas):
+                s_.set_editable(editable)
 
     # ------------------------------------------------------------- cambios
     def _on_res(self, idx):
@@ -1486,23 +2533,18 @@ class InspectorPanel(QWidget):
 
     def _build_enhance_box(self) -> QGroupBox:
         """«🛠 Mejorar imagen»: reducir ruido, estabilizar y detectar cortes de escena."""
-        self.enhance_box = QGroupBox("🛠 Mejorar imagen")
+        self.enhance_box = QGroupBox("Mejorar imagen")
         f = QFormLayout(self.enhance_box)
-        row = QHBoxLayout()
-        self.denoise = QSlider(Qt.Horizontal)
-        self.denoise.setRange(0, 100)
-        self.denoise_val = QLabel("—")
-        self.denoise_val.setFixedWidth(42)
+        self.denoise = _vd(0, 100, 1, 0, "%", entero=True)
+        self.denoise.setSpecialValueText("—")
+        self.denoise.setToolTip("Cuánto ruido (grano de la cámara) se quita (— = nada)")
         self.denoise.valueChanged.connect(self._on_denoise)
-        row.addWidget(self.denoise, 1)
-        row.addWidget(self.denoise_val)
-        f.addRow("Reducir ruido", row)
+        f.addRow(_fila("Reducir ruido", self.denoise))
         srow = QHBoxLayout()
         self.stab = QCheckBox("Estabilizar")
         self.stab.setToolTip("Quita el temblor de la cámara. Al activarlo se analiza el movimiento (unos segundos).")
         self.stab.toggled.connect(self._on_stab)
-        self.stab_amount = QSlider(Qt.Horizontal)
-        self.stab_amount.setRange(10, 100)
+        self.stab_amount = _vd(10, 100, 1, 0, "%", entero=True)
         self.stab_amount.setToolTip("Cuánto se suaviza el movimiento")
         self.stab_amount.valueChanged.connect(self._on_stab_amount)
         srow.addWidget(self.stab)
@@ -1520,12 +2562,183 @@ class InspectorPanel(QWidget):
         set_help(self.enhance_box, "mejorar")
         return self.enhance_box
 
+    # ------------------------------------------------------------- 🌑 Sombra (21/11, el «Drop Shadow» de Resolve)
+    def _build_sombra_box(self) -> QGroupBox:
+        """Efectos → «Sombra» del clip (video o imagen): color, fuerza, ángulo, distancia y desenfoque, como el «Drop
+        Shadow» de Resolve. Se guarda en fx["shadow"] (core/decor.py) y sigue la forma (el alfa) de la imagen."""
+        self.sombra_box = QGroupBox("Sombra")
+        f = QFormLayout(self.sombra_box)
+        self.sombra_color = QPushButton()
+        self.sombra_color.setToolTip("Color de la sombra (negro = la de siempre)")
+        D.medida(self.sombra_color, lambda w: w.setFixedSize(D.px(46), D.px(D.ALTO_CAMPO)))
+        self.sombra_color.clicked.connect(self._elegir_color_sombra)
+        self.sombra_fuerza = _vd(0, 100, 1, 0, "%", entero=True)
+        self.sombra_fuerza.setToolTip("Cuánto se ve la sombra (0 % = nada, 100 % = el color entero)")
+        self.sombra_angulo = _vd(-180, 180, 1, 0, "°", entero=True)
+        self.sombra_angulo.setToolTip("Hacia dónde cae, como una brújula: 0° = arriba, 90° = derecha, 135° = abajo a "
+                                      "la derecha, 180° = abajo, −90° = izquierda")
+        self.sombra_distancia = _vd(0.0, 5.0, 0.1, 1, "%")
+        self.sombra_distancia.setToolTip("Cuánto se separa del clip (en % del lado corto de la pantalla)")
+        self.sombra_desenfoque = _vd(0.0, 10.0, 0.1, 1, "%")
+        self.sombra_desenfoque.setToolTip("Lo suave que es su borde (en % del lado corto de la pantalla)")
+        for campo, w_ in (("opacity", self.sombra_fuerza), ("angle", self.sombra_angulo),
+                          ("distance", self.sombra_distancia), ("blur", self.sombra_desenfoque)):
+            w_.valueChanged.connect(lambda v, k=campo: self._on_sombra(k, v))
+        self._sombra_filas = [_fila("Color", self.sombra_color), _fila("Fuerza", self.sombra_fuerza),
+                              _fila("Ángulo", self.sombra_angulo), _fila("Distancia", self.sombra_distancia),
+                              _fila("Desenfoque", self.sombra_desenfoque)]
+        for fila in self._sombra_filas:
+            f.addRow(fila)
+        fila_b = QWidget()
+        hb = QHBoxLayout(fila_b)
+        hb.setContentsMargins(0, 0, 0, 0)
+        self.btn_sombra_poner = QPushButton("Poner sombra")
+        self.btn_sombra_poner.setIcon(D.icono("sombra"))
+        self.btn_sombra_poner.setToolTip("Una sombra pequeña y suave detrás del clip para darle profundidad (sigue la "
+                                         "forma de un PNG recortado). Ctrl+Z la quita")
+        self.btn_sombra_poner.clicked.connect(lambda: self.poner_sombra())
+        self.btn_sombra_quitar = QPushButton("Quitar")
+        self.btn_sombra_quitar.setIcon(D.icono("trash-2"))
+        self.btn_sombra_quitar.setToolTip("Quita la sombra del clip (Ctrl+Z la devuelve)")
+        self.btn_sombra_quitar.clicked.connect(lambda: QTimer.singleShot(0, self.quitar_sombra))
+        hb.addWidget(self.btn_sombra_poner)
+        hb.addStretch(1)
+        hb.addWidget(self.btn_sombra_quitar)
+        f.addRow(fila_b)
+        return self.sombra_box
+
+    def _sombra_clips(self) -> list:
+        """Los clips elegidos que pueden llevar sombra (de video o imagen, no textos ni audio)."""
+        p = self.ctrl.project
+        out = []
+        for cid in self._visuales():
+            c = p.clips.get(cid)
+            m = p.media_of(c) if c is not None else None
+            if c is not None and c.text is None and m is not None and m.kind in ("video", KIND_IMAGE):
+                out.append(c)
+        return out
+
+    @staticmethod
+    def _sombra_de(c) -> dict | None:
+        """La sombra del clip (o la guardada al apagarla con ●), con todos sus valores."""
+        from ..core import decor
+        from . import inspector_secciones as SEC
+        sh = decor.shadow_of(c.fx)
+        if sh is None and SEC.apagada(c, "sombra"):
+            sh = decor.shadow_of(((c.fx or {})[SEC.APAGADO]["sombra"] or {}).get("fx") or {})
+        return sh
+
+    def _refresh_sombra(self, c, editable: bool = True):
+        """La sección «Sombra»: a la vista con un clip de video o imagen; sin sombra, solo «Poner sombra» (sin huecos)."""
+        from ..core import decor
+        s_ = self.secciones.get("sombra")
+        if s_ is None:
+            return
+        clips = self._sombra_clips()
+        if c is None or not clips:
+            s_.setVisible(False)
+            return
+        c = next((x for x in clips if x.id == c.id), clips[0])
+        s_.setVisible(True)
+        sh = self._sombra_de(c)
+        hay = sh is not None
+        for fila in self._sombra_filas:
+            fila.setVisible(hay)
+        self.btn_sombra_poner.setVisible(not hay)
+        self.btn_sombra_quitar.setVisible(hay)
+        v = sh or decor.shadow_of({"shadow": dict(decor.SOMBRA_EFECTO)})
+        self.sombra_fuerza.setValue(int(round(float(v["opacity"]) * 100)))
+        self.sombra_angulo.setValue(int(round(float(v["angle"]))))
+        self.sombra_distancia.setValue(round(float(v["distance"]) * 100, 1))
+        self.sombra_desenfoque.setValue(round(float(v["blur"]) * 100, 1))
+        self.sombra_color.setStyleSheet(f"background:{v['color']}; border:1px solid #666;")
+        self._sombra_color_ahora = v["color"]
+        from . import inspector_secciones as SEC
+        s_.body.setEnabled(bool(editable) and not SEC.apagada(c, "sombra"))   # (sin sombra: «Poner sombra» a mano)
+
+    def _on_sombra(self, campo: str, valor):
+        """Un control de la sombra cambió: a todos los clips elegidos que la llevan (un paso; arrastrar = uno solo)."""
+        if self._loading or not self._ids:
+            return
+        if campo == "color":
+            v = valor
+        else:
+            v = float(valor) / (100.0 if campo in ("opacity", "distance", "blur") else 1.0)
+        nombres = {"opacity": "fuerza", "angle": "ángulo", "distance": "distancia", "blur": "desenfoque",
+                   "color": "color"}
+        self._cambiar_sombra({campo: v}, f"Sombra: {nombres[campo]}")
+
+    def _cambiar_sombra(self, cambios: dict, texto: str):
+        from ..core import decor
+        changes = {}
+        for c in self._sombra_clips():
+            sh = decor.shadow_of(c.fx)
+            if sh is None:
+                continue
+            sh.update(cambios)
+            fx = dict(c.fx or {})
+            fx["shadow"] = decor.sombra(sh["opacity"], sh["angle"], sh["distance"], sh["blur"], sh["color"])
+            changes[c.id] = {"fx": fx}
+        if changes:
+            self.ctrl.batch_clip_props(changes, texto)
+
+    def _elegir_color_sombra(self):
+        from PySide6.QtGui import QColor
+        from .common import pick_color
+        col = pick_color(QColor(getattr(self, "_sombra_color_ahora", "#000000")), self, "Color de la sombra")
+        if col.isValid():
+            self.poner_color_sombra(col.name())
+
+    def poner_color_sombra(self, color: str):
+        """El color de la sombra de los clips elegidos (un Ctrl+Z)."""
+        from ..core import decor
+        self._on_sombra("color", decor.color_sombra(color))
+
+    def poner_sombra(self, ids: list[str] | None = None, texto: str = "Sombra") -> int:
+        """🌑 Pone la sombra de fábrica (pequeña y sutil, decor.SOMBRA_EFECTO) a los clips de video o imagen dados (o a
+        los elegidos) que no la tienen, en UN paso de Ctrl+Z. Devuelve cuántos."""
+        from ..core import decor
+        from . import inspector_secciones as SEC
+        p = self.ctrl.project
+        if ids is None:
+            clips = self._sombra_clips()
+        else:
+            clips = []
+            for cid in ids:
+                c = p.clips.get(cid)
+                m = p.media_of(c) if c is not None else None
+                tr = p.track(c.track_id) if c is not None else None
+                if (c is not None and c.text is None and m is not None and m.kind in ("video", KIND_IMAGE)
+                        and not (tr is not None and tr.kind == TRACK_AUDIO)):
+                    clips.append(c)
+        changes = {}
+        for c in clips:
+            if decor.shadow_of(c.fx) is not None:
+                continue
+            fx = SEC._fx_sin_apagado(dict(c.fx or {}), "sombra")
+            fx["shadow"] = decor.sombra(**decor.SOMBRA_EFECTO)
+            changes[c.id] = {"fx": fx}
+        return self.ctrl.batch_clip_props(changes, texto) if changes else 0
+
+    def quitar_sombra(self):
+        """Quita la sombra (también la apagada) de los clips elegidos, en un paso de Ctrl+Z."""
+        from . import inspector_secciones as SEC
+        changes = {}
+        for c in self._sombra_clips():
+            fx = dict(c.fx or {})
+            if "shadow" not in fx and not SEC.apagada(c, "sombra"):
+                continue
+            fx.pop("shadow", None)
+            fx = SEC._fx_sin_apagado(fx, "sombra")
+            changes[c.id] = {"fx": fx or None}
+        if changes:
+            self.ctrl.batch_clip_props(changes, "Quitar sombra")
+
     def _fx_now(self) -> dict:
         c = self._clip()
         return dict((c.fx if c else None) or {})
 
     def _on_denoise(self, v: int):
-        self.denoise_val.setText(f"{v} %" if v else "—")
         if self._loading or not self._ids:
             return
         fx = self._fx_now()
@@ -1639,7 +2852,6 @@ class InspectorPanel(QWidget):
         fx = c.fx or {}
         v = int(round(float(fx.get("denoise", 0) or 0) * 100))
         self.denoise.setValue(v)
-        self.denoise_val.setText(f"{v} %" if v else "—")
         st = fx.get("stab") if isinstance(fx.get("stab"), dict) else None
         video = m.kind == "video" and c.speed > 0
         self.stab.setVisible(video)
@@ -1689,7 +2901,7 @@ class InspectorPanel(QWidget):
         if self.speed_sec.isHidden():                    # (oculta a propósito = imagen; en otra pestaña no cuenta)
             self.ctrl.message.emit("🐢 La velocidad es para videos y audios (no para imágenes).")
             return
-        self.clip_tabs.setCurrentIndex(2 if getattr(self, "_vel_en", None) is getattr(self, "_audio_lay", 0) else 0)
+        self.ir_a("audio" if getattr(self, "_vel_en", None) is getattr(self, "_audio_lay", 0) else "video")
         self.speed_sec.head.blockSignals(True)            # (se abre ahora, sin quedar recordada como abierta)
         self.speed_sec.set_open(True, save=False)
         self.speed_sec.head.blockSignals(False)
@@ -1798,7 +3010,7 @@ class InspectorPanel(QWidget):
             on_kf = any(abs(k["t"] - src) <= 0.05 for k in c.zoom_kf)
             self.kf_label.setText("Sin zoom" if not transform.is_zoomed(c.zoom_kf) and n <= 1 else
                                   "Zoom fijo" if n == 1 else
-                                  f"Animado: {n} claves" + (" · ◆ aquí" if on_kf else ""))
+                                  f"Animado: {n} claves" + (" · clave aquí" if on_kf else ""))
             self.btn_del_kf.setEnabled(on_kf and n >= 2)
             self.btn_prev_kf.setEnabled(n >= 2)
             self.btn_next_kf.setEnabled(n >= 2)
@@ -1806,8 +3018,9 @@ class InspectorPanel(QWidget):
             times = self.ctrl.layout_key_times(c.id)
             nl = len(c.layout_kf)
             here = any(abs(t - self._now()) <= 0.05 for t in times)
-            self.lk_label.setText("Quieto (◆ Clave para animarlo)" if not nl else
-                                  f"Animado: {nl} clave{'s' if nl != 1 else ''}" + (" · ◆ aquí" if here else ""))
+            self.lk_label.setText("Quieto" if not nl else       # (la explicación, en su tooltip)
+                                  f"Animado: {nl} clave{'s' if nl != 1 else ''}" + (" · clave aquí" if here else ""))
+            self.lk_label.setToolTip("Pulsa «Clave» para animar la posición y el tamaño" if not nl else "")
             self.btn_del_lk.setEnabled(here)
             self.btn_prev_lk.setEnabled(bool(times))
             self.btn_next_lk.setEnabled(bool(times))
@@ -1895,3 +3108,23 @@ class InspectorPanel(QWidget):
     def _on_note(self):
         if self._ids:
             self.ctrl.set_clip_props(self._ids, "Editar nota", note=self.note.toPlainText().strip())
+
+
+class _PaginaCompat:
+    """(lo de antes) inspector.stack.currentIndex(): 0 proyecto · 1 clip · 2 varios · 3 texto · 4 transición."""
+
+    def __init__(self, ins):
+        self.ins = ins
+
+    def currentIndex(self) -> int:
+        return {"proyecto": 0, "clip": 1, "audio": 1, "varios": 2, "texto": 3, "transicion": 4}.get(self.ins._modo, 0)
+
+
+def _glifo(ch: str):
+    """Icono monocromo (del tema) para un símbolo."""
+    try:
+        from .theme import glyph_icon
+        return glyph_icon(ch, 16)
+    except Exception:  # noqa: BLE001
+        from PySide6.QtGui import QIcon
+        return QIcon()

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayo
 from .. import APP_NAME, __version__
 from ..core.controller import ProjectController
 from ..core import transform
-from ..core.model import FORMATS, TRACK_AUDIO, TRACK_VIDEO
+from ..core.model import FORMATS, TRACK_AUDIO, TRACK_TEXT, TRACK_VIDEO
 from ..core.paths import autosave_path, session_lock_path
 from .ai_manager import ClipAnalysisManager
 from .audio_monitor import AudioMonitor
@@ -41,8 +41,9 @@ Espacio — reproducir / pausar<br>
 J / K / L — hacia atrás / parar / hacia delante (pulsa J o L otra vez = 2×, 4×, 8×)<br>
 I / O — marcar entrada / salida · Mayús+I / Mayús+O — ir a ellas · Alt+X — quitarlas<br>
 Alt+/ — reproducir de la entrada a la salida · Ctrl+/ — repetir en bucle<br>
-← / → — fotograma anterior / siguiente<br>
-Inicio / Fin — ir al principio / al final<br><br>
+← / → — fotograma anterior / siguiente · Mayús+← / Mayús+→ — 5 segundos atrás / adelante (botones −5s / +5s)<br>
+Inicio / Fin — ir al principio / al final<br>
+Barra del visor: «1×» = velocidad 1× → 2× → 4× → 8× → 1× · 🔊 = volumen de escucha (clic = silenciar) · LUFS = sonoridad para plataformas<br><br>
 <b>Edición</b><br>
 S — dividir en el cabezal (lo seleccionado, o todo lo no bloqueado)<br>
 Supr — eliminar clips seleccionados (o el hueco seleccionado)<br>Arrastrar en zona vacía — rectángulo de selección<br>
@@ -50,7 +51,7 @@ Mayús+Supr — eliminar y cerrar el hueco<br>
 Ctrl+L — bloquear / desbloquear clips seleccionados<br>
 Ctrl++ — juntar: todo se pega a la izquierda (sin huecos) en el canal seleccionado o en toda la línea de tiempo<br>
 Ctrl+Mayús+Supr — eliminar silencio (como en Resolve)<br>
-Ctrl+C / Ctrl+X / Ctrl+V — copiar / cortar / pegar clips en el cabezal · Alt+V — pegar atributos<br>
+Ctrl+C / Ctrl+X / Ctrl+V — copiar / cortar / pegar clips en el cabezal (Ctrl+V también pega una imagen copiada de internet) · Alt+V — pegar atributos<br>
 R — velocidad del clip · Mayús+R — congelar la imagen desde el cabezal<br>
 Alt+T — transición (disolver) en el corte más cercano<br>
 M — añadir marcador en el cabezal<br>
@@ -67,12 +68,199 @@ Ctrl+T — transcribir y analizar · Ctrl+Shift+T — volver a analizar<br>
 En «Texto»: clic en una palabra = ir a ese momento, doble clic = corregirla<br><br>
 <b>Edición avanzada</b><br>
 T — añadir texto en el cabezal · Ctrl+R — revisar el proyecto<br>
-Con un clip seleccionado: arrastrar en el visor = mover encuadre · rueda = zoom<br><br>
+Con un clip seleccionado: arrastrar en el visor = mover encuadre · rueda = zoom<br>
+Visor: rueda — zoom de la vista · Alt+rueda — subir/bajar la vista · rueda pulsada + arrastrar — moverla<br><br>
 <b>Proyecto</b><br>
 Ctrl+N nuevo · Ctrl+O abrir · Ctrl+S guardar · Ctrl+Alt+S guardar versión · Ctrl+E exportar<br>
 Ctrl+1 / Ctrl+2 / Ctrl+3 — pestaña 🎬 Video horizontal / 🎵 Edits / 📱 Vertical (lo de la que dejas queda guardado)<br>
 Ctrl+Mayús+R — 🎙 grabar voz en off · Ctrl+Mayús+K — 📑 capítulos para YouTube · Ctrl+Alt+G — 📸 fotograma (PNG)
 """
+
+
+class _TituloCorto(QLabel):
+    """El nombre del proyecto en la barra de arriba: si no cabe, se acorta con «…» (entero en el tooltip). Así no
+    obliga a una ventana más ancha (con el nombre entero, la barra de arriba pedía ~280 px más)."""
+
+    def minimumSizeHint(self):
+        s = super().minimumSizeHint()
+        s.setWidth(min(s.width(), self.fontMetrics().horizontalAdvance("·  Proyecto…") + 4))
+        return s
+
+    def setText(self, t: str):
+        super().setText(t)
+        self.setToolTip(t.replace("·", "").strip())
+
+    def paintEvent(self, _e):
+        from PySide6.QtGui import QPainter
+        p = QPainter(self)
+        p.setPen(self.palette().color(self.foregroundRole()))
+        r = self.contentsRect()
+        p.drawText(r, int(self.alignment()) | Qt.AlignVCenter,
+                   self.fontMetrics().elidedText(self.text(), Qt.ElideRight, r.width()))
+
+
+class _PestanasEnDosFilas(QWidget):
+    """Fase 1: las pestañas de un grupo de paneles en DOS FILAS con su nombre completo cuando en una no caben (Qt solo
+    sabe hacer una fila). Va encima de la fila de pestañas de Qt (hija suya: se mueve, se oculta y se borra con ella),
+    que se hace el doble de alta para dejarle sitio. La capa NO se queda el ratón: la fila de Qt lo recibe traducido a
+    la pestaña que está debajo en la capa, así que un clic la elige y arrastrarla saca o mueve el panel como siempre."""
+
+    def __init__(self, barra, win):
+        super().__init__(barra)
+        self.barra, self.win = barra, win
+        self.activa = False
+        self.tabs = []                   # [(índice de la pestaña de Qt, nombre, ancho, icono)]
+        self.alto_fila = 28
+        self._encima = -1
+        self._pulsada = None             # (pestaña, punto en la capa, punto en la fila de Qt) mientras se arrastra
+        self._reenviando = False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        barra.setMouseTracking(True)
+        barra.installEventFilter(self)
+        barra.currentChanged.connect(lambda _i: self.update())
+        self.hide()
+
+    @staticmethod
+    def filas(anchos, disp):
+        """Reparte las pestañas (por su ancho) en filas que caben en disp, en orden."""
+        filas, fila, usado = [], [], 0
+        for i, a in enumerate(anchos):
+            if fila and usado + a > disp:
+                filas.append(fila)
+                fila, usado = [], 0
+            fila.append(i)
+            usado += a
+        if fila:
+            filas.append(fila)
+        return filas
+
+    def poner(self, tabs, alto_fila: int):
+        hoja = f"QTabBar::tab {{ height: {alto_fila * 2 - 14}px; }}"
+        if self.barra.styleSheet() != hoja:
+            self.barra.setStyleSheet(hoja)            # (la fila de Qt, el doble de alta: Qt deja el sitio)
+        firma_nueva = [(i, n, a) for i, n, a, _ic in tabs]
+        cambia = (firma_nueva, alto_fila) != ([(i, n, a) for i, n, a, _ic in self.tabs], self.alto_fila) or \
+            not self.activa
+        self.tabs, self.alto_fila, self.activa = tabs, alto_fila, True
+        self.firma = self._firma()
+        if self.geometry() != self.barra.rect():
+            self.setGeometry(self.barra.rect())
+        if self.isHidden():
+            self.show()
+            self.raise_()
+        if cambia:
+            self.update()
+
+    def quitar(self):
+        self.activa = False
+        self._pulsada = None
+        self.hide()
+        if self.barra.styleSheet():
+            self.barra.setStyleSheet("")
+
+    def rects(self):
+        from PySide6.QtCore import QRect
+        disp = max(1, self.width() - 4)
+        out = []
+        for f, fila in enumerate(self.filas([t[2] for t in self.tabs], disp)):
+            x = 2
+            for j in fila:
+                i, n, a = self.tabs[j][:3]
+                out.append((i, n, QRect(x, f * self.alto_fila, a, self.alto_fila)))
+                x += a
+        return out
+
+    def _firma(self):
+        return [self.barra.tabData(i) for i in range(self.barra.count())]
+
+    def _en(self, pos):
+        return next((i for i, _n, r in self.rects() if r.contains(pos)), -1)
+
+    def _reenviar(self, ev, pos_qt):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QApplication
+        nuevo = QMouseEvent(ev.type(), QPointF(pos_qt), QPointF(self.barra.mapToGlobal(pos_qt)), ev.button(),
+                            ev.buttons(), ev.modifiers())
+        self._reenviando = True
+        try:
+            QApplication.sendEvent(self.barra, nuevo)
+        finally:
+            self._reenviando = False
+
+    def eventFilter(self, obj, ev):
+        if obj is not self.barra or not self.activa or self._reenviando:
+            return False
+        t = ev.type()
+        if self._firma() != getattr(self, "firma", None):   # (otras pestañas en esta fila: hasta que se decida otra vez)
+            self.quitar()
+            return False
+        if t == ev.Type.Resize:
+            self.setGeometry(self.barra.rect())
+            return False
+        if t in (ev.Type.MouseButtonPress, ev.Type.MouseButtonDblClick):
+            p = ev.position().toPoint()
+            i = self._en(p)
+            if i < 0 or i >= self.barra.count():
+                return True
+            dentro = self.barra.tabRect(i).center()
+            self._pulsada = (i, p, dentro)
+            self._reenviar(ev, dentro)
+            self.update()
+            return True
+        if t == ev.Type.MouseMove:
+            p = ev.position().toPoint()
+            if self._pulsada is not None and ev.buttons():
+                _i, p0, dentro = self._pulsada
+                self._reenviar(ev, dentro + (p - p0))       # (el arrastre, desde su pestaña de Qt)
+                return True
+            i = self._en(p)
+            if i != self._encima:
+                self._encima = i
+                self.update()
+            return True
+        if t == ev.Type.MouseButtonRelease:
+            if self._pulsada is not None:
+                _i, p0, dentro = self._pulsada
+                self._pulsada = None
+                self._reenviar(ev, dentro + (ev.position().toPoint() - p0))
+                self.update()
+            return True
+        if t == ev.Type.ToolTip:
+            from PySide6.QtWidgets import QToolTip
+            i = self._en(ev.pos())
+            if 0 <= i < self.barra.count() and self.barra.tabToolTip(i):
+                QToolTip.showText(ev.globalPos(), self.barra.tabToolTip(i), self.barra)
+            else:
+                QToolTip.hideText()
+            return True
+        if t == ev.Type.Leave:
+            self._encima = -1
+            self.update()
+        return False
+
+    def paintEvent(self, _e):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QColor, QPainter, QPen
+        from .theme import BG, TEXT_DIM, acento
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(BG))
+        actual = self.barra.currentIndex()
+        iconos = {t[0]: t[3] for t in self.tabs}
+        for i, n, r in self.rects():
+            vivo = i in (actual, self._encima)
+            ic = iconos.get(i)
+            x = r.left() + 8
+            if ic is not None and not ic.isNull():
+                ic.paint(p, QRect(x, r.center().y() - 7, 14, 14), Qt.AlignCenter,
+                         ic.Mode.Normal, ic.State.On if vivo else ic.State.Off)
+                x += 18
+            p.setPen(QColor("white") if vivo else QColor(TEXT_DIM))
+            p.drawText(QRect(x, r.top(), r.right() - x - 6, r.height()), Qt.AlignLeft | Qt.AlignVCenter, n)
+            if i == actual:
+                p.setPen(QPen(acento(), 2))
+                p.drawLine(r.left() + 4, r.bottom() - 1, r.right() - 4, r.bottom() - 1)
+        p.end()
 
 
 class _PanelSwitcher:
@@ -111,9 +299,37 @@ class MainWindow(QMainWindow):
         self.preview.title_label.renamed.connect(lambda n: self.ctrl.rename_project(n))
         self.workspaces.switched.connect(self.preview.set_guides_space)   # ▦ guías de cada pestaña (Edits/Shorts: 9:16)
         self.workspaces.switched.connect(lambda tab: self.apply_tab_panels(tab))   # 🗂 los paneles de esa pestaña
+        self.workspaces.switched.connect(lambda _tab: QTimer.singleShot(0, self._sync_interruptores))
         self._barra_shorts()                                              # 📱 Transcribir, Subtítulos… en Shorts
         self.workspaces.switched.connect(self._al_cambiar_pestaña)
         self.engine = PlaybackEngine(self.ctrl, self.preview, self)
+        try:                                    # 🔎 «Material por frases» en Medios, bajo «Archivos / Carpeta»
+            from .material_por_frases_panel import instalar as _instalar_mpf
+            _instalar_mpf(self)
+        except Exception:                       # (si fallara, el resto de la ventana arranca igual; se apunta en
+            try:                                #  registros\errores.log: con el acceso directo no hay consola)
+                import time as _t
+                import traceback as _tb
+                from ..core.paths import log_path as _log
+                with open(_log(), "a", encoding="utf-8") as _f:
+                    _f.write(f"\n[{_t.strftime('%Y-%m-%d %H:%M:%S')}] «Material por frases» en Medios:\n"
+                             f"{_tb.format_exc()}")
+            except Exception:  # noqa: BLE001
+                pass
+        try:                                    # 🔁 bandejas «No usados» / «Usados 2+ veces» en Medios (fase 4)
+            from .repetidos_ui import instalar_bandejas as _instalar_bandejas
+            _instalar_bandejas(self)
+        except Exception:                       # (si fallara, la ventana arranca igual; se apunta en errores.log)
+            try:
+                import time as _t
+                import traceback as _tb
+                from ..core.paths import log_path as _log
+                with open(_log(), "a", encoding="utf-8") as _f:
+                    _f.write(f"\n[{_t.strftime('%Y-%m-%d %H:%M:%S')}] Bandejas de Medios:\n{_tb.format_exc()}")
+            except Exception:  # noqa: BLE001
+                pass
+        # 〰 fundidos automáticos en los cortes de sonido (fase 3; se recuerda, encendidos por defecto)
+        self.ctrl.fundidos_auto = str(self.settings.value("audio/fundidos_auto", "true")).lower() == "true"
         self.inspector = InspectorPanel(self.ctrl, self.engine)
         help_ui.install(QApplication.instance())
         set_help(self.preview, "visor")
@@ -144,6 +360,9 @@ class MainWindow(QMainWindow):
         hl.addWidget(self.history, 1)
         self.hbar = QScrollBar(Qt.Horizontal)
         self.timeline = TimelineWidget(self.ctrl, self.hbar)
+        self._crear_marcas()                      # 📍 marcadores automáticos: la capa y su índice (fase 5)
+        from .escenas_ajustes_ui import vigilar as _vigilar_escenas
+        _vigilar_escenas(self.ctrl)               # 🎬 PNG de Escenas: lo aplicado no se borra; lo que falte, se repone
         scroll = QScrollArea()
         scroll.setWidget(self.timeline)
         scroll.setWidgetResizable(True)
@@ -178,7 +397,12 @@ class MainWindow(QMainWindow):
         self.clips = ClipsPanel(self.ctrl, self.timeline)
         self.clips.seek_requested.connect(self.engine.user_seek)
         self.clips.hints_changed.connect(lambda m: marcas_set(self.timeline, "clips", m))   # 🎬 marcas de «Dijiste…»
-        self.clips.foco_changed.connect(self.timeline.set_hint_focus)    # 🔑 la elegida, resaltada (📍 Todas)
+        self.clips.foco_changed.connect(self.timeline.set_hint_focus)    # 🔑 la elegida, resaltada
+        self.clips.modo_changed.connect(self.timeline.set_marcas_modo)   # 🔑 Todas / Elegida / Ninguna, a la par
+        self.timeline.marcas_modo_changed.connect(self.clips.set_modo)
+        self.clips.fila_kw_changed.connect(self.timeline.poner_fila_kw)  # ⚡ fila de material: botón, menú y regla
+        self.timeline.kw_fila_changed.connect(self.clips.set_fila_kw)
+        self.clips.set_fila_kw(self.timeline.kw_visible)
         self.timeline.hint_word_clicked.connect(self.clips.elegir_palabra)   # 🔑 clic en la muesca de otra
         self.transcript.search_marks_changed.connect(lambda m: marcas_set(self.timeline, "buscar", m))   # 🔎 Buscar
         self.timeline.moments_requested.connect(self.open_moments)
@@ -196,6 +420,10 @@ class MainWindow(QMainWindow):
         tl.setSpacing(0)
         self.timeline_box = timeline_box
         tl.addWidget(self._timeline_toolbar())
+        from .resumen_linea import ResumenLinea           # 🗺 todo el video en una franja (fase 8)
+        self.resumen = ResumenLinea(self.ctrl, self.timeline)
+        tl.addWidget(self.resumen)
+        self.engine.time_changed.connect(self.resumen.cabezal_movido)     # (su raya del cabezal, al día)
         tl.addWidget(scroll, 1)
         tl.addWidget(self.hbar)
 
@@ -211,24 +439,35 @@ class MainWindow(QMainWindow):
         self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks |
                             QMainWindow.AllowTabbedDocks | QMainWindow.GroupedDragging)
         self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
+        # (de entrada, la línea de tiempo a todo el ancho de abajo; «◧ A todo el alto» pone la biblioteca hasta abajo,
+        #  como DaVinci: ver _esquina_biblioteca)
         self.setCorner(Qt.BottomLeftCorner, Qt.BottomDockWidgetArea)
         self.setCorner(Qt.BottomRightCorner, Qt.BottomDockWidgetArea)
         self.docks: dict[str, QDockWidget] = {}
         self._dock("timeline", "Línea de tiempo", timeline_box, closable=False)
         self._dock("media", "Medios", self.library)
-        self._dock("effects", "Efectos", self.effects)
+        self._dock("effects", "Transiciones y efectos", self.effects)   # («Efectos» = la pestaña del Inspector)
         self._dock("ai", "IA ✨", self.ai_panel)
         self._dock("moments", "🔎 Momentos", self.moments)
+        from .descargas_generales import DescargasGenerales     # 🌐 buscar y bajar lo que quieras (sin palabra)
+        self.descargas_web = DescargasGenerales(self.ctrl, self.timeline)
+        self._dock("descargas_web", "🌐 Descargas", self.descargas_web)
+        from .memes_panel import MemesPanel                     # 😂 tu biblioteca de memes (todos los proyectos)
+        self.memes = MemesPanel(self.ctrl, self)
+        self._dock("memes", "😂 Memes", self.memes)
         self._dock("clips", "🔑 Palabras clave", self.clips)
         from .keywords_window import KeywordsWindow           # 🗂 la carpeta de la palabra elegida (a la derecha)
         self.kw_folders = KeywordsWindow(self.clips, acoplado=True)
         self.clips.carpetas_dock = self.kw_folders
         self._dock("kw_folders", "🗂 Carpetas", self.kw_folders)
+        # 🔑 Página «Palabras clave»: la búsqueda (📁 Mi carpeta | 🌐 Internet) en su propia columna (📥 lo descargado
+        # vive dentro de 🗂 Carpetas: keywords_window / descargas_panel)
+        self._dock("kw_buscar", "🔎 Buscar material", self.clips.sacar_busqueda())
         self._dock("inspector", "Inspector", self.inspector)
         self._dock("voice", "Limpieza", self.voice)
         self.ai_panel.set_transcriber(self.voice)            # 🎙 el transcriptor, en la pestaña «IA ✨»
         self._acceso_voz_ia_en_transcribir()
-        self._dock("transcript", "Texto", self.transcript)
+        self._dock("transcript", "Transcripción", self.transcript)
         self._dock("subtitles", "Subtítulos", self.subtitles)
         self._dock("history", "Historial", history)
         from .scopes_panel import ScopesPanel
@@ -253,9 +492,19 @@ class MainWindow(QMainWindow):
         from .voz_ia_panel import VozIAPanel                   # 🗣 Voz IA: pegar el guion y que lo lea una voz sintética
         self.voz_ia = VozIAPanel(self)
         self._dock("voz_ia", "🗣 Voz IA", self.voz_ia)
+        # 🎚 «Audio inteligente» (antes una subpestaña de IA ✨): su propio panel, en la página 🎚 Audio (y en Editar)
+        self._dock("audio_mix", "🎚 Mezcla y música", self.ai_panel.sacar_audio())
+        # 🔊 Sonidos (antes la pestaña «Sonidos» de Efectos, con 🌐 buscar en internet): su panel, en la página 🎚 Audio
+        self._dock("sounds", "🔊 Sonidos", self.effects.sacar_sonidos())
+        # ✦ (agrupación 20/11) las columnas de la página Efectos de antes: ya no hay página; solo quedan sus nombres para
+        # las distribuciones guardadas viejas (absorbidos: llevan al panel Efectos)
+        for _k, _t in (("fx_trans", "⧉ Transiciones"), ("fx_efectos", "✦ Efectos"), ("fx_filtros", "🎨 Filtros"),
+                       ("fx_figuras", "▭ Figuras geométricas")):
+            self._dock(_k, _t, QWidget())
         manager().open_panel.connect(self.open_tasks)
         self.docks["guide"].toggleViewAction().toggled.connect(lambda on: on or self.guide.clear())
         self.right_tabs = _PanelSwitcher(self)   # compatibilidad: right_tabs.setCurrentWidget(panel)
+        self._agrupar_paneles()                    # (agrupación 20/11: «Voz y texto» y «Audio»; ver la tabla)
         for _k in self.TAB_MANAGED:               # 🗂 lo que enciendas o apagues tú en una pestaña, se recuerda
             self.docks[_k].toggleViewAction().triggered.connect(lambda on, k=_k: self._remember_tab_panel(k, on))
         self._default_layout()
@@ -267,6 +516,7 @@ class MainWindow(QMainWindow):
                 self.restoreState(saved, 3)
             except Exception:  # noqa: BLE001 - un estado guardado roto no impide abrir
                 pass
+        self._migrar_voz_izquierda(saved is not None)   # (22/11: Voz y texto a la izquierda; Palabras clave, aparte)
         if str(self.settings.value("paneles/pestanas_v1", "false")).lower() != "true":
             # (una vez: 🔑 Palabras clave y 🎞 Material del clip, a la derecha, y el edit musical en su sitio, aunque
             # tuvieras una distribución guardada de antes)
@@ -288,10 +538,22 @@ class MainWindow(QMainWindow):
             self.settings.setValue("paneles/voz_ia_v1", "true")
             self.addDockWidget(Qt.RightDockWidgetArea, self.docks["voz_ia"])
             self.tabifyDockWidget(self.docks["inspector"], self.docks["voz_ia"])
+        if saved is not None and str(self.settings.value("paneles/audio_mix_v1", "false")).lower() != "true":
+            # (una vez, con una distribución guardada de antes: «🎚 Mezcla y música» —antes la subpestaña «Audio» de
+            # IA ✨— en pestaña junto a IA ✨, donde la tenías; si IA ✨ está suelta o cerrada, a la izquierda)
+            self._colocar_audio_mix()
+        self.settings.setValue("paneles/audio_mix_v1", "true")
+        if saved is not None and str(self.settings.value("paneles/sonidos_v1", "false")).lower() != "true":
+            # (una vez, con una distribución de antes: «🔊 Sonidos» —antes la pestaña «Sonidos» de Efectos— en pestaña
+            # junto a «🎚 Mezcla y música» (o IA ✨ / Medios), a la vista)
+            self._colocar_junto("sounds", ("audio_mix", "effects", "ai", "media"))
+        self.settings.setValue("paneles/sonidos_v1", "true")
         QTimer.singleShot(0, self.apply_tab_panels)            # 🗂 los paneles de la pestaña con la que se abre
         QTimer.singleShot(0, self._ajustar_paneles)            # ↔ nada cortado por la derecha en ningún panel
         QTimer.singleShot(0, self.timeline.setFocus)           # (S, Supr, Ctrl+Z… van al editor desde el principio)
-        for key, tb in (("top", self._top_bar()), ("pages", self._page_bar())):
+        for key, tb in (("top", self._top_bar()), ("paneles", self._barra_paneles()), ("pages", self._page_bar())):
+            if key == "paneles":
+                self.addToolBarBreak(Qt.TopToolBarArea)   # (su propia fila, debajo de la de arriba)
             bar = QToolBar(key)
             bar.setObjectName("bar_" + key)
             bar.setMovable(False)
@@ -299,24 +561,40 @@ class MainWindow(QMainWindow):
             bar.toggleViewAction().setVisible(False)
             bar.addWidget(tb)
             tb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.addToolBar(Qt.TopToolBarArea if key == "top" else Qt.BottomToolBarArea, bar)
+            self.addToolBar(Qt.BottomToolBarArea if key == "pages" else Qt.TopToolBarArea, bar)
+            if key == "paneles":
+                self._tb_paneles = bar
+        self._fila_paneles_aparte()
 
         # --- conexiones ---
         self.engine.time_changed.connect(lambda t: self.timeline.set_playhead(t, follow=self.engine.playing))
         self.engine.time_changed.connect(lambda t: self.tl_timecode.setText(fmt_tc(t, self.ctrl.project.fps)))
+        self.engine.time_changed.connect(lambda _t: self._poner_total_tl())
+        self.ctrl.project_changed.connect(self._poner_total_tl)
+        self.ctrl.project_replaced.connect(self._poner_total_tl)
         self.engine.time_changed.connect(self._update_meter)
         self.engine.time_changed.connect(self.clips.al_cabezal)          # 🧭 más cercana / más lejana
         self.timeline.seek_requested.connect(self.engine.user_seek)
+        # ⏱ al ALARGAR un clip arrastrando su borde, el visor enseña el fotograma nuevo (lo que se va a destapar)
+        self.timeline.edge_frame_requested.connect(lambda mid, s: self.engine.mostrar_fotograma(mid, s))
+        self.timeline.edge_frame_released.connect(self.engine.soltar_fotograma)
         self.timeline.scrub_requested.connect(self.engine.scrub)      # 🔊 se oye al arrastrar la barra roja
         self.timeline.selection_changed.connect(self.inspector.set_selection)
         from .text_writer import OnScreenText           # ✍ escribir el texto seleccionado en la pestaña «Texto»
         self.text_writer = OnScreenText(self.ctrl, self.engine, self.timeline)
         self.transcript.layout().insertWidget(0, self.text_writer)
         self.timeline.selection_changed.connect(self.text_writer.set_selection)
+        self.ctrl.creado_por_ti.connect(self._abrir_lo_creado)   # 🧭 lo que creas, con su editor a la vista y el foco
+        self.inspector.text_edit.installEventFilter(self)        # (Esc = volver a la línea de tiempo; Deshacer y
+        #                                                           Rehacer = los del proyecto, ver eventFilter)
+        from .tramos_texto import TramosTexto                    # ✍ deshacer por tramos, como en un editor de texto
+        self.tramos_texto = TramosTexto(self.ctrl, self.inspector)
         self.timeline.suggestion_clicked.connect(self._on_timeline_suggestion)
         self.timeline.selection_changed.connect(self._update_framing_mode)
         self.inspector.track_requested.connect(self.open_tracking)
         self.timeline.track_requested.connect(self.open_tracking)      # también con clic derecho en el clip
+        self._copia_externa = True                    # 🖼 Ctrl+V: lo copiado fuera (imagen, archivos) si es lo último
+        QApplication.clipboard().dataChanged.connect(self._al_cambiar_portapapeles)
         self.inspector.ramp_done.connect(self.timeline.set_selection)
         self.preview.canvas.framing_drag.connect(lambda dx, dy: self.inspector.nudge_framing(dx, dy))
         self.preview.canvas.region_changed.connect(self._on_region_changed)
@@ -332,8 +610,13 @@ class MainWindow(QMainWindow):
         self.preview.canvas.transform_live.connect(self._tf_live)
         # 👆 clic en una capa del visor = seleccionarla (Ctrl+clic = la de debajo), como en Resolve
         self.preview.canvas.pick_clip_cb = self._clip_on_track_now
+        self.preview.canvas.pick_text_cb = self._text_at_now     # 📝 clic en un texto del visor = elegirlo
         self.preview.canvas.layer_picked.connect(self._pick_from_viewer)
         self.preview.canvas.transform_done.connect(self._tf_done)
+        self.preview.canvas.transform_started.connect(self._tf_started)
+        self.preview.canvas.transform_cancel.connect(self._tf_cancel)
+        from . import menu_rapido                       # ⚡ menú rápido del clip en el hueco del visor (22/11)
+        self.menu_rapido = menu_rapido.instalar(self)
         self.preview.canvas.subtitle_edit.connect(self._subtitle_edit_from_viewer)
         self.engine.time_changed.connect(lambda _t: self._update_transform_edit())
         self.ctrl.project_changed.connect(self._update_transform_edit)
@@ -343,6 +626,8 @@ class MainWindow(QMainWindow):
         self.voice.cut_rules_changed.connect(self.transcript.refresh)
         self.voice.suggestion_selected.connect(self.timeline.set_highlight_suggestion)
         self.voice.quick_review_requested.connect(lambda: self.open_quick_review("voz"))
+        self.voice.subtitles_requested.connect(self.open_subtitles)
+        self.voice.precargar_al_pasar(self.subtitles.btn_quick)        # (⚡ Subtítulos también transcribe)
         self.transcript.set_media(self.voice.media_id() or "")
         self.library.add_requested.connect(self._add_at_playhead)
         self.library.add_at_times_requested.connect(self._add_at_times)          # 🔑 en las palabras clave
@@ -395,10 +680,13 @@ class MainWindow(QMainWindow):
         self._autosave.setInterval(AUTOSAVE_MS)
         self._autosave.timeout.connect(self._do_autosave)
         self._autosave.start()
-        # La primera vez que abres Reclaimer, la guía te saluda (después, F1)
-        if not self.settings.value("guia/vista") and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
-            self.settings.setValue("guia/vista", True)
-            QTimer.singleShot(900, lambda: self.open_guide("inicio"))
+        # 👋 La primera vez que abres Reclaimer: la guía de primer uso (6 pasos; sale sola UNA vez, se salta cuando
+        # quieras y vuelve en Ayuda → «Guía de primer uso»). No con un diálogo a la vista, un proyecto abriéndose o una
+        # exportación (lo reintenta un rato). Nunca en las pruebas ni sin ventana. La guía larga sigue en F1.
+        self.guia_primer_uso = None
+        from .guia_primer_uso import al_arrancar as _guia_arranque, debe_mostrarse as _guia_debe
+        if _guia_debe(self.settings):
+            QTimer.singleShot(1200, lambda: _guia_arranque(self))
 
         geo = self.settings.value("geometry")
         if geo:
@@ -413,6 +701,23 @@ class MainWindow(QMainWindow):
         self.ctrl.message.connect(lambda txt: nudge_for(txt))
 
     # --------------------------------------------------------------- UI
+    def _poner_total_tl(self, *_a):
+        """⏱ «/ duración total» al lado del reloj grande de la línea de tiempo."""
+        lbl = getattr(self, "tl_total", None)
+        if lbl is None:
+            return
+        try:
+            total = self.ctrl.project.duration()
+        except Exception:  # noqa: BLE001 - un reloj nunca para la edición
+            return
+        txt = "/ " + fmt_tc(total, self.ctrl.project.fps)
+        if lbl.text() != txt:
+            lbl.setText(txt)
+            reloj = getattr(self, "tl_timecode", None)      # (si la barra no cabe y «/ total» se esconde —último
+            if reloj is not None:                           #  recurso de _tl_fit_bar—, sigue en el tooltip del reloj)
+                reloj.setToolTip("Tiempo del cabezal (horas:minutos:segundos:fotograma)\nDuración total: "
+                                 + fmt_tc(total, self.ctrl.project.fps))
+
     def _timeline_toolbar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("panelheader")
@@ -424,9 +729,29 @@ class MainWindow(QMainWindow):
         self.tl_name = QLabel("Línea de tiempo")
         self.tl_name.setObjectName("dim")
         lay.addWidget(self.tl_timecode)
+        self.tl_total = QLabel("/ 00:00:00:00")          # ⏱ la duración total de la línea de tiempo
+        self.tl_total.setObjectName("dim")
+        self.tl_total.setToolTip("Duración total del video en la línea de tiempo")
+        lay.addSpacing(4)
+        lay.addWidget(self.tl_total)
         lay.addSpacing(10)
         lay.addWidget(self.tl_name)
-        lay.addSpacing(18)
+        lay.addSpacing(10)
+        # ↶ ↷ Deshacer / Rehacer siempre a la vista (lo esencial que faltaba), activos según la pila de cambios
+        self.btn_undo = QPushButton("↶ Deshacer")
+        self.btn_redo = QPushButton("↷ Rehacer")
+        for b_, tip_, slot_ in ((self.btn_undo, "Deshacer el último cambio (Ctrl+Z)", self.ctrl.undo_group.undo),
+                                (self.btn_redo, "Rehacer lo deshecho (Ctrl+Y o Ctrl+Mayús+Z)", self.ctrl.undo_group.redo)):
+            b_.setObjectName("tltool")
+            b_.setToolTip(tip_)
+            b_.setFocusPolicy(Qt.NoFocus)
+            b_.clicked.connect(slot_)
+            lay.addWidget(b_)
+        self.ctrl.undo_group.canUndoChanged.connect(self.btn_undo.setEnabled)
+        self.ctrl.undo_group.canRedoChanged.connect(self.btn_redo.setEnabled)
+        self.btn_undo.setEnabled(self.ctrl.undo_group.canUndo())
+        self.btn_redo.setEnabled(self.ctrl.undo_group.canRedo())
+        lay.addSpacing(10)
 
         def btn(text, tip, slot=None, checkable=False):
             b = QPushButton(text)
@@ -463,7 +788,7 @@ class MainWindow(QMainWindow):
         self.tool_snap.setChecked(True)
         self.tool_link.setChecked(self.timeline.linked)
         lay.addSpacing(12)
-        btn("Dividir", "Dividir en el cabezal (Ctrl+B o S)", self._split)
+        self.btn_dividir = btn("Dividir", "Dividir en el cabezal (Ctrl+B o S)", self._split)
         # ⚡ Ráfaga de cortes (a mano: la IA ya no las hace sola salvo una en canciones enérgicas)
         from PySide6.QtWidgets import QMenu as _QMenu, QToolButton as _QTB
         self.btn_burst = _QTB()
@@ -483,7 +808,10 @@ class MainWindow(QMainWindow):
         self.btn_burst.setMenu(bm)
         self.btn_burst.setVisible(False)        # (13/11: vive en «⋯ Más»; el botón queda para el código y los atajos)
         lay.addWidget(self.btn_burst)
-        btn("Eliminar", "Eliminar seleccionados (Supr)", lambda: self._delete(False))
+        self.btn_eliminar = btn("Eliminar", "Eliminar seleccionados (Supr)", lambda: self._delete(False))
+        from . import diseno as _Dz                 # (icono monocromo: si la barra no cabe, se quedan solo con él)
+        self.btn_dividir.setIcon(_Dz.icono("scissors"))
+        self.btn_eliminar.setIcon(_Dz.icono("trash-2"))
         btn("🗑 Vaciar", "Vaciar la línea de tiempo: quita todos los clips, textos y marcadores (tus archivos "
                        "siguen en Medios). Ctrl+Z lo devuelve todo.", self.clear_timeline)
         self.btn_bars = btn("▭ Quitar barras", "Quitar las barras negras de los videos (los clips seleccionados o, si "
@@ -491,10 +819,12 @@ class MainWindow(QMainWindow):
                             "Ctrl+Z las devuelve (o vuelve a pulsarlo).", self.remove_black_bars)
         btn("⚑", "Añadir marcador en el cabezal (M)", self._marker)
         btn("T", "Añadir texto en el cabezal (T)", lambda: self.ctrl.add_text(self.engine.time, 4.0, "Texto"))
-        self.btn_titles = btn("🅣", "Plantillas de título: un texto con estilo ya hecho (título grande, rótulo "
+        self.btn_titles = btn("Títulos", "Plantillas de título: un texto con estilo ya hecho (título grande, rótulo "
                                    "inferior, capítulo, meme, cita…) en el cabezal. Las ★ son las tuyas (Inspector → "
                                    "texto → «★ Guardar como plantilla»).")
         self.btn_titles.setMenu(self._titles_menu(self.btn_titles))
+        from . import diseno as _Dt                 # (icono monocromo; sin sitio, solo el icono)
+        self.btn_titles.setIcon(_Dt.icono("type"))
         lay.addSpacing(12)
         # 13/11: lo de uso frecuente, a la vista (antes solo con clic derecho o en un menú)
         self.btn_broll = btn("✨ B-roll", "Proponer B-roll: la IA elige clips de tu material para lo que dices "
@@ -515,15 +845,39 @@ class MainWindow(QMainWindow):
         self.ctrl.project_replaced.connect(self._sync_vertical_btn)
         self._sync_vertical_btn()
         self.btn_thumb = btn("🖼 Miniatura", "Abrir el editor de la miniatura de este video", lambda: self.open_thumbnail())
-        self.btn_export = btn("⬆ Exportar", "Exportar el video (Ctrl+E)", self.export)
-        self.btn_export.setObjectName("primary")
+        # (agrupación 20/11: B-roll vive en IA ✨, Miniatura es su página de abajo y exportar es la página Entrega;
+        #  «Escenas» —cortar donde cambia el plano, NO la página Escenas— pasa a «⋯ Más → ✂ Cambios de plano»)
+        # (decisión del usuario: exportar = la página «Entrega» de abajo, Ctrl+E y «⚡ Exportar rápido»; este botón ya
+        #  no se ve —se conserva el objeto para quien lo use desde el código—)
+        self._btn_export_tl = self.btn_export = btn("⬆ Exportar", "Exportar el video (Ctrl+E)", self.export)
+        for b_ in (self.btn_broll, self.btn_thumb, self.btn_scenes, self._btn_export_tl):
+            b_.setVisible(False)
+        self.btn_scenes.setMenu(None)
         # ⋯ Más: lo de uso ocasional, a un clic y con su nombre (los atajos siguen igual)
         self.btn_more = _QTB()
         self.btn_more.setText("⋯ Más")
+        self.btn_more.setObjectName("tltool")
         self.btn_more.setFocusPolicy(Qt.NoFocus)
+        from . import diseno as _Dm                       # ✂ legible como los demás botones de la barra (era blanco)
+
+        def _hoja_mas():
+            c = _Dm.colores()
+            return (f"QToolButton {{ background: {c['relieve']}; border: 1px solid {c['borde']}; border-radius: 5px; "
+                    f"padding: 5px 12px; color: {c['texto']}; }}"
+                    f"QToolButton:hover {{ background: {c['relieve_hi']}; border-color: {c['borde_hi']}; }}"
+                    f"QToolButton:pressed {{ background: {c['fondo']}; }}"
+                    "QToolButton::menu-indicator { image: none; width: 0px; }")
+        _Dm.poner_hoja(self.btn_more, _hoja_mas)
         self.btn_more.setPopupMode(_QTB.InstantPopup)
         self.btn_more.setToolTip("Más herramientas: ⚡ Ráfaga de cortes al ritmo y 〰 Curvas de volumen/opacidad")
         more = _QMenu(self.btn_more)
+        cm_ = more.addMenu("✂ Cambios de plano")
+        cm_.setToolTipsVisible(True)
+        cm_.setToolTip("Donde la imagen de los clips elegidos cambia de golpe (sin IA): cortarlos, también los cambios "
+                       "suaves, o solo poner un marcador en cada uno (como Kdenlive). Ctrl+Z lo deshace.")
+        for a_ in sm.actions():
+            cm_.addAction(a_)
+        self.menu_cambios_plano = cm_
         rm = more.addMenu("⚡ Ráfaga de cortes al ritmo")
         for a_ in bm.actions():
             rm.addAction(a_)
@@ -531,6 +885,7 @@ class MainWindow(QMainWindow):
         self.act_curves.setCheckable(True)
         self.act_curves.triggered.connect(lambda on: (self.tool_curves.setChecked(on), self.timeline.set_curves(on)))
         more.aboutToShow.connect(lambda: self.act_curves.setChecked(self.tool_curves.isChecked()))
+        more.aboutToShow.connect(lambda m_=more: self._tl_mas_extra(m_))     # (lo que la barra estrecha mandó aquí)
         self.btn_more.setMenu(more)
         lay.addWidget(self.btn_more)
         self.tool_curves.setVisible(False)       # (13/11: vive en «⋯ Más»; Mayús+C sigue igual)
@@ -564,6 +919,7 @@ class MainWindow(QMainWindow):
         self.library.keywords_requested.connect(lambda mids: self.open_keywords(mids))
         self.library.obs_marks_requested.connect(lambda mids: self.read_obs_marks(mids))
         self.preview.canvas.comp_drop.connect(self._comp_drop)
+        self.preview.canvas.comp_accion.connect(lambda nombre, args: __import__("editoria.core.composicion", fromlist=["accion"]).accion(self.ctrl, self.engine.time, nombre, args))   # ⊞ vaciar, ⇄, encuadrar… un hueco
         # ⚠ Cortes de audio que pueden estar mal (líneas rojas): contador y ◀ ▶ para ir de uno a otro
         self.cut_fix = None                     # el panel de ajuste (se crea la primera vez)
         self.cut_badge = QLabel("")
@@ -581,7 +937,25 @@ class MainWindow(QMainWindow):
         self._sync_cut_badge(0)
         lay.addStretch()
         btn("−", "Alejar (−)", lambda: self.timeline.zoom(1 / 1.5))
+        from PySide6.QtWidgets import QSlider as _QSl      # 🔍 deslizador de zoom (como Resolve), entre − y +
+        self.zoom_slider = _QSl(Qt.Horizontal)
+        self.zoom_slider.setRange(0, 1000)
+        self.zoom_slider.setFocusPolicy(Qt.NoFocus)
+        self.zoom_slider.setFixedWidth(84)
+        self.zoom_slider.setToolTip("Zoom de la línea de tiempo: arrastra = acercar o alejar alrededor del cabezal "
+                                    "(también Ctrl+rueda, − y +)")
+        self.zoom_slider.valueChanged.connect(self._zoom_desde_deslizador)
+        self.timeline.vista_cambia.connect(self._sync_zoom_slider)
+        lay.addWidget(self.zoom_slider)
         btn("+", "Acercar (+)", lambda: self.timeline.zoom(1.5))
+        from . import diseno as _Dz
+        self.btn_detalle = _Dz.BotonIcono("search", "Detalle: 10 s alrededor del cabezal (otra vez = el zoom de antes)",
+                                          plano=False)
+        self.btn_detalle.setObjectName("tltool")
+        self.btn_detalle.setIcon(_Dz.icono("search"))         # (el icono también como QIcon: lo pinta BotonIcono)
+        self.btn_detalle.setFocusPolicy(Qt.NoFocus)
+        self.btn_detalle.clicked.connect(self.timeline.detalle)
+        lay.addWidget(self.btn_detalle)
         btn("⤢", "Ver toda la timeline (Ctrl+0)", self.timeline.fit)
         # 📐 Si no cabe todo, los botones con nombre enseñan solo su icono (el nombre sigue en el tooltip) y la barra
         # nunca obliga a la ventana a ser más ancha que tu pantalla.
@@ -594,10 +968,13 @@ class MainWindow(QMainWindow):
             t_ = b_.text()
             if " " in t_ and not t_[0].isalnum():               # «✨ B-roll» → «✨»
                 self._tl_compact[b_] = (t_, t_.split(" ", 1)[0])
+        for b_ in (self.btn_dividir, self.btn_eliminar, self.btn_titles):   # (con icono: compactos = solo el icono)
+            self._tl_compact[b_] = (b_.text(), "")
+        self._tl_compact[self.btn_more] = ("⋯ Más", "Más")      # (compacto, la palabra: tres puntitos no se leían)
         self._tl_bar = bar
         bar.installEventFilter(self)
         self.tool_curves.toggled.connect(        # 〰 Curvas activas: «⋯ Más» lo dice (el botón de Curvas no se ve)
-            lambda on: self._tl_set(self.btn_more, "⋯ Más 〰" if on else "⋯ Más", "⋯〰" if on else "⋯"))
+            lambda on: self._tl_set(self.btn_more, "⋯ Más 〰" if on else "⋯ Más", "Más 〰" if on else "Más"))
         return bar
 
     def _tl_set(self, b_, full: str, short: str | None = None):
@@ -614,32 +991,317 @@ class MainWindow(QMainWindow):
         if getattr(self, "_tl_bar", None) is not None:
             QTimer.singleShot(0, self._tl_fit_bar)
 
+    def _tl_ancho_minimo(self) -> int:
+        """Lo que necesita la barra de la línea de tiempo con todo en modo compacto (solo iconos, sin el nombre del
+        proyecto): por debajo de esto sus botones se cortarían. Se mide de verdad (con lo que se ve ahora) y se
+        recuerda mientras no cambie lo que enseña ni la letra."""
+        bar = getattr(self, "_tl_bar", None)
+        if bar is None:
+            return 0
+        import shiboken6
+        from .responsive import widgets_en               # (sin itemAt: ver responsive.py)
+        # (por su puntero de C++: id() de un envoltorio de PySide cambia de una vez a otra y la medida se repetía sin
+        #  fin —cada medida cambia textos, Qt avisa de un cambio de distribución y se volvía a medir—)
+        firma = (tuple(shiboken6.getCppPointer(w)[0] for w in widgets_en(bar.layout())
+                       if (not w.isHidden() or w in getattr(self, "_tl_a_mas", [])) and w is not self.tl_name
+                       and w is not self.tl_total and w is not getattr(self, "zoom_slider", None)
+                       and w is not getattr(self, "btn_detalle", None)),
+                 bar.font().pointSizeF(), tuple(c[1] for c in self._tl_compact.values()))
+        guardado = getattr(self, "_tl_min_cache", None)
+        if guardado is not None and guardado[0] == firma:
+            return guardado[1]
+        if getattr(self, "_tl_ocupada", False):            # (a medias de colocar la barra: lo último medido vale)
+            return guardado[1] if guardado is not None else 0
+        self._tl_ocupada = True
+        try:
+            return self._tl_medir_minimo(bar, firma)
+        finally:
+            self._tl_ocupada = False
+
+    def _tl_medir_minimo(self, bar, firma) -> int:
+        antes = {b_: b_.text() for b_ in self._tl_compact}
+        nombre = self.tl_name.isVisibleTo(bar)
+        total = self.tl_total.isVisibleTo(bar)
+        sl = getattr(self, "zoom_slider", None)
+        desl = sl.isVisibleTo(bar) if sl is not None else False
+        extra = [w_ for w_ in [getattr(self, "btn_detalle", None)] + list(getattr(self, "_tl_a_mas", [])) if w_]
+        vis_extra = [w_.isVisibleTo(bar) for w_ in extra]
+        for b_, (_full, short) in self._tl_compact.items():
+            b_.setText(short)
+        self.tl_name.setVisible(False)
+        self.tl_total.setVisible(True)          # («/ total», el deslizador, «Detalle» y lo que fue a «Más» cuentan:
+        if sl is not None:                      #  esconderlos es el último recurso, no lo normal)
+            sl.setVisible(True)
+        for w_ in extra:
+            w_.setVisible(True)
+        ancho = bar.layout().sizeHint().width()
+        for w_, v_ in zip(extra, vis_extra):
+            w_.setVisible(v_)
+        for b_, t_ in antes.items():
+            b_.setText(t_)
+        self.tl_name.setVisible(nombre)
+        self.tl_total.setVisible(total)
+        if sl is not None:
+            sl.setVisible(desl)
+        self._tl_min_cache = (firma, ancho)
+        return ancho
+
+    def biblioteca_alto(self) -> bool:
+        """«◧ A todo el alto» (Ventana y la barra de arriba): ¿los paneles de la izquierda llegan hasta abajo?"""
+        return str(self.settings.value("ventana/biblioteca_alto", "false")).lower() == "true"
+
+    def set_biblioteca_alto(self, on: bool):
+        self.settings.setValue("ventana/biblioteca_alto", "true" if on else "false")
+        for a in (getattr(self, "_btn_alto", None), getattr(self, "_act_alto", None)):
+            if a is not None and a.isChecked() != on:
+                a.setChecked(on)
+        self._esquina_biblioteca()
+
+    def _esquina_biblioteca(self):
+        """↔ De entrada la línea de tiempo ocupa todo el ancho de abajo (el usuario: «por defecto la línea del tiempo
+        debería estar como estaba antes»). Con «◧ A todo el alto», como DaVinci: los paneles de la izquierda (la
+        biblioteca) llegan hasta abajo y la línea de tiempo empieza a su derecha, sin poder taparlo todo: la biblioteca
+        nunca baja de lo que pide su contenido y no puede ensancharse tanto que la barra de la línea de tiempo deje de
+        caber ni con solo iconos (se le pone un ancho máximo). Si ni con la biblioteca en su mínimo cabe (pantallas
+        pequeñas), la línea de tiempo vuelve a todo el ancho: nunca se corta un botón. El Inspector se queda encima de
+        la línea de tiempo, como en DaVinci (con las dos esquinas, a 1366 px la línea de tiempo se quedaba en ~660 px)."""
+        if not hasattr(self, "docks"):
+            return
+        tl = self.docks.get("timeline")
+        sin_limite = 16777215
+        quiero, maximo = Qt.BottomDockWidgetArea, sin_limite
+        if self.biblioteca_alto() and tl is not None and not tl.isFloating() and \
+                self.dockWidgetArea(tl) == Qt.BottomDockWidgetArea:
+            izq = [d for k, d in self.docks.items() if k != "timeline" and not d.isHidden() and not d.isFloating()
+                   and self.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
+            if izq:
+                necesita = self._tl_ancho_minimo() + 8         # (+ el separador)
+                minimo_izq = max(max(self.PANEL_MIN, d.minimumWidth(), d.minimumSizeHint().width()) for d in izq)
+                if self.width() - minimo_izq >= necesita:
+                    quiero, maximo = Qt.LeftDockWidgetArea, self.width() - necesita
+        for k, d in self.docks.items():             # (la biblioteca, sin poder comerse la línea de tiempo)
+            lim = maximo if (maximo != sin_limite and not d.isFloating()
+                             and self.dockWidgetArea(d) == Qt.LeftDockWidgetArea) else sin_limite
+            if k != "timeline" and d.maximumWidth() != lim:
+                d.setMaximumWidth(lim)
+        if self.corner(Qt.BottomLeftCorner) != quiero:
+            self.setCorner(Qt.BottomLeftCorner, quiero)
+            QTimer.singleShot(0, self._ensure_timeline_size)
+            QTimer.singleShot(0, self._tl_fit_bar)       # (revisión: que la barra no se vea cortada ~0,3 s)
+        # (encendido pero sin sitio en esta pantalla: el botón, atenuado y diciéndolo en su tooltip)
+        sin_efecto = self.biblioteca_alto() and quiero != Qt.LeftDockWidgetArea
+        btn = getattr(self, "_btn_alto", None)
+        if btn is not None and bool(btn.property("sin_efecto")) != sin_efecto:
+            btn.setProperty("sin_efecto", sin_efecto)
+            base = btn.property("tip_base") or btn.toolTip()
+            btn.setProperty("tip_base", base)
+            btn.setToolTip(base + ("\n\n⚠ Ahora no cabe en esta pantalla: la línea de tiempo no tendría sitio para "
+                                   "todos sus botones a la derecha de la biblioteca, así que sigue a todo el ancho."
+                                   if sin_efecto else ""))
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
     def eventFilter(self, obj, ev):
         if obj is getattr(self, "_tl_bar", None) and ev.type() == ev.Type.Resize:
-            QTimer.singleShot(0, self._tl_fit_bar)
+            self._tl_fit_bar()                   # (en el acto: que no se vea la barra aplastada un instante)
+        ins = getattr(self, "inspector", None)
+        if ins is not None and obj is getattr(ins, "text_edit", None) and \
+                ev.type() in (ev.Type.ShortcutOverride, ev.Type.KeyPress):
+            # 🧭 tras «T» el foco está en el cuadro del texto: Esc vuelve a la línea de tiempo (como en «Texto en
+            # pantalla») y Ctrl+Z, mientras el cuadro no tenga nada suyo que deshacer, deshace el texto recién creado
+            if ev.key() == Qt.Key_Escape:
+                if ev.type() == ev.Type.KeyPress:
+                    self.timeline.setFocus()
+                ev.accept()
+                return True
+            accion = self._atajo_historial(ev)
+            if accion is not None:
+                # ↶ UN solo historial: Deshacer/Rehacer (con los atajos que tengan) son siempre los del proyecto, no los
+                # del cuadro (antes, tras «T» + escribir, un Ctrl+Z deshacía en el cuadro y el siguiente no hacía nada
+                # visible). Lo escrito y aún sin guardar se guarda antes, y el cuadro se pone al día después.
+                if ev.type() == ev.Type.ShortcutOverride:
+                    if ins._txt_timer.isActive():
+                        ins._txt_timer.stop()
+                        ins._set_text(content=obj.toPlainText())
+                    QTimer.singleShot(0, self._cuadro_texto_al_dia)
+                return True                      # (el cuadro no se lo queda: salta el Deshacer/Rehacer del editor)
         return super().eventFilter(obj, ev)
+
+    def _atajo_historial(self, ev):
+        """La acción Deshacer o Rehacer de la ventana cuyo atajo (el que tenga asignado) es esa tecla; si no, None."""
+        from PySide6.QtGui import QKeySequence as _QKS
+        try:
+            tecla = _QKS(ev.keyCombination())
+        except (AttributeError, TypeError):
+            return None
+        for a in (getattr(self, "_act_deshacer", None), getattr(self, "_act_rehacer", None)):
+            if a is not None and any(s.matches(tecla) == _QKS.ExactMatch for s in a.shortcuts()):
+                return a
+        return None
+
+    def _cuadro_texto_al_dia(self):
+        """Tras Deshacer/Rehacer desde el cuadro del texto del Inspector: enseña lo que dice ahora el texto; si el texto
+        ya no está (se deshizo al crearlo), el foco vuelve a la línea de tiempo."""
+        ins = self.inspector
+        ed = ins.text_edit
+        c = self.ctrl.project.clips.get(ins._ids[0]) if len(ins._ids) == 1 else None
+        if c is None or c.text is None or not ed.isVisible():
+            if ed.hasFocus() or QApplication.focusWidget() is None or ins.isAncestorOf(QApplication.focusWidget()):
+                self.timeline.setFocus()
+            return
+        txt = str(c.text.get("content", ""))
+        viejo = ed.toPlainText()
+        if viejo != txt:
+            from .tramos_texto import donde_cambio
+            ins._loading = True
+            try:
+                ed.setPlainText(txt)
+                cur = ed.textCursor()
+                cur.setPosition(donde_cambio(viejo, txt))       # (el cursor, donde estaba el cambio)
+                ed.setTextCursor(cur)
+            finally:
+                ins._loading = False
+        self.tramos_texto.cortar()                   # (lo que escribas ahora es un paso nuevo)
+
+    def _tl_reloj_ancho(self):
+        """⏱ El reloj grande (y «/ total») con su ancho de verdad: el de «00:00:00:00» en SU letra monoespaciada (la de
+        la hoja de estilo, ya aplicada). Así el diseño nunca lo aprieta por debajo de su texto: si falta sitio, antes
+        se quedan en solo icono los botones (_tl_fit_bar) y después se esconde el nombre del proyecto."""
+        for lbl, muestra in ((getattr(self, "tl_timecode", None), "00:00:00:00"),
+                             (getattr(self, "tl_total", None), "/ 00:00:00:00")):
+            if lbl is None:
+                continue
+            lbl.ensurePolished()
+            fm = lbl.fontMetrics()
+            m = lbl.contentsMargins()
+            ancho = max(fm.horizontalAdvance(muestra), fm.horizontalAdvance(lbl.text())) + m.left() + m.right() + 2
+            if lbl.minimumWidth() != ancho:
+                lbl.setMinimumWidth(ancho)
 
     def _tl_fit_bar(self):
         """Modo compacto de la barra de la línea de tiempo según el ancho que tiene."""
         bar = getattr(self, "_tl_bar", None)
         if bar is None:
             return
+        # (✂ nunca dos a la vez: enseñar o esconder botones mientras se mide puede colocar la barra al momento y volver
+        #  a entrar aquí; la medida de dentro escondía después un botón que la de fuera ya había devuelto a la barra
+        #  —escondido pero fuera de «Más», y el diseño lo saltaba dejándolo encima de otro—. Se repite al acabar.)
+        if getattr(self, "_tl_ocupada", False):
+            QTimer.singleShot(0, self._tl_fit_bar)
+            return
+        self._tl_ocupada = True
+        try:
+            self._tl_colocar(bar)
+        finally:
+            self._tl_ocupada = False
+
+    def _tl_colocar(self, bar):
+        self._tl_reloj_ancho()
+        for b_ in getattr(self, "_tl_a_mas", []):          # (lo que mandó a «Más» la vez anterior, otra vez a la vista)
+            b_.setVisible(True)
+        self._tl_a_mas = []
+        from PySide6.QtWidgets import QToolButton as _QTBf
+        for b_ in bar.findChildren(QPushButton) + bar.findChildren(_QTBf):
+            b_.setMinimumWidth(0)                          # (medir de cero: con otra letra, los de antes no valen)
+            b_.ensurePolished()
         for b_, (full, _short) in self._tl_compact.items():   # medir con los nombres completos
             b_.setText(full)
+
+        def cabe():
+            bar.layout().invalidate()                      # (sin lo memorizado por el diseño: medidas de AHORA)
+            return bar.layout().sizeHint().width() <= bar.width()
+        # escalones, de lo menos necesario a lo más: deslizador de zoom → «Detalle» → nombres a iconos → nombre del
+        # proyecto → «/ total» → botones a «Más» (siguen ahí, en su menú). Así nada se monta encima de nada.
+        sl = getattr(self, "zoom_slider", None)
+        bd = getattr(self, "btn_detalle", None)
+        for w_ in (sl, bd):
+            if w_ is not None:
+                w_.setVisible(True)
+        self.tl_total.setVisible(True)
+        for w_ in (sl, bd):
+            if w_ is not None and not cabe():
+                w_.setVisible(False)
         # de uno en uno, primero lo menos importante (Exportar y B-roll conservan su nombre hasta el final)
         self.tl_name.setVisible(True)
         prio = [getattr(self, n, None) for n in ("btn_bars", "btn_thumb", "btn_scenes", "btn_vertical",
-                                                  "btn_more", "btn_broll", "btn_export")]
+                                                  "btn_more", "btn_titles", "btn_broll", "btn_export", "btn_dividir",
+                                                  "btn_eliminar",
+                                                  "btn_undo", "btn_redo")]
         orden = [b_ for b_ in self._tl_compact if b_ not in prio] + [b_ for b_ in prio if b_ in self._tl_compact]
         for b_ in orden:
             if bar.layout().sizeHint().width() <= bar.width():
                 break
-            full, short = self._tl_compact[b_]
-            b_.setText(short)
-            if not b_.toolTip().startswith(full):
-                b_.setToolTip(full + " — " + b_.toolTip())
-        if bar.layout().sizeHint().width() > bar.width():      # último escalón: sin el nombre del proyecto
+            pareja = (self.btn_undo, self.btn_redo) if b_ in (self.btn_undo, self.btn_redo) else (b_,)
+            for b2 in pareja:                          # (↶ ↷ con su nombre hasta el final, y siempre los dos igual)
+                if b2 not in self._tl_compact:
+                    continue
+                full, short = self._tl_compact[b2]
+                b2.setText(short)
+                if not b2.toolTip().startswith(full):
+                    b2.setToolTip(full + " — " + b2.toolTip())
+        if not cabe():                                         # sin el nombre del proyecto
             self.tl_name.setVisible(False)
+        if not cabe():                                         # sin «/ total» (en el tooltip del reloj)
+            self.tl_total.setVisible(False)
+        if not cabe():                                         # y lo que quede, a «⋯ Más» (de lo menos usado a lo más)
+            for b_ in self._tl_para_mas(bar):
+                if cabe():
+                    break
+                b_.setVisible(False)
+                self._tl_a_mas.append(b_)
+        # ✂ nunca un texto cortado: el diseño no los aprieta por debajo de lo que piden (si no caben con nombre, ya
+        #   son solo icono). TAMBIÉN las herramientas de un solo símbolo (➤ ✂ ⇿ ∩ 🔗 ⚑ T − + ⤢): sin mínimo, con la
+        #   barra justa Qt les quitaba 2 px y el símbolo salía cortado (36 de 38 px en Edits)
+        for b_ in list(self._tl_compact) + [w for w in bar.findChildren(QPushButton) if w not in self._tl_compact]:
+            if b_.isVisible() and b_.text():
+                b_.setMinimumWidth(b_.sizeHint().width())
+        # (esto puede pasar EN MEDIO de que el diseño coloca la barra —al cambiar de tamaño—: lo que se volvió a ver o se
+        #  escondió aquí no se recolocaba y un botón que vuelve de «Más» se quedaba en su sitio viejo, encima de otro)
+        from editoria.ui.responsive import widgets_en as _we
+        for w_ in _we(bar.layout()):                    # (lo memorizado de cada pieza —medida, si se ve— fuera)
+            w_.updateGeometry()
+        bar.layout().invalidate()
+        bar.layout().activate()
+        QTimer.singleShot(0, bar.layout().activate)
+
+    def _tl_para_mas(self, bar) -> list:
+        """Los botones que pueden ir a «⋯ Más» cuando la barra no cabe, de lo menos usado a lo más (deshacer, rehacer,
+        selección, cuchilla, dividir y eliminar se quedan siempre)."""
+        todos = [b_ for b_ in bar.findChildren(QPushButton) if b_.isVisibleTo(bar)]
+
+        def por(sim):
+            if sim == "titulos":
+                return getattr(self, "btn_titles", None)
+            for b_ in todos:
+                full = self._tl_compact.get(b_, (b_.text(), ""))[0]
+                if b_.text() == sim or full.startswith(sim):
+                    return b_
+            return None
+        out = []
+        for sim in ("▭", "🗑", "titulos", "T", "⚑", "⤢", "🔗", "∩", "⇿", "−", "+"):
+            b_ = por(sim)
+            if b_ is not None and b_.isVisibleTo(bar) and b_ not in out:
+                out.append(b_)
+        return out
+
+    def _tl_mas_extra(self, menu):
+        """En «⋯ Más», los botones que la barra estrecha mandó aquí (mismo nombre del tooltip, mismo efecto)."""
+        for a_ in [a_ for a_ in menu.actions() if a_.property("de_la_barra")]:
+            menu.removeAction(a_)
+        ocultos = [b_ for b_ in getattr(self, "_tl_a_mas", []) if not b_.isVisible()]
+        if not ocultos:
+            return
+        sep = menu.addSeparator()
+        sep.setProperty("de_la_barra", True)
+        for b_ in ocultos:
+            nombre = (b_.toolTip() or b_.text()).split("\n")[0].split(" — ")[0]
+            a_ = menu.addAction(nombre)
+            a_.setProperty("de_la_barra", True)
+            if b_.isCheckable():
+                a_.setCheckable(True)
+                a_.setChecked(b_.isChecked())
+            a_.setToolTip(b_.toolTip())
+            a_.triggered.connect(lambda _=False, bb=b_: bb.click())
 
     # ------------------------------------------------------------ botones de la barra de la línea de tiempo
     def _sel_video_clips(self) -> list[str]:
@@ -722,7 +1384,7 @@ class MainWindow(QMainWindow):
             self.cut_fix = CutFixPanel(self)
             d = self._dock("cortes", "✂ Corte de audio", self.cut_fix)
             self.addDockWidget(Qt.RightDockWidgetArea, d)
-            self.tabifyDockWidget(self.docks["inspector"], d)
+            self._sitio_sin_pestanas("cortes")             # (debajo del Inspector: sin fila de pestañas repetida)
             d.visibilityChanged.connect(self._cut_panel_visible)
             # (tras Ctrl+Z o «✓ Quitar todos los avisos», la lista y el dibujo al día)
             self.timeline.cut_issues_changed.connect(
@@ -749,7 +1411,10 @@ class MainWindow(QMainWindow):
     ICONO_PANEL = {"media": "▤", "effects": "✦", "ai": "✧", "moments": "⌕", "clips": "⚷", "kw_folders": "▣",
                    "inspector": "⚙", "voice": "✂", "transcript": "¶", "subtitles": "❞", "history": "↺",
                    "scopes": "▥", "guide": "?", "tasks": "◈", "guided": "⌖", "material": "▦", "edit_opts": "♫",
-                   "edit_clips": "♪", "cortes": "✄", "voz_ia": "≋"}
+                   "edit_clips": "♪", "cortes": "✄", "voz_ia": "≋", "kw_buscar": "⌕",
+                   "audio_mix": "∿", "sounds": "♬", "fx_trans": "⧉", "fx_efectos": "✦", "fx_filtros": "◐",
+                   "fx_figuras": "▭", "memes": "☺", "descargas_web": "⇩", "voz_texto": "¶", "audio": "∿",
+                   "palabras": "⚷"}
 
     def _llenar_menu_paneles(self):
         """☰ Paneles: todos, agrupados por lado; el que eliges se muestra y se pone delante."""
@@ -759,23 +1424,51 @@ class MainWindow(QMainWindow):
                  (Qt.BottomDockWidgetArea, "Abajo"), (Qt.TopDockWidgetArea, "Arriba"))
         for area, nombre in lados:
             docks = [(k, d) for k, d in self.docks.items() if k != "timeline" and not d.isFloating()
-                     and self.dockWidgetArea(d) == area]
+                     and self.dockWidgetArea(d) == area and not getattr(d, "absorbido", False)]
             if not docks:
                 continue
             m.addSection(nombre)
             for k, d in docks:
                 a = m.addAction(f"{self.ICONO_PANEL.get(k, '•')}  {self._nombre_panel(d)}",
-                                lambda d_=d: (d_.show(), d_.raise_()))
+                                lambda k_=k: self._mostrar_desde_menu(k_))
                 a.setCheckable(True)
                 a.setChecked(d.isVisible() and not d.visibleRegion().isEmpty())
-        flot = [(k, d) for k, d in self.docks.items() if d.isFloating()]
+        for nombre_g, clave_g, acordeon in (("Voz y texto", "voz_texto", getattr(self, "voz_texto", None)),
+                                            ("Limpieza y mezcla", "audio", getattr(self, "audio_panel", None))):
+            if acordeon is None:
+                continue
+            m.addSection(nombre_g)                       # (sus secciones, a un clic: nada se pierde)
+            for k in acordeon.claves():
+                m.addAction("    " + acordeon.titulo(k),
+                            lambda d_=clave_g, k_=k: self.abrir_seccion(d_, k_))
+        pal = getattr(self, "_pal_tabs", None)
+        if pal is not None:
+            m.addSection("Palabras clave")               # (sus pestañas, a un clic)
+            for i in range(pal.count()):
+                m.addAction("    " + pal.tabTextCompleto(i), lambda w_=pal.widget(i): self.show_panel(w_))
+        flot =[(k, d) for k, d in self.docks.items() if d.isFloating() and not getattr(d, "absorbido", False)]
         if flot:
             m.addSection("Sueltos")
             for k, d in flot:
                 m.addAction(f"{self.ICONO_PANEL.get(k, '•')}  {self._nombre_panel(d)}",
-                            lambda d_=d: (d_.show(), d_.raise_()))
+                            lambda k_=k: self._mostrar_desde_menu(k_))
 
-    _ORDEN_VENTANA = ("media", "effects", "ai", "moments", "clips", "kw_folders", "inspector", "voice", "transcript",
+    def _mostrar_desde_menu(self, k: str):
+        """☰ Paneles → un panel: se enseña y se pone delante. Los de 🔑 Palabras clave y las columnas de ✦ Efectos solo
+        viven en su página: fuera de ella, el menú lleva a su página (show_panel), nunca los deja sueltos en Editar."""
+        d = self.docks[k]
+        if getattr(d, "absorbido", False):
+            self.show_panel(d.panel)
+            return
+        if k in self.SIN_PESTANAS:
+            self._sitio_sin_pestanas(k)
+        d.show()
+        d.raise_()
+
+    _ORDEN_VENTANA = ("media", "effects", "ai", "moments", "descargas_web", "memes", "voz_texto", "palabras", "audio",
+                      "clips", "kw_buscar", "kw_folders",
+                      "fx_trans", "fx_efectos", "fx_filtros", "fx_figuras",
+                      "inspector", "voice", "audio_mix", "sounds", "transcript",
                       "subtitles", "voz_ia", "material", "edit_opts", "edit_clips", "history", "scopes", "guided",
                       "tasks", "cortes", "guide", "timeline")
 
@@ -790,7 +1483,14 @@ class MainWindow(QMainWindow):
             m.removeAction(a)
         claves = [k for k in self._ORDEN_VENTANA if k in self.docks] + \
             [k for k in self.docks if k not in self._ORDEN_VENTANA]
-        m.insertActions(self._sep_ventana, [self.docks[k].toggleViewAction() for k in claves])
+        claves = [k for k in claves if not getattr(self.docks[k], "absorbido", False)]
+        acts = [self.docks[k].toggleViewAction() for k in claves]
+        if "cortes" not in self.docks:                 # (✂ se crea al usarlo: hasta entonces, una entrada que lo abre)
+            if getattr(self, "_act_cortes", None) is None:
+                self._act_cortes = QAction("✂ Corte de audio", self)
+                self._act_cortes.triggered.connect(self.abrir_corte_audio)
+            acts.append(self._act_cortes)
+        m.insertActions(self._sep_ventana, acts)
 
     @staticmethod
     def _nombre_panel(d) -> str:
@@ -802,41 +1502,124 @@ class MainWindow(QMainWindow):
             d.setWindowTitle(texto)
             d.toggleViewAction().setText(self._nombre_panel(d))
 
+    PESTANA_RELLENO = 22       # (lo que una pestaña añade a su texto; se mide de verdad en cuanto hay pestañas)
+    HOJA_SIN_PESTANAS = ("QTabBar { max-height: 0px; } QTabBar::tab { height: 0px; min-height: 0px; max-height: 0px; "
+                         "padding: 0px; margin: 0px; border: none; font-size: 1px; } "
+                         "QTabBar QToolButton { max-height: 0px; max-width: 0px; }")
+
+    def _nombre_limpio(self, d) -> str:
+        """El nombre de un panel sin los emojis de color («🔎 Momentos» → «Momentos», «IA ✨» → «IA»): el de las
+        pestañas y los interruptores (el menú Ventana sigue con el suyo)."""
+        import re
+        nombre = self._nombre_panel(d)
+        partes = [x for x in nombre.split() if re.search(r"\w", x)]
+        return " ".join(partes) or nombre
+
+    def _icono_pestaña(self, k: str):
+        """El icono monocromo del panel (ICONO_PANEL) para su pestaña (se guarda: no se dibuja en cada repaso)."""
+        cache = self.__dict__.setdefault("_iconos_pestaña", {})
+        if k not in cache:
+            from .theme import TEXT_DIM, glyph_icon
+            cache[k] = glyph_icon(self.ICONO_PANEL.get(k, "•"), 14, TEXT_DIM, "#ffffff")
+        return cache[k]
+
     def _pestañas_que_caben(self):
-        """Las pestañas de los paneles: con su nombre si caben; si no, solo su icono (el nombre, al pasar el ratón).
+        """Las pestañas de los paneles, con su NOMBRE COMPLETO (fase 1; nunca «…»): en una fila si caben; si no, en DOS
+        FILAS de pestañas (_PestanasEnDosFilas, encima de la fila de Qt, que se hace el doble de alta); solo si ni así
+        caben, su icono (el nombre, al pasar el ratón). Solo cuenta lo que se ve: el ancho de cada fila de pestañas de
+        la distribución de ahora (no las filas viejas que deja Qt): la etiqueta no cambia sola si no se toca nada.
         (Qt reescribe el texto de cada pestaña con el título del panel: por eso se cambia el título, no la pestaña.)"""
+        from PySide6.QtCore import QPoint, QRect
         from PySide6.QtWidgets import QTabBar
-        por_texto = {}
-        for k, d in self.docks.items():
-            por_texto[self._nombre_panel(d)] = (k, d)
-            if k in self.ICONO_PANEL:
-                por_texto[self.ICONO_PANEL[k]] = (k, d)
+        import shiboken6
+        por_puntero = {shiboken6.getCppPointer(d)[0]: (k, d) for k, d in self.docks.items()}
         en_fila = set()                                   # (los que están en una fila de pestañas a la vista)
         for tb in self.findChildren(QTabBar, options=Qt.FindDirectChildrenOnly):
+            capa = getattr(tb, "_dos_filas", None)
             if not tb.isVisible() or not tb.count():
+                if capa is not None and capa.activa:      # (Qt retira la fila y luego la reutiliza para otro grupo)
+                    capa.quitar()
                 continue
             if not getattr(tb, "_vigilada", False):
                 tb._vigilada = True
                 tb.installEventFilter(self._vigia_pestañas)
-            grupo = [por_texto.get(tb.tabText(i)) for i in range(tb.count())]
+                # (sin cambiar su modo de «…»: con ElideNone Qt pedía laterales más anchos y el visor se cortaba; los
+                #  nombres en una fila solo se ponen si caben enteros, medidos de verdad)
+            grupo = [por_puntero.get(tb.tabData(i)) for i in range(tb.count())]
             if any(g is None for g in grupo):
                 continue
             # (Qt deja filas viejas «visibles» fuera de la ventana: solo cuenta si de verdad está en pestaña con otros)
-            if not any(self.tabifiedDockWidgets(d) for _k, d in grupo):
+            if not any(self.tabifiedDockWidgets(d) for _k, d in grupo) or tb.width() <= 0:
                 continue
+            sin_fila = all(k in getattr(self, "interruptores", {}) for k, _d in grupo)
+            if not sin_fila and tb.styleSheet() == self.HOJA_SIN_PESTANAS:
+                tb.setStyleSheet("")        # (revisión: un grupo mixto —Tareas, Montaje guiado…— recupera su fila YA,
+                #                             antes de mirar su posición: sin alto estaba fuera y se saltaba siempre)
+            # (y solo la fila que está pegada encima de su panel: una fila vieja de otro ancho que siga a la vista
+            #  —p. ej. tras un restoreState directo— pedía otros títulos y las etiquetas cambiaban solas sin parar)
+            delante = next((d for _k, d in grupo if not d.isHidden() and not d.visibleRegion().isEmpty()), None)
+            if delante is not None:
+                g, gd = tb.geometry(), QRect(delante.mapTo(self, QPoint(0, 0)), delante.size())
+                if abs(g.bottom() + 1 - gd.top()) > 3 or abs(g.left() - gd.left()) > 3:
+                    continue
+            # 🎛 En Editar, los paneles con su interruptor arriba NO llevan fila de pestañas (el usuario: «la 1, como
+            # DaVinci»; salían dos veces): la fila de Qt se queda sin alto y el interruptor elige cuál se ve delante.
+            # En las páginas sus pestañas siguen.
+            if sin_fila:
+                if capa is not None and capa.activa:
+                    capa.quitar()
+                if tb.styleSheet() != self.HOJA_SIN_PESTANAS:
+                    tb.setStyleSheet(self.HOJA_SIN_PESTANAS)
+                for k, d in grupo:
+                    if not d.isFloating() and self.tabifiedDockWidgets(d):
+                        en_fila.add(k)
+                        self._poner_titulo(d, self._nombre_limpio(d))
+                continue
+            if tb.styleSheet() == self.HOJA_SIN_PESTANAS:
+                tb.setStyleSheet("")
             fm = tb.fontMetrics()
-            hace_falta = sum(fm.horizontalAdvance(self._nombre_panel(d)) + 36 for _k, d in grupo)
-            iconos = tb.width() > 0 and hace_falta > tb.width()
-            for i, (k, d) in enumerate(grupo):
-                tb.setTabToolTip(i, self._nombre_panel(d))
+            relleno = [tb.tabSizeHint(i).width() - fm.horizontalAdvance(tb.tabText(i))
+                       - (tb.iconSize().width() + 4 if not tb.tabIcon(i).isNull() else 0) for i in range(tb.count())]
+            relleno = max(relleno) if relleno else self.PESTANA_RELLENO
+            # (el nombre sin emoji de color —como en los interruptores— y delante su icono monocromo)
+            nombres = [self._nombre_limpio(d) for _k, d in grupo]
+            glifos = [self._icono_pestaña(k) for k, _d in grupo]
+            hueco_icono = 18
+            anchos = [fm.horizontalAdvance(n) + relleno + hueco_icono for n in nombres]
+            disp = tb.width() - 4
+            iconos = [self.ICONO_PANEL.get(k, n) for (k, _d), n in zip(grupo, nombres)]
+            con_icono = True
+            if sum(anchos) <= disp:
+                modo, titulos = "una", nombres
+            elif sum(a - hueco_icono for a in anchos) <= disp:   # (en una fila con el nombre, sin icono delante)
+                modo, titulos, con_icono = "una", nombres, False
+            elif len(_PestanasEnDosFilas.filas(anchos, disp)) <= 2:
+                # (debajo de las dos filas, la fila de Qt con los iconos: con los nombres, Qt ensanchaba el lateral
+                #  hasta su largo y dejaba el visor en su mínimo)
+                modo, titulos = "dos", iconos
+            else:
+                modo, titulos = "iconos", iconos
+            if modo == "dos":
+                if capa is None:
+                    capa = tb._dos_filas = _PestanasEnDosFilas(tb, self)
+                capa.poner([(i, n, a, g) for i, (n, a, g) in enumerate(zip(nombres, anchos, glifos))], fm.height() + 14)
+            elif capa is not None and capa.activa:
+                capa.quitar()
+            for i, ((k, d), t) in enumerate(zip(grupo, titulos)):
+                tb.setTabToolTip(i, self._nombre_limpio(d))
+                quiero = glifos[i] if modo == "una" and con_icono else None   # (en «iconos», el título es el glifo)
+                if quiero is not None:
+                    tb.setTabIcon(i, quiero)
+                elif not tb.tabIcon(i).isNull():
+                    from PySide6.QtGui import QIcon
+                    tb.setTabIcon(i, QIcon())
                 if d.isFloating() or not self.tabifiedDockWidgets(d):   # (una fila vieja aún lo nombra: no cuenta)
                     continue
                 en_fila.add(k)
-                self._poner_titulo(d, self.ICONO_PANEL.get(k, self._nombre_panel(d)) if iconos
-                                   else self._nombre_panel(d))
+                self._poner_titulo(d, t)
         for k, d in self.docks.items():                   # suelto o solo en su zona (sin pestañas): su nombre
             if k not in en_fila:
-                self._poner_titulo(d, self._nombre_panel(d))
+                self._poner_titulo(d, self._nombre_limpio(d))
 
     def _pestañas_pronto(self, *_a):
         if not hasattr(self, "_t_pestañas"):
@@ -871,6 +1654,8 @@ class MainWindow(QMainWindow):
             self._t_pestañas.setInterval(120)
             self._t_pestañas.timeout.connect(self._pestañas_que_caben)
             self._t_pestañas.timeout.connect(self._que_quepa_en_pantalla)   # (y que la ventana quepa en la pantalla)
+            self._t_pestañas.timeout.connect(self._esquina_biblioteca)      # (biblioteca a todo el alto si cabe)
+            self._t_pestañas.timeout.connect(self._revisar_crecer)          # (sin huecos: alto al vecino que lo usa)
             # (Qt vuelve a poner los nombres largos al recolocar paneles sin avisar: un repaso ligero de vez en cuando)
             self._t_pestañas_ciclo = QTimer(self)
             self._t_pestañas_ciclo.setInterval(1500)
@@ -879,7 +1664,11 @@ class MainWindow(QMainWindow):
         d.visibilityChanged.connect(self._pestañas_pronto)
         d.dockLocationChanged.connect(self._pestañas_pronto)
         d.topLevelChanged.connect(self._pestañas_pronto)
-        if key != "timeline":
+        if key in self.MOVIDOS:
+            # (agrupación 20/11: su contenido vive en «Voz y texto», «Audio» o el Inspector y se adapta ahí UNA vez;
+            #  el panel suelto de antes solo queda como nombre para distribuciones viejas → arranque más rápido)
+            d.setWidget(QWidget())
+        elif key != "timeline":
             # Cada panel puede encogerse (con barra de desplazamiento VERTICAL) en vez de aplastar la línea de tiempo;
             # a lo ancho, su contenido se adapta (↔ responsive: nada se corta, esté donde esté el panel)
             from . import responsive
@@ -891,31 +1680,96 @@ class MainWindow(QMainWindow):
         if closable:
             feats |= QDockWidget.DockWidgetClosable
         d.setFeatures(feats)
-        d.setAllowedAreas(Qt.AllDockWidgetAreas)
+        # (el usuario: los paneles solo se acomodan a los LADOS del visor —varias columnas a cada lado, sí—, nunca encima
+        #  del visor ni encima o debajo de la línea de tiempo; la línea de tiempo es la de abajo)
+        d.setAllowedAreas(Qt.AllDockWidgetAreas if key == "timeline" else
+                          Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.docks[key] = d
         return d
 
-    _OCULTOS_AL_INICIO = ("guide", "tasks", "guided")     # se abren cuando se pide (Ventana o su página)
+    # 🔑 los paneles de la página «Palabras clave»: solo se ven en ella (fuera de ella, siempre ocultos)
+    PAGINA_KW = ("clips", "kw_buscar", "kw_folders")
+    # ✦ los paneles de la página «Efectos» (una columna por categoría): solo se ven en ella
+    PAGINA_FX = ("fx_trans", "fx_efectos", "fx_filtros", "fx_figuras")
+    # (agrupación 20/11) paneles que ya no salen sueltos: viven dentro de «Voz y texto», «Audio» o el Inspector
+    MOVIDOS = ("clips", "kw_folders", "kw_buscar", "transcript", "subtitles", "voz_ia", "voice", "audio_mix",
+               "material")     # (su contenido se mudó: ver _agrupar_paneles)
+    ABSORBIDOS = MOVIDOS + PAGINA_FX
+    _OCULTOS_AL_INICIO = ("guide", "tasks", "guided", "cortes", "history", "scopes") + PAGINA_KW + PAGINA_FX + \
+        ABSORBIDOS    # se abren cuando se pide (Historial y Gráficas: ☰ Paneles)
     # 🗂 Paneles de cada pestaña (lo de entrada; lo que cambies tú desde Ventana se recuerda por pestaña). YouTube: sin
     # Texto ni Subtítulos (no los usa en las reseñas) y con 🔑 Palabras clave y 🎞 Material del clip; Edits: el edit
     # musical a pantalla completa (opciones a la derecha, clips a la izquierda), sin lo de la voz; Shorts: subtítulos.
     # 🗣 Voz IA: a la vista en Vertical (Shorts leídos por la IA); en las otras, con «🗣 Que lo lea la IA» o Ventana.
+    # (agrupación 20/11: Limpieza/Mezcla → «Audio»; Transcribir/Transcripción/Subtítulos/Palabras clave/Voz IA →
+    #  «Voz y texto»; Material del clip → Inspector → Archivo)
     TAB_PANELS = {
-        "youtube": {"material": True, "clips": True, "voice": True, "transcript": False, "subtitles": False,
-                    "edit_opts": False, "edit_clips": False, "voz_ia": False},
-        "edit": {"edit_opts": True, "edit_clips": True, "voice": False, "transcript": False, "subtitles": False,
-                 "material": False, "clips": True, "voz_ia": False},
-        "short": {"voice": True, "transcript": True, "subtitles": True, "edit_opts": False, "edit_clips": False,
-                  "material": False, "clips": True, "voz_ia": True},
+        "youtube": {"audio": True, "voz_texto": False, "palabras": True, "edit_opts": False, "edit_clips": False},
+        "edit": {"edit_opts": True, "edit_clips": True, "audio": False, "voz_texto": False, "palabras": False},
+        "short": {"audio": True, "voz_texto": True, "palabras": False, "edit_opts": False, "edit_clips": False},
     }
-    TAB_MANAGED = ("material", "clips", "voice", "transcript", "subtitles", "edit_opts", "edit_clips", "voz_ia")
+    TAB_MANAGED = ("audio", "voz_texto", "palabras", "edit_opts", "edit_clips")
 
     def _remember_tab_panel(self, key: str, on: bool):
         tab = getattr(getattr(self, "workspaces", None), "current", "youtube")
         self.settings.setValue(f"paneles_pestana/{tab}/{key}", "true" if on else "false")
 
+    # (agrupación 20/11) lo que recordabas por pestaña de los paneles de antes → su panel agrupado
+    _MIGRAR_PESTANA = {"voz_ia": "voz_texto", "subtitles": "voz_texto", "transcript": "voz_texto", "clips": "voz_texto",
+                       "voice": "audio", "audio_mix": "audio"}
+
+    def _migrar_paneles_pestana(self):
+        """Una vez: «paneles_pestana/<pestaña>/voz_ia = true» (o Subtítulos, Texto, Palabras clave) abre «Voz y texto»
+        en esa pestaña; Limpieza o Mezcla y música, «Audio». Las claves viejas se borran."""
+        st = self.settings
+        if str(st.value("paneles/agrupacion_migrada", "") or "") == "1":
+            return
+        for tab in ("youtube", "edit", "short"):
+            nuevos: dict = {}
+            for viejo, nuevo in self._MIGRAR_PESTANA.items():
+                v = st.value(f"paneles_pestana/{tab}/{viejo}")
+                if v is None:
+                    continue
+                nuevos[nuevo] = nuevos.get(nuevo, False) or str(v).lower() == "true"
+                st.remove(f"paneles_pestana/{tab}/{viejo}")
+            for nuevo, on in nuevos.items():
+                if on:                                     # (cerrado antes = lo de fábrica de la pestaña)
+                    st.setValue(f"paneles_pestana/{tab}/{nuevo}", "true")
+        st.setValue("paneles/agrupacion_migrada", "1")
+
+    def _migrar_voz_izquierda(self, habia_distribucion: bool):
+        """Una vez (22/11): «Voz y texto» pasa a la izquierda y «Palabras clave» —antes su sección 4— es un panel propio
+        a la derecha. Lo que recordabas de «Voz y texto» por pestaña de trabajo vale también para «Palabras clave»; con
+        una distribución guardada, «Voz y texto» va en pestaña junto a Medios (o solo a la izquierda) y «Palabras clave»
+        junto al Inspector, cada uno como estaba (a la vista o no): ningún panel huérfano ni hueco."""
+        st = self.settings
+        if str(st.value("paneles/voz_izq_v1", "") or "") == "1":
+            return
+        st.setValue("paneles/voz_izq_v1", "1")
+        if str(st.value("paneles/lado/voz_texto", "") or "") == "izq":
+            st.remove("paneles/lado/voz_texto")             # (ahora es su lado de fábrica)
+        for tab in ("youtube", "edit", "short"):
+            v = st.value(f"paneles_pestana/{tab}/voz_texto")
+            if v is not None and st.value(f"paneles_pestana/{tab}/palabras") is None:
+                st.setValue(f"paneles_pestana/{tab}/palabras", v)
+        if not habia_distribucion:
+            return
+        d = self.docks
+        for k, area, ancla_k in (("voz_texto", Qt.LeftDockWidgetArea, "media"),
+                                 ("palabras", Qt.RightDockWidgetArea, "inspector")):
+            dk, ancla = d[k], d.get(ancla_k)
+            if dk.isFloating() or self.dockWidgetArea(dk) == area:
+                continue
+            visible = not dk.isHidden()
+            if ancla is not None and not ancla.isFloating() and self.dockWidgetArea(ancla) == area:
+                self.tabifyDockWidget(ancla, dk)
+            else:
+                self.addDockWidget(area, dk)
+            dk.setVisible(visible)
+
     def apply_tab_panels(self, tab: str | None = None):
         """Enseña los paneles de esa pestaña (y sube a la vista los suyos: en Edits, el edit musical)."""
+        self._migrar_paneles_pestana()
         tab = tab or getattr(getattr(self, "workspaces", None), "current", "youtube")
         conf = self.TAB_PANELS.get(tab, {})
         subir = []
@@ -932,8 +1786,9 @@ class MainWindow(QMainWindow):
             if on and conf[key]:
                 subir.append(d)
         for d in subir:
-            if tab == "edit" or d is self.docks.get("material"):
+            if tab == "edit":
                 d.raise_()
+        self._ocultar_absorbidos()
 
 
     def _default_layout(self):
@@ -950,10 +1805,19 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(d["media"], d["effects"])
         self.tabifyDockWidget(d["media"], d["ai"])
         self.tabifyDockWidget(d["media"], d["moments"])
+        self.tabifyDockWidget(d["media"], d["descargas_web"])
+        self.tabifyDockWidget(d["media"], d["memes"])
         self.tabifyDockWidget(d["media"], d["edit_clips"])
+        self.tabifyDockWidget(d["media"], d["sounds"])        # (🔊 los sonidos, donde estaba Efectos)
+        self.tabifyDockWidget(d["media"], d["voz_texto"])     # (22/11: Transcripción, Subtítulos… a la izquierda)
+        for k in self.PAGINA_FX:                               # (✦ ocultos: van a su página)
+            self.tabifyDockWidget(d["media"], d[k])
         self.addDockWidget(Qt.RightDockWidgetArea, d["inspector"])
-        for k in ("voice", "transcript", "subtitles", "history", "scopes", "clips", "kw_folders", "material",
-                  "edit_opts", "voz_ia"):
+        for k in ("palabras", "audio", "edit_opts"):
+            self.tabifyDockWidget(d["inspector"], d[k])
+        self.addDockWidget(Qt.RightDockWidgetArea, d["history"], Qt.Vertical)   # (Historial y Gráficas —☰ Paneles—:
+        self.tabifyDockWidget(d["history"], d["scopes"])                  #  debajo, con SU fila, sin repetir nombres)
+        for k in self.ABSORBIDOS:                          # (absorbidos por «Voz y texto», «Audio» o el Inspector)
             self.tabifyDockWidget(d["inspector"], d[k])
         # 🧭 Montaje guiado: debajo del inspector (a la derecha), así se ve a la vez que 🎬 Clips (a la izquierda)
         self.addDockWidget(Qt.RightDockWidgetArea, d["guided"])
@@ -970,7 +1834,7 @@ class MainWindow(QMainWindow):
         self.resizeDocks([d["timeline"]], [380], Qt.Vertical)
 
     def reset_layout(self):
-        self.restoreState(self._default_state, 3)
+        self._restaurar_paneles(self._default_state)
         for key, dock in self.docks.items():
             dock.setVisible(key not in self._OCULTOS_AL_INICIO)
         self.docks["media"].raise_()
@@ -980,6 +1844,19 @@ class MainWindow(QMainWindow):
             self.apply_tab_panels()              # (los paneles que tocan en esta pestaña, no todos)
         except Exception:  # noqa: BLE001
             pass
+        self._lados_de_fabrica()                 # (↔ y cada interruptor otra vez en la fila de su lado de fábrica)
+
+    def _lados_de_fabrica(self):
+        """«Restablecer distribución»: olvida los lados que elegiste (paneles/lado/*), devuelve cada interruptor a la fila
+        de su lado de fábrica y cada panel a ese lado: fila y lado siguen coincidiendo."""
+        self.settings.beginGroup("paneles/lado")
+        self.settings.remove("")
+        self.settings.endGroup()
+        for k in list(getattr(self, "interruptores", {})):
+            self._mover_interruptor(k, self._lado_de_fabrica(k))
+        self._paneles_a_su_sitio()
+        if hasattr(self, "_altos_a_mano"):
+            self._altos_a_mano.clear()
 
     PANEL_MIN = 200        # (ancho mínimo de entrada de un panel; puede bajar hasta lo que pide su contenido adaptado)
 
@@ -1039,6 +1916,449 @@ class MainWindow(QMainWindow):
             self._cabiendo = False
 
 
+    def _restaurar_paneles(self, estado):
+        """Vuelve a poner los paneles de Editar tal como estaban (al salir de una página o al restablecer) sin dos
+        fallos de Qt que salieron en la sonda del 20/11:
+          · la pila del centro recordaba el ancho mínimo de la página de la que se sale (🎬 Escenas pide ~1840 px)
+            hasta procesar sus eventos; restoreState() repartía con ese mínimo viejo, los laterales se quedaban en su
+            mínimo (~200 px) y la ventana crecía a ~2250–2300 px, más que la pantalla → ahora se le pide el mínimo nuevo
+            ANTES de restaurar y, si aun así la ventana quedó más grande que la pantalla, se devuelve a ella;
+          · restoreState() deja a la vista barras de pestañas viejas de la página anterior («🔎 Buscar material ·
+            🗂 Carpetas · 📥 Descargado» quedaba pintada encima de la cabecera del visor en Audio, Transcripción y
+            Miniatura) → _barras_sueltas_fuera()."""
+        self.central_stack.updateGeometry()          # (el mínimo del centro, el de ahora: no el de la página de antes)
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()
+        self.restoreState(estado, 3)
+        self._fila_paneles_aparte()
+        self._ocultar_absorbidos()
+        self._ventana_en_pantalla()
+        QTimer.singleShot(0, self._ventana_en_pantalla)    # (y otra vez con el mínimo ya recalculado)
+        QTimer.singleShot(0, self._barras_sueltas_fuera)
+
+    def _agrupar_paneles(self):
+        """🗂 Agrupación del 20/11 (aprobada por el usuario; tabla en notas_claude/PROPUESTA_INTERFAZ.md):
+        · «Voz y texto» (a la izquierda desde el 22/11): 1 Transcribir (de IA ✨) · 2 Transcripción · 3 Subtítulos ·
+          4 Voz IA;
+        · «Palabras clave» (22/11: su propio panel, a la derecha): Dijiste… · Carpetas · Buscar material;
+        · «Audio»: 1 Limpieza · 2 Mezcla y música · 3 Sonoridad (la casilla −14 LUFS y «Medir», en UN solo sitio);
+        · Material del clip → Inspector → Archivo → Información.
+        Los paneles de dentro son los de siempre (misma lógica); sus paneles sueltos de antes quedan absorbidos:
+        ocultos para siempre y fuera de Ventana y ☰ Paneles (show_panel / go_page llevan a su sección)."""
+        from PySide6.QtWidgets import QTabWidget
+        from .paneles_agrupados import Acordeon
+        d = self.docks
+        # ⚠ los paneles MOVIDOS nunca van en la zona con desplazamiento de su panel suelto de antes (_dock): si fueran,
+        #   esa zona (oculta) los seguiría redimensionando a SU ancho y el contenido se saldría del panel agrupado
+        from .paneles_agrupados import PestanasAjustadas
+        pal = PestanasAjustadas()   # (piden el alto de la pestaña de delante: «Dijiste…» no hereda el de «Buscar material»)
+        pal.setObjectName("palabrastabs")
+        pal.setDocumentMode(True)
+        for k, titulo, tip in (("clips", "Dijiste…", "Lo que dices en la narración: cada palabra clave y sus momentos"),
+                               ("kw_folders", "Carpetas", "La carpeta de la palabra elegida (y lo descargado)"),
+                               ("kw_buscar", "Buscar material", "Buscar material para la palabra: tu carpeta o "
+                                                                "internet")):
+            pal.addTab(d[k].panel, titulo)
+            pal.setTabToolTip(pal.count() - 1, tip)
+        pal.iconos_si_no_cabe(["mic", "folder-open", "search"])   # (estrecho: icono y el nombre en el tooltip)
+        self._pal_tabs = pal
+        from .paneles_agrupados import PanelSinHuecos
+        self._pal_panel = PanelSinHuecos(pal)      # (sin huecos: si la pestaña de delante no crece, el alto, al final)
+        # (22/11, el usuario: «se me dificultaba navegar entre esos menús, probablemente porque están en el mismo
+        #  espacio»: «Voz y texto» pasa a la IZQUIERDA —con Medios, Efectos…— y «Palabras clave» es su propio panel a
+        #  la derecha, con todo el alto para Dijiste… · Carpetas · Buscar material)
+        if str(self.settings.value("agrupados/voz_texto", "") or "") == "palabras":
+            self.settings.setValue("agrupados/voz_texto", "transcripcion")   # (la sección que ya no está aquí)
+        transcr = self.ai_panel.sacar_transcriptor() or QWidget()
+        self.voz_texto = Acordeon("voz_texto", [
+            ("transcribir", "Transcribir", transcr, "La narración (qué archivo es tu voz), el modelo y transcribir"),
+            ("transcripcion", "Transcripción", self.transcript, "El texto de lo que se dice: buscar, ir y cortar "
+                                                                 "por texto"),
+            ("subtitulos", "Subtítulos", self.subtitles, "Los subtítulos del video y su estilo"),
+            ("voz_ia", "Voz IA", self.voz_ia, "Que una voz sintética lea tu guion")])
+        self._dock("voz_texto", "Voz y texto", self.voz_texto)
+        self._dock("palabras", "Palabras clave", self._pal_panel)
+        self.audio_panel = Acordeon("audio", [
+            ("limpieza", "Limpieza", self.voice, "Limpiar la voz: silencios, muletillas, repeticiones y sugerencias"),
+            ("mezcla", "Mezcla y música", d["audio_mix"].panel, "Mejorar la voz, la música y bajarla cuando hablas"),
+            ("sonoridad", "Sonoridad", self._caja_sonoridad(), "El volumen final para YouTube, TikTok e Instagram "
+                                                               "(−14 LUFS): al exportar y medir"),
+            ("cortes", "Cortes de audio", self._caja_cortes(), "Los cortes con salto de volumen o chasquido: "
+                                                              "revisarlos y suavizarlos uno a uno")])
+        self._dock("audio", "Limpieza y mezcla", self.audio_panel)   # («Audio» = la pestaña del Inspector)
+        if hasattr(self.transcript, "transcribir_pedido"):   # (sin transcripción: «Transcribir» → 1 · Transcribir)
+            self.transcript.transcribir_pedido.connect(lambda: self.abrir_seccion("voz_texto", "transcribir"))
+        # (20/11, auditoría: a 768 px de alto, al abrir una sección el panel quedaba desplazado y su cabecera oculta:
+        #  al abrir una sección, la zona del panel vuelve arriba del todo)
+        for _k, _ac in (("voz_texto", self.voz_texto), ("audio", self.audio_panel)):
+            _ac.cambiada.connect(lambda _s, k=_k: QTimer.singleShot(0, lambda: self._zona_arriba(k)))
+            self.docks[_k].visibilityChanged.connect(
+                lambda on, k=_k: on and QTimer.singleShot(0, lambda: self._zona_arriba(k)))
+        from . import responsive
+        responsive.adaptar(self.material)
+        self.inspector.poner_en("informacion", self.material)  # 🎞 Material del clip → Inspector → Archivo
+        self.material.en_columna()                           # (estrecho: nunca ensancha el Inspector)
+        for k in self.ABSORBIDOS:
+            dk = d[k]
+            dk.absorbido = True
+            dk.toggleViewAction().setVisible(False)
+            dk.visibilityChanged.connect(lambda on, dk_=dk: on and QTimer.singleShot(0, dk_.hide))
+            dk.toggleViewAction().toggled.connect(lambda on, dk_=dk: on and QTimer.singleShot(0, dk_.hide))
+            dk.hide()
+
+    def _zona_arriba(self, k: str):
+        """La zona con desplazamiento del panel k, arriba del todo (su cabecera y la sección abierta a la vista)."""
+        from PySide6.QtWidgets import QScrollArea
+        d = self.docks.get(k)
+        zona = d.widget() if d is not None else None
+        if isinstance(zona, QScrollArea) and zona.verticalScrollBar().value():
+            zona.verticalScrollBar().setValue(0)
+
+    def _caja_cortes(self) -> QWidget:
+        """✂ «Corte de audio» (antes se abría al entrar en la página Audio): el botón que lo abre y cuántos avisos hay."""
+        caja = QWidget()
+        v = QVBoxLayout(caja)
+        v.setContentsMargins(6, 6, 6, 6)
+        self.btn_corte_audio = QPushButton("✂ Abrir «Corte de audio»")
+        self.btn_corte_audio.setToolTip("El panel para revisar cada corte con aviso de la línea de tiempo (salto de "
+                                        "volumen o chasquido): escucharlo, suavizarlo o quitar el aviso")
+        self.btn_corte_audio.clicked.connect(self.abrir_corte_audio)
+        v.addWidget(self.btn_corte_audio)
+        from PySide6.QtWidgets import QCheckBox
+        self.chk_puntos_union = QCheckBox("Puntos de unión en el audio")      # 🔴 = el botón ◉ de la línea de tiempo
+        self.chk_puntos_union.setToolTip(
+            "En cada unión de dos piezas pegadas (tras eliminar silencios), un punto arriba (final de la pieza de la "
+            "izquierda) y otro abajo (inicio de la de la derecha). Arrástralos en la línea de tiempo para poner o quitar "
+            "audio de esa pieza: lo de detrás se recorre solo, sin comerse nada (un Ctrl+Z). Rojo = parece que la "
+            "palabra quedó cortada. Es lo mismo que el botón ◉ junto a «➕ Pista»")
+        self.chk_puntos_union.setChecked(self.timeline.union_dots)
+        self.chk_puntos_union.toggled.connect(lambda on: self.timeline.set_union_dots(on))
+        self.timeline.union_dots_toggled.connect(lambda on: (self.chk_puntos_union.blockSignals(True),
+                                                             self.chk_puntos_union.setChecked(on),
+                                                             self.chk_puntos_union.blockSignals(False)))
+        v.addWidget(self.chk_puntos_union)
+        self.chk_fundidos = QCheckBox("Fundidos automáticos")             # 〰 fase 3: sin chasquidos en los cortes
+        self.chk_fundidos.setToolTip(
+            "Un fundido muy corto (2 fotogramas a cada lado) en cada unión de tu voz, también tras eliminar "
+            "silencios, y fundidos cortos al empezar y acabar la música y el sonido del B-roll: sin chasquidos al "
+            "cortar. Se ven en la línea de volumen de los audios y salen igual al exportar. Apagado: todo como antes "
+            "(tus fundidos no se tocan)")
+        self.chk_fundidos.setChecked(self.ctrl.fundidos_auto)
+        self.chk_fundidos.toggled.connect(self._cambiar_fundidos)
+        v.addWidget(self.chk_fundidos)
+        self.lbl_cortes = QLabel()
+        self.lbl_cortes.setObjectName("dim")
+        self.lbl_cortes.setWordWrap(True)
+        v.addWidget(self.lbl_cortes)
+        v.addStretch(1)
+
+        def contar(_n=None):
+            n = len(getattr(self.timeline, "cut_issues", []) or [])
+            self.lbl_cortes.setText(f"{n} corte(s) con aviso en la línea de tiempo" if n else "Ningún corte con aviso")
+        try:
+            self.timeline.cut_issues_changed.connect(contar)
+        except AttributeError:
+            pass
+        contar()
+        return caja
+
+    def abrir_corte_audio(self):
+        """✂ El panel «Corte de audio» a la vista: en el primer corte con aviso, si hay alguno."""
+        if getattr(self.timeline, "cut_issues", None):
+            self._open_cut_issue(0)
+        self.cut_fix_panel()
+        d = self.docks["cortes"]
+        self._sitio_sin_pestanas("cortes")
+        d.show()
+        d.raise_()
+        self._llenar_menu_ventana()
+        return d
+
+    # (paneles sin interruptor que se abren a la derecha: debajo del Inspector, nunca en pestaña con paneles que ya
+    #  tienen interruptor —si no, Qt saca la fila «Inspector · Voz y texto · …» repitiendo los nombres de arriba—)
+    SIN_PESTANAS = ("history", "scopes", "cortes")
+
+    def _sitio_sin_pestanas(self, k: str):
+        d = self.docks.get(k)
+        ins = self.docks.get("inspector")
+        if d is None or ins is None or d.isFloating():
+            return
+        inter = getattr(self, "interruptores", {})
+        juntos = self.tabifiedDockWidgets(d)
+        if not any(self.docks.get(x) in juntos for x in inter) and self.dockWidgetArea(d) != Qt.NoDockWidgetArea:
+            return
+        hermano = next((self.docks[x] for x in self.SIN_PESTANAS if x != k and x in self.docks
+                        and not self.docks[x].isHidden() and not self.docks[x].isFloating()
+                        and not any(self.docks.get(y) in self.tabifiedDockWidgets(self.docks[x]) for y in inter)),
+                       None)
+        self.removeDockWidget(d)
+        if hermano is not None:
+            self.tabifyDockWidget(hermano, d)          # (Historial · Gráficas: SU fila, que no repite nada)
+        else:                                          # (splitDockWidget con el Inspector en pestañas lo metía en ellas)
+            area = self.dockWidgetArea(ins) if not ins.isFloating() else Qt.NoDockWidgetArea
+            self.addDockWidget(area if area != Qt.NoDockWidgetArea else Qt.RightDockWidgetArea, d, Qt.Vertical)
+
+    def _caja_sonoridad(self) -> QWidget:
+        """📊 La sonoridad en UN solo sitio (antes: casilla en Mezcla, «LUFS» del transporte e Inspector → Proyecto):
+        la casilla «Volumen final para YouTube (−14 LUFS)» y «Medir la sonoridad». El Inspector → Proyecto deja un
+        acceso que trae aquí; el transporte, solo el volumen de escucha."""
+        caja = QWidget()
+        v = QVBoxLayout(caja)
+        v.setContentsMargins(6, 6, 6, 6)
+        loud = getattr(self.ai_panel, "loud", None)
+        if loud is not None:
+            loud.setParent(caja)
+            v.addWidget(loud)
+        self.btn_sonoridad = QPushButton("📊 Medir la sonoridad (LUFS)")
+        self.btn_sonoridad.setToolTip("Mide el volumen percibido de toda la mezcla (LUFS integrados y pico verdadero, "
+                                      "en segundo plano) y te dice cuántos dB subir o bajar para llegar a −14 LUFS con "
+                                      "el pico ≤ −1 dBTP. Puedes aplicarlo (Ctrl+Z lo deshace). Clic mientras mide = "
+                                      "cancelar.")
+        self.btn_sonoridad.clicked.connect(lambda: self.engine.loudness.start(self))
+        try:
+            self.engine.loudness.busy.connect(lambda on: self.btn_sonoridad.setText(
+                "⏳ Midiendo… (clic = cancelar)" if on else "📊 Medir la sonoridad (LUFS)"))
+        except AttributeError:
+            pass
+        v.addWidget(self.btn_sonoridad)
+        v.addStretch(1)
+        self.preview.btn_lufs.setVisible(False)       # (el transporte: solo escuchar)
+        g = getattr(self.inspector, "_g_sonoridad", None)
+        if g is not None:                              # (Inspector → Proyecto → Sonoridad: un acceso, no otro control)
+            g.setVisible(False)
+            acceso = QPushButton("🎚 Abrir la sonoridad en «Limpieza y mezcla»")
+            acceso.setObjectName("flat")
+            acceso.setToolTip("La sonoridad (−14 LUFS al exportar y medir) está en el panel «Limpieza y mezcla» → "
+                              "3 · Sonoridad")
+            acceso.clicked.connect(lambda: self.abrir_seccion("audio", "sonoridad"))
+            self.inspector.poner_en("sonoridad", acceso)
+        return caja
+
+    def _ocultar_absorbidos(self):
+        """Los paneles absorbidos nunca vuelven sueltos (tampoco con una distribución guardada de antes)."""
+        for k in self.ABSORBIDOS:
+            dk = self.docks.get(k)
+            if dk is not None and getattr(dk, "absorbido", False) and not dk.isHidden():
+                dk.hide()
+
+    def _destino_absorbido(self, widget):
+        """(panel, sección) donde vive ahora un widget absorbido; None si no es de ninguno."""
+        if widget is None:
+            return None
+        pal = getattr(self, "_pal_panel", None)
+        if pal is not None and (widget is pal or pal.isAncestorOf(widget)):
+            return "palabras", "palabras"              # (Dijiste… · Carpetas · Buscar material: su panel)
+        for clave_g, acordeon in (("voz_texto", getattr(self, "voz_texto", None)),
+                                  ("audio", getattr(self, "audio_panel", None))):
+            if acordeon is not None and widget is not acordeon:
+                k = acordeon.clave_de(widget)
+                if k is not None:
+                    return clave_g, k
+        if widget is getattr(self, "material", None):
+            return "inspector", "archivo"
+        return None
+
+    def mostrar_widget(self, w: QWidget) -> bool:
+        """🧭 PÚBLICA y estable (la guía, la ayuda, el montaje guiado…): pone a la vista ese widget esté donde esté.
+        Si vive dentro de «Voz y texto» o «Audio», abre ese panel y su sección (y su pestaña de Palabras clave); si vive
+        en el Inspector, abre su pestaña y su sección plegable; si no, abre y pone delante su panel. Después lo
+        desplaza a la vista. True si quedó visible."""
+        if w is None:
+            return False
+        from PySide6.QtWidgets import QDockWidget, QScrollArea, QTabWidget
+        from .inspector_secciones import Seccion       # (las plegables del Inspector: Velocidad, Color…)
+        from .tabs import Section
+        try:
+            cadena = []
+            p = w
+            while p is not None and p is not self:
+                cadena.append(p)
+                p = p.parentWidget()
+        except RuntimeError:
+            return False
+        agrupado = None
+        for a in cadena:                               # (Voz y texto / Audio: su sección)
+            for clave_g, acordeon in (("voz_texto", getattr(self, "voz_texto", None)),
+                                      ("audio", getattr(self, "audio_panel", None))):
+                if acordeon is not None and acordeon.clave_de(a) is not None:
+                    agrupado = (clave_g, acordeon.clave_de(a))
+                    break
+            if agrupado:
+                break
+        if agrupado:
+            self.abrir_seccion(*agrupado)
+        else:
+            dock = next((a for a in cadena if isinstance(a, QDockWidget)), None)
+            if dock is not None:
+                self.show_panel(getattr(dock, "panel", None) or dock.widget())
+        for i, a in enumerate(cadena):                 # (pestañas y secciones plegables por el camino, de fuera a dentro)
+            par = a.parentWidget()
+            tabs = par.parentWidget() if par is not None else None
+            if isinstance(tabs, QTabWidget) and tabs.indexOf(a) >= 0:
+                j = tabs.indexOf(a)
+                if tabs.isTabEnabled(j):
+                    tabs.setCurrentIndex(j)
+            if isinstance(a, (Section, Seccion)) and a is not w and not a.is_open():
+                a.set_open(True, save=False)
+        zona = next((a for a in cadena[1:] if isinstance(a, QScrollArea) and a.widget() is not None), None)
+        if zona is not None:
+            QTimer.singleShot(0, lambda: zona.ensureWidgetVisible(w, 0, 20) if w.isVisible() else None)
+        return w.isVisibleTo(self)
+
+    # ------------------------------------------------ 🧭 REGLA: lo que creas o pides, a la vista y listo para usar
+    # (el usuario, 20/11: pulsó «T», se creó el texto y no apareció dónde escribirlo: el Inspector estaba cerrado).
+    # Cualquier acción que cree algo que hay que rellenar, o que necesite que escribas algo para seguir, termina en
+    # abrir_para_usar(). Lo que crea el controlador lo avisa con ctrl.creado_por_ti (solo lo tuyo: nunca lo de la IA ni lo
+    # de los procesos automáticos) y aquí se abre SU editor (EDITOR_DE). Prueba permanente: tests/test_abre_su_panel.py.
+    def abrir_para_usar(self, w: QWidget, foco: QWidget | None = None, seleccionar: bool = False) -> bool:
+        """🧭 PÚBLICA: pone w a la vista esté donde esté (mostrar_widget: panel, pestaña, sección y desplazamiento) y, si
+        se da `foco`, le deja el foco (con seleccionar=True, su texto seleccionado para escribir encima). El foco se
+        vuelve a dar en cuanto Qt termina lo que tenía pendiente (abrir el panel, rellenar el Inspector…)."""
+        ok = self.mostrar_widget(w)
+        if foco is None:
+            return ok
+
+        def dar():
+            try:
+                if not foco.isVisible() or not foco.isEnabled():
+                    return
+                foco.setFocus(Qt.OtherFocusReason)
+                if seleccionar and hasattr(foco, "selectAll"):
+                    foco.selectAll()
+            except RuntimeError:                       # (cerrando)
+                pass
+        dar()
+        QTimer.singleShot(0, dar)
+        return ok
+
+    def editor_de(self, clip) -> tuple | None:
+        """🧭 EDITOR_DE: dónde se rellena o ajusta lo que acabas de crear → (widget a la vista, widget con el foco o
+        None, seleccionar su texto). Un texto: el cuadro del Inspector → Texto, con «Texto» ya marcado para escribir
+        encima. Una capa de ajuste: Inspector → Video → Color (el foco se queda en la línea de tiempo)."""
+        if clip is None:
+            return None
+        if clip.text is not None:
+            ed = self.inspector.text_edit
+            return ed, ed, True
+        m = self.ctrl.project.media_of(clip)
+        if m is not None and (m.gen or {}).get("kind") == "adjust":
+            return self.inspector.secciones["color"], None, False
+        return None
+
+    def _abrir_lo_creado(self, ids: list):
+        """🧭 ctrl.creado_por_ti: lo recién creado queda elegido y su editor, a la vista y con el foco."""
+        p = self.ctrl.project
+        ids = [i for i in ids if i in p.clips]
+        if not ids:
+            return
+        destino = next((d for d in (self.editor_de(p.clips[i]) for i in ids) if d), None)
+        fw = QApplication.focusWidget()
+        if destino is not None and destino[1] is not None and fw is destino[1]:
+            self.timeline.setFocus()           # (si no, el Inspector no pondría el texto nuevo en su cuadro)
+        if set(self.timeline.selected) != set(ids):
+            self.timeline.set_selection(ids)   # (→ el Inspector y «Texto en pantalla» enseñan lo nuevo)
+        if destino is not None:
+            self.abrir_para_usar(*destino)
+
+    def abrir_seccion(self, panel: str, seccion: str):
+        """Abre «Voz y texto», «Audio» o el Inspector delante, en esa sección (desde Escenas/Miniatura, primero a
+        Editar). Devuelve el panel."""
+        if getattr(self, "_scenes_state", None) is not None or getattr(self, "_thumb_page", None) is not None:
+            self.go_page("edit")
+        if panel == "voz_texto" and seccion == "palabras":
+            panel = "palabras"                         # (22/11: «Palabras clave» ya es su propio panel)
+        dk = self.docks.get(panel)
+        if dk is None:
+            return None
+        self._paneles_a_su_sitio(solo=[panel])
+        dk.show()
+        dk.raise_()
+        if panel == "inspector":
+            self.inspector.ir_a(seccion)
+        elif panel == "palabras":
+            pass                                       # (sus pestañas: show_panel / mostrar_widget eligen la suya)
+        else:
+            acordeon = self.voz_texto if panel == "voz_texto" else self.audio_panel
+            acordeon.abrir(seccion)
+        self._sync_interruptores() if hasattr(self, "interruptores") else None
+        return dk
+
+    def _fila_paneles_aparte(self):
+        """La fila de los paneles, siempre en su propia fila debajo de la barra de arriba: una distribución guardada de
+        antes de que existiera (o la de fábrica) la ponía AL LADO de la barra de arriba y la ventana pedía ~1430 px."""
+        tb = getattr(self, "_tb_paneles", None)
+        if tb is not None and not self.toolBarBreak(tb):
+            self.insertToolBarBreak(tb)
+
+    def _barras_sueltas_fuera(self):
+        """Barras de pestañas de los paneles: a la vista SOLO las de la distribución de ahora. Qt dejaba a la vista
+        barras viejas tras restoreState() (pintadas encima de otra página) y, al entrar en 🎚 Audio, escondía las
+        suyas hasta el siguiente cambio de tamaño. Se decide barra a barra y se puede llamar las veces que sea (también
+        desde un clic): cada barra se marca, se vuelve a aplicar la distribución —Qt reescribe AL MOMENTO los nombres
+        de las barras que usa (su posición la mueve después, con una animación de 0 ms: por eso no sirve mirarla)— y
+        las que siguen marcadas son viejas: fuera. De las que usa, se enseña cada una cuyos paneles están a la vista,
+        acoplados y en pestañas entre sí. No se borran: Qt guarda punteros a ellas."""
+        from PySide6.QtWidgets import QTabBar
+        import shiboken6
+        lay = self.layout()
+        if lay is None or not self.isVisible():
+            return
+        barras = [b for b in self.findChildren(QTabBar, options=Qt.FindDirectChildrenOnly) if b.count()]
+        if not barras:
+            return
+        marca = "\u2063·vieja·"
+        for b in barras:
+            b.setTabText(0, marca)
+        r = self.rect()                                # (lo mismo que usa Qt: la ventana menos la barra de menús)
+        menu = self.menuWidget()
+        if menu is not None and not menu.isHidden() and not menu.isWindow():
+            r.setTop(menu.geometry().bottom() + 1)
+        lay.setGeometry(r)
+        punteros = {shiboken6.getCppPointer(d)[0]: d for d in self.docks.values()}
+        # (si Qt no reescribió ninguna —sin grupos a la vista, p. ej. en 🖼 Miniatura, o en mitad de un arrastre— no se
+        #  sabe cuáles usa: entonces solo cuenta que sus paneles estén a la vista)
+        aplicado = any(b.tabText(0) != marca for b in barras)
+        for b in barras:
+            docks = [punteros.get(b.tabData(i)) for i in range(b.count())]
+            if b.tabText(0) == marca:
+                b.setTabText(0, docks[0].windowTitle() if docks and docks[0] is not None else "")
+                vieja = aplicado
+            else:
+                vieja = False
+            buena = (not vieja and len(docks) >= 2
+                     and all(d is not None and not d.isHidden() and not d.isFloating() for d in docks))
+            if buena:
+                for d in docks:                        # (en pestañas entre sí, como _pestañas_que_caben)
+                    if not any(o in docks for o in self.tabifiedDockWidgets(d)):
+                        buena = False
+                        break
+            if buena:
+                if b.isHidden():
+                    b.show()
+            elif b.isVisible():
+                b.hide()
+
+    def _ventana_en_pantalla(self):
+        """↔ Si la ventana (sin maximizar) quedó más grande que su pantalla, vuelve a caber en ella."""
+        if self.isMaximized() or self.isFullScreen():
+            return
+        try:
+            av = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        except Exception:  # noqa: BLE001
+            return
+        marco = self.frameGeometry()
+        w = min(self.width(), av.width() - (marco.width() - self.width()))
+        h = min(self.height(), av.height() - (marco.height() - self.height()))
+        if (w, h) == (self.width(), self.height()):
+            return
+        self.resize(w, h)
+        marco = self.frameGeometry()
+        x = max(av.left(), min(marco.x(), av.right() + 1 - marco.width()))
+        y = max(av.top(), min(marco.y(), av.bottom() + 1 - marco.height()))
+        if (x, y) != (marco.x(), marco.y()):
+            self.move(x, y)
+
     def salir_de_paginas(self) -> bool:
         """Antes de cambiar de pestaña o de proyecto, o de cerrar: se sale de 🎬 Escenas (pregunta si hay cambios sin
         aplicar) y de 🖼 Miniatura (se guarda). False = el usuario canceló."""
@@ -1050,6 +2370,31 @@ class MainWindow(QMainWindow):
             self._thumb_editor.close()
         return True
 
+    def _colocar_audio_mix(self):
+        d, ai = self.docks["audio_mix"], self.docks["ai"]
+        if d.isFloating():
+            d.setFloating(False)
+        if not ai.isFloating() and self.dockWidgetArea(ai) != Qt.NoDockWidgetArea:
+            self.tabifyDockWidget(ai, d)
+        else:
+            self.addDockWidget(Qt.LeftDockWidgetArea, d)
+        d.setVisible(True)
+
+    def _colocar_junto(self, key: str, vecinos: tuple):
+        """Pone el panel en pestaña junto al primer vecino acoplado (si no hay, a la izquierda) y a la vista."""
+        d = self.docks[key]
+        if d.isFloating():
+            d.setFloating(False)
+        for v in vecinos:
+            o = self.docks.get(v)
+            if o is not None and not o.isFloating() and not o.isHidden() and \
+                    self.dockWidgetArea(o) != Qt.NoDockWidgetArea:
+                self.tabifyDockWidget(o, d)
+                break
+        else:
+            self.addDockWidget(Qt.LeftDockWidgetArea, d)
+        d.setVisible(True)
+
     def apply_font_scale(self):
         """Aplica Ventana → Tamaño de letra (paneles y menús / global) al momento."""
         from .theme import apply_fonts, scaled_style
@@ -1057,12 +2402,20 @@ class MainWindow(QMainWindow):
         self.timeline_box.setStyleSheet(scaled_style(tl))     # la línea de tiempo usa solo la escala global
         self.timeline.set_text_scale(tl)
         k = max(1.0, ui)                                       # barras de alto fijo: que quepa la letra
-        for name, base in (("pagebar", 58), ("topbar", 30)):
+        for name, base in (("pagebar", 30), ("topbar", 30), ("barrapaneles", 30)):
             w = self.findChild(QWidget, name)
             if w is not None:
                 w.setFixedHeight(int(base * k))
-        self.preview.header.setFixedHeight(int(30 * k))
+        self._medir_paginas()                                  # (↔ con otra letra, otros anchos de la barra de abajo)
+        self._medir_interruptores()                            # (y de los interruptores de arriba)
+        self.preview.poner_alto_cabecera(int(30 * k))          # (alto de cada fila: puede tener dos)
         QTimer.singleShot(0, self._ajustar_paneles)            # (con otra letra, otros anchos mínimos)
+        from . import diseno                                   # (🎨 los componentes del diseño, también al momento)
+        diseno.refrescar_escala()
+        if getattr(self, "_tl_bar", None) is not None:         # (✂ otra letra = otros anchos: la barra, a recolocar ya,
+            self._tl_min_cache = None                          #  sin esperar a que cambie de tamaño)
+            self._tl_fit_bar()
+            QTimer.singleShot(0, self._tl_fit_bar)
 
     def open_font_size(self):
         from .font_dialog import FontSizeDialog
@@ -1124,6 +2477,12 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("🎓 Proyecto de ejemplo abierto: sigue los pasos de la guía. Los clips son "
                                              "de Pexels (sus créditos salen solos en la descripción al exportar).", 10000)
 
+    def abrir_guia_primer_uso(self):
+        """👋 Ayuda → «Guía de primer uso» (y la primera vez que abres Reclaimer): el recorrido corto por los sitios
+        de siempre (ui/guia_primer_uso.py). Al terminar, todo vuelve a como estaba."""
+        from .guia_primer_uso import empezar
+        return empezar(self)
+
     def open_guide(self, lesson: str | None = None):
         """📖 Guía paso a paso (F1). La primera vez aparece flotando a la derecha."""
         d = self.docks["guide"]
@@ -1138,9 +2497,21 @@ class MainWindow(QMainWindow):
             self.guide.open_lesson(lesson)
 
     def show_panel(self, widget: QWidget):
-        """Muestra y pone delante el panel que contiene ese widget (esté donde esté)."""
-        for dock in self.docks.values():
+        """Muestra y pone delante el panel que contiene ese widget (esté donde esté). Los que viven dentro de «Voz y
+        texto», «Audio» o el Inspector (agrupación 20/11) abren su sección."""
+        destino = self._destino_absorbido(widget)
+        if destino is not None:
+            dk = self.abrir_seccion(*destino)
+            pal = getattr(self, "_pal_tabs", None)
+            if pal is not None and pal.indexOf(widget) >= 0:
+                pal.setCurrentWidget(widget)           # (Dijiste… · Carpetas · Buscar material: la suya delante)
+            return dk
+        for key, dock in self.docks.items():
             if getattr(dock, "panel", None) is widget or dock.widget() is widget:
+                if key in self.PAGINA_FX:              # (las columnas de la página Efectos de antes: el panel Efectos)
+                    return self.show_panel(self.effects)
+                if self._lado_incoherente(key):        # (siempre en el lado de su interruptor)
+                    self._paneles_a_su_sitio(solo=[key])
                 dock.show()
                 dock.raise_()
                 return dock
@@ -1192,6 +2563,54 @@ class MainWindow(QMainWindow):
             box.setTextInteractionFlags(Qt.TextBrowserInteraction)
         box.exec()
 
+    def _barra_paneles(self) -> QWidget:
+        """🎛 La fila de los paneles, debajo de la barra de arriba (como la de DaVinci: Panel multimedia · Efectos · … ·
+        Inspector): la ÚNICA forma de elegir los paneles de los lados en Editar (sus filas de pestañas no se ven: el
+        usuario, «la 1, como DaVinci»). A la izquierda lo que AÑADES, a la derecha CÓMO ES lo elegido. Marcado = el
+        que se ve delante en su sitio; clic = ponerlo delante; clic en el que ya está delante = ocultarlo."""
+        from .theme import BG_DEEP
+        bar = QWidget()
+        bar.setObjectName("barrapaneles")
+        bar.setAttribute(Qt.WA_StyledBackground, True)
+        bar.setStyleSheet(f"QWidget#barrapaneles {{ background: {BG_DEEP}; }}")
+        bar.setFixedHeight(30)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(8, 0, 8, 0)
+        self.interruptores = {}
+        # (cada interruptor en la fila del lado donde se abre su panel: si arrastras un panel al otro lado, su
+        #  interruptor se muda con él y se recuerda —_lado_panel—; así fila y lado siempre coinciden)
+        todos = self.INTERRUPTORES_IZQ + self.INTERRUPTORES_DER
+        izq = self._fila_interruptores([x for x in todos if self._lado_panel(x[0]) == "izq"])
+        der = self._fila_interruptores([x for x in todos if self._lado_panel(x[0]) == "der"])
+        self._filas_inter = {"izq": izq, "der": der}
+        # ◧ «A todo el alto»: los paneles de la izquierda hasta abajo (la línea de tiempo empieza a su derecha)
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QToolButton
+        from .theme import TEXT_DIM, glyph_icon
+        self._btn_alto = QToolButton()
+        self._btn_alto.setObjectName("interruptor")
+        self._btn_alto.setText("A todo el alto")
+        self._btn_alto.setIcon(glyph_icon("◧", 16, TEXT_DIM, "#ffffff"))
+        self._btn_alto.setIconSize(QSize(16, 16))
+        self._btn_alto.setCheckable(True)
+        self._btn_alto.setFocusPolicy(Qt.NoFocus)
+        self._btn_alto.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._btn_alto.setToolTip("A todo el alto: los paneles de la izquierda (Medios, Efectos, IA…) llegan hasta "
+                                  "abajo y la línea de tiempo empieza a su derecha, como en DaVinci.\nApagado: la línea "
+                                  "de tiempo ocupa todo el ancho de abajo. Si en tu pantalla no cabe la línea de tiempo "
+                                  "con todos sus botones, se queda a todo el ancho. También en Ventana.")
+        self._btn_alto.setChecked(self.biblioteca_alto())
+        self._btn_alto.toggled.connect(self.set_biblioteca_alto)
+        self._medir_interruptores([self._btn_alto])
+        der.layout().insertWidget(0, self._btn_alto)
+        der.layout().insertSpacing(1, 8)
+        lay.addWidget(izq)
+        lay.addStretch()
+        lay.addWidget(der)
+        self._barra_arriba = bar
+        bar.installEventFilter(self._vigia_arriba)       # (↔ interruptores con nombre o solo icono según quepan)
+        return bar
+
     def _top_bar(self) -> QWidget:
         from .branding import symbol_pixmap
         bar = QWidget()
@@ -1212,7 +2631,7 @@ class MainWindow(QMainWindow):
         self.btn_show_media.setObjectName("flat")
         self.btn_show_media.setToolTip("Mostrar el panel de medios")
         self.btn_show_media.clicked.connect(lambda: self.show_panel(self.library))
-        self.project_title = QLabel()
+        self.project_title = _TituloCorto()            # (↔ se acorta con «…» si no cabe: la ventana no se ensancha)
         self.project_title.setObjectName("dim")
         # ☰ Todos los paneles en un menú (las pestañas que no caben se quedan con su icono: sin deslizar)
         from PySide6.QtWidgets import QMenu
@@ -1222,6 +2641,7 @@ class MainWindow(QMainWindow):
         self._menu_paneles = QMenu(self.btn_show_inspector)
         self._menu_paneles.aboutToShow.connect(self._llenar_menu_paneles)
         self.btn_show_inspector.setMenu(self._menu_paneles)
+        self.btn_show_media.setVisible(False)          # (fase 1: «Medios» es ahora un interruptor más; ver abajo)
         lay.addWidget(self.btn_show_media)
         lay.addStretch()
         lay.addWidget(self.workspaces.bar)
@@ -1243,14 +2663,258 @@ class MainWindow(QMainWindow):
         self.btn_font.setToolTip("Hacer las letras más grandes o más pequeñas (también en Ventana → Tamaño de letra)")
         self.btn_font.clicked.connect(self.open_font_size)
         lay.addWidget(self.btn_font)
+        # 🎨 Diseño: color de acento (al momento), tema y tamaño de letra
+        from PySide6.QtWidgets import QMenu as _QMenu
+        self.btn_diseno = QPushButton("🎨 Diseño")
+        self.btn_diseno.setObjectName("flat")
+        self.btn_diseno.setToolTip("Opciones de diseño de Reclaimer: color de acento (lo elegido, lo activo y el botón "
+                                   "principal; se ve al momento), tema y tamaño de letra")
+        self._menu_diseno = _QMenu(self.btn_diseno)
+        self._menu_diseno.setToolTipsVisible(True)
+        self._menu_diseno.addSection("Color de acento")
+        self._llenar_acentos(self._menu_diseno)
+        self._menu_diseno.addSeparator()
+        self._tema_menu(self._menu_diseno)
+        self._menu_diseno.addAction("🔠 Tamaño de letra…", self.open_font_size)
+        self.btn_diseno.setMenu(self._menu_diseno)
+        lay.addWidget(self.btn_diseno)
         lay.addSpacing(6)
         lay.addWidget(self.btn_show_inspector)
         return bar
 
-    PAGES = [("media", "🗂", "Medios"), ("effects", "✦", "Efectos"), ("edit", "🎞", "Editar"),
-             ("scenes", "🎬", "Escenas"),
-             ("guided", "🧭", "Montaje guiado"),
-             ("fairlight", "🎚", "Audio"), ("thumb", "🖼", "Miniatura"), ("deliver", "🚀", "Entrega")]
+    # 🎛 Interruptores de la barra de arriba: (panel, nombre). El resto de paneles, en «☰ Paneles» y en Ventana.
+    # (todos los paneles que pueden estar a los lados en Editar tienen el suyo: así sus filas de pestañas sobran y nada
+    #  sale dos veces. «Transcripción» es el panel «Texto» —lo dicho, sincronizado—: con el nombre «Texto» se
+    #  confundía con la pestaña Texto del Inspector, que es el texto en pantalla)
+    # (agrupación 20/11: «Voz y texto» y «Audio» reúnen lo que antes eran 9 interruptores; Historial y Gráficas,
+    #  en ☰ Paneles; Material del clip, en Inspector → Archivo)
+    INTERRUPTORES_IZQ = (("media", "Medios"), ("effects", "Transiciones y efectos"), ("sounds", "Sonidos"), ("ai", "IA"),
+                         ("moments", "Momentos"), ("memes", "Memes"), ("descargas_web", "Descargas"),
+                         ("voz_texto", "Voz y texto"), ("edit_clips", "Clips del edit"))
+    # (22/11: «Voz y texto» a la izquierda; a la derecha, «Palabras clave» y «Limpieza» con todo su sitio)
+    INTERRUPTORES_DER = (("palabras", "Palabras clave"), ("audio", "Limpieza y mezcla"),
+                         ("edit_opts", "Edit musical"), ("inspector", "Inspector"))
+    INTERRUPTORES_TIP = {
+        "media": "tus videos, imágenes y sonidos importados",
+        "effects": "transiciones, efectos, filtros y figuras para arrastrar a los clips",
+        "sounds": "efectos de sonido (los tuyos y de internet)",
+        "ai": "las herramientas de IA: transcribir, B-roll, primera versión…",
+        "clips": "la página 🔑 Palabras clave: lo que dices, buscar material, carpetas y lo descargado",
+        "transcript": "el texto de lo que se dice (la transcripción), sincronizado con el video",
+        "moments": "buscar momentos en tus videos por lo que se ve o se dice",
+        "descargas_web": "buscar y bajar de internet lo que quieras (videos, imágenes o un enlace), sin palabra clave",
+        "memes": "tu biblioteca de memes: la misma en todos tus proyectos",
+        "audio_mix": "mezcla y música: bajar la música cuando hablas, sonoridad…",
+        "edit_clips": "los clips del edit musical (pestaña Edits)",
+        "voz_ia": "que una voz sintética lea tu guion",
+        "history": "el historial de cambios (deshacer hasta un punto)",
+        "scopes": "gráficas de color y de nivel de la imagen",
+        "edit_opts": "las opciones del edit musical (pestaña Edits)",
+        "subtitles": "los subtítulos del video y su estilo",
+        "voice": "limpieza de la voz: silencios, muletillas y repeticiones",
+        "material": "lo que se sabe del clip elegido (o del que está bajo el cabezal)",
+        "inspector": "cómo es lo elegido: tamaño, posición, sonido, color…",
+        "voz_texto": "todo lo de la voz y el texto, en orden: 1 Transcribir · 2 Transcripción · 3 Subtítulos · "
+                     "4 Voz IA",
+        "palabras": "las palabras clave de tu narración: Dijiste… (cada palabra y sus momentos) · Carpetas (su "
+                    "material y lo descargado) · Buscar material (tu carpeta o internet)",
+        "audio": "el sonido: 1 Limpieza de la voz · 2 Mezcla y música · 3 Sonoridad (−14 LUFS) · 4 Cortes de audio"}
+
+    def _fila_interruptores(self, lista) -> QWidget:
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QToolButton
+
+        from .theme import ACCENT, TEXT, TEXT_DIM, glyph_icon
+        fila = QWidget()
+        fila.setObjectName("interruptores")
+        fila.setStyleSheet(
+            f"QToolButton#interruptor {{ background: transparent; border: none; border-bottom: 2px solid transparent;"
+            f" color: {TEXT_DIM}; padding: 2px 6px; }}"
+            f"QToolButton#interruptor:hover {{ color: {TEXT}; }}"
+            f"QToolButton#interruptor:checked {{ color: white; border-bottom: 2px solid {ACCENT}; }}"
+            f"QToolButton#interruptor[sin_efecto=\"true\"] {{ color: {TEXT_DIM}; "
+            f"border-bottom: 2px dotted {TEXT_DIM}; }}")
+        fl = QHBoxLayout(fila)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(2)
+        for k, nombre in lista:
+            d = self.docks.get(k)
+            if d is None:
+                continue
+            b = QToolButton()
+            b.setObjectName("interruptor")
+            b.setText(nombre)
+            b.setIcon(glyph_icon(self.ICONO_PANEL.get(k, "•"), 16, TEXT_DIM, "#ffffff"))
+            b.setIconSize(QSize(16, 16))
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setToolTip(f"{nombre}: {self.INTERRUPTORES_TIP.get(k, '')}.\nClic: lo abre delante; si ya está "
+                         f"delante, lo cierra.")
+            b.clicked.connect(lambda _c=False, k_=k: self._interruptor(k_))
+            self._medir_interruptores([b])
+            d.visibilityChanged.connect(self._interruptores_pronto)
+            d.toggleViewAction().toggled.connect(self._interruptores_pronto)
+            d.dockLocationChanged.connect(lambda area, k_=k: self._panel_cambio_de_lado(k_, area))
+            d.topLevelChanged.connect(lambda suelto, d_=d: self._marcar_arrastre(d_, suelto))
+            self.interruptores[k] = b
+            fl.addWidget(b)
+        if not hasattr(self, "_t_interruptores"):
+            from PySide6.QtCore import QEvent, QObject
+            self._t_interruptores = QTimer(self)
+            self._t_interruptores.setSingleShot(True)
+            self._t_interruptores.setInterval(0)
+            self._t_interruptores.timeout.connect(self._sync_interruptores)
+
+            class _VigiaArriba(QObject):
+                def __init__(self, win):
+                    super().__init__(win)
+                    self.win = win
+
+                def eventFilter(self, obj, ev):
+                    # (también LayoutRequest: aparece «Exportar miniatura» o cambia el nombre del proyecto)
+                    if ev.type() in (QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+                        self.win._interruptores_que_caben()
+                    return False
+            self._vigia_arriba = _VigiaArriba(self)
+        QTimer.singleShot(0, self._sync_interruptores)
+        return fila
+
+    def _medir_interruptores(self, botones=None):
+        """Ancho de cada interruptor con su nombre y con solo el icono (con la letra de ahora); su mínimo, el icono."""
+        todos = list(getattr(self, "interruptores", {}).values()) + \
+            [x for x in [getattr(self, "_btn_alto", None)] if x]
+        for b in botones if botones is not None else todos:
+            estilo = b.toolButtonStyle()
+            b.ensurePolished()
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setProperty("ancho_nombre", b.sizeHint().width())
+            b.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            b.setProperty("ancho_icono", b.sizeHint().width())
+            b.setMinimumWidth(b.sizeHint().width())      # (nunca obliga a ensanchar la ventana: como mínimo, su icono)
+            b.setToolButtonStyle(estilo)
+        if botones is None:
+            self._interruptores_que_caben()
+
+    def _interruptores_pronto(self, *_a):
+        t = getattr(self, "_t_interruptores", None)
+        if t is not None and not t.isActive():
+            t.start()
+
+    def _interruptor_abierto(self, k: str) -> bool:
+        d = self.docks[k]
+        if d.isHidden():
+            return False
+        # (si comparte sitio con otros, solo cuenta el que se ve delante: como en DaVinci, uno por sitio)
+        return d.isFloating() or not self.tabifiedDockWidgets(d) or not d.visibleRegion().isEmpty()
+
+    # (paneles que solo tienen sentido en una pestaña de trabajo: en las demás, su interruptor no sale)
+    SOLO_EN_PESTANA = {"edit_opts": "edit", "edit_clips": "edit"}
+
+    def _interruptor_util(self, k: str) -> bool:
+        """¿Sale el interruptor de este panel en la pestaña de trabajo actual? Los del edit musical, solo en Edits;
+        los de cada pestaña (TAB_PANELS), si esa pestaña los usa, si los encendiste tú en ella o si están abiertos.
+        (Todos siguen en «Ventana».)"""
+        tab = getattr(getattr(self, "workspaces", None), "current", "youtube")
+        if k in self.SOLO_EN_PESTANA:
+            return tab == self.SOLO_EN_PESTANA[k]
+        # (agrupación 20/11: «Voz y texto» y «Audio» reúnen paneles de todas las pestañas; TAB_PANELS decide si salen
+        #  ABIERTOS, no si su interruptor existe —si no, «Voz y texto» no se podía abrir en Video horizontal—)
+        return True
+
+    def _sync_interruptores(self):
+        """Cada interruptor, marcado si su panel está abierto (delante o detrás de otra pestaña); y solo los de la
+        pestaña de trabajo actual."""
+        cambio = False
+        for k, b in getattr(self, "interruptores", {}).items():
+            util = self._interruptor_util(k)
+            if b.isHidden() == util:
+                b.setVisible(util)
+                cambio = True
+        if cambio:
+            QTimer.singleShot(0, self._interruptores_que_caben)
+        for k, b in getattr(self, "interruptores", {}).items():
+            on = self._interruptor_abierto(k)
+            if b.isChecked() != on:
+                b.setChecked(on)
+
+    def _interruptor(self, k: str):
+        """🎛 Clic en un interruptor: abre el panel delante (en su página si solo vive en una); si ya estaba abierto y
+        delante, lo cierra (como «Ventana»: en Editar se recuerda por pestaña de trabajo)."""
+        d = self.docks[k]
+        if self._lado_incoherente(k) and not d.isHidden():   # (abierto en el otro lado: a su lado, a la vista)
+            self._paneles_a_su_sitio(solo=[k])
+            self.show_panel(d.panel)
+            self._sync_interruptores()
+            return
+        if self._paneles_a_su_sitio(solo=[k]):          # (suelto encima de la ventana: acoplado a su lado Y a la
+            self.show_panel(d.panel)                    #  vista en el mismo clic —revisión: hacía falta otro—)
+            self._sync_interruptores()
+            return
+        if getattr(self, "_scenes_state", None) is not None or getattr(self, "_thumb_page", None) is not None:
+            self.go_page("edit")                        # (🎬 Escenas / 🖼 Miniatura ocupan la ventana: primero a Editar)
+            if getattr(self, "_scenes_state", None) is not None or getattr(self, "_thumb_page", None) is not None:
+                return                                  # (cambios sin aplicar y «Cancelar»: se queda)
+            if not d.isHidden():
+                d.show()
+                d.raise_()
+                self._sync_interruptores()
+                return
+        if self._interruptor_abierto(k) and not d.isHidden() and not d.visibleRegion().isEmpty():
+            d.toggleViewAction().trigger()
+        else:
+            self.show_panel(d.panel)
+        self._sync_interruptores()
+
+    def _interruptores_que_caben(self):
+        """↔ Con su nombre si caben todos; si no, todos con solo su icono (el nombre, en el tooltip). Nunca obliga a
+        una ventana más ancha (cada interruptor pide como mínimo su icono)."""
+        bar = getattr(self, "_barra_arriba", None)
+        if bar is None or not getattr(self, "interruptores", None):
+            return
+        if getattr(self, "_ajustando_arriba", False):
+            return
+        botones = [b for b in self.interruptores.values() if not b.isHidden()] + \
+            [x for x in [getattr(self, "_btn_alto", None)] if x]
+        extra = sum(int(b.property("ancho_nombre")) - int(b.property("ancho_icono")) for b in botones)
+        lay = bar.layout()
+        # (el mínimo de la barra con todos en solo icono, sin tocarlos: así no baila)
+        base = lay.minimumSize().width() - sum(b.minimumWidth() for b in botones) +             sum(int(b.property("ancho_icono")) for b in botones)
+        cabe = base + extra + 24 <= bar.width()
+        estilo = Qt.ToolButtonTextBesideIcon if cabe else Qt.ToolButtonIconOnly
+        # (con nombre, el que cede es el nombre del proyecto —se acorta con «…»—, no un interruptor: con un nombre de
+        #  proyecto largo se cortaban en «M…s». Se le pone como máximo lo que sobra; el mínimo de cada interruptor
+        #  sigue siendo su icono, así la ventana se puede estrechar y entonces pasan a solo icono)
+        titulo = None                                   # (el nombre del proyecto ya no va en esta fila)
+        tope = 16777215
+        if cabe and titulo is not None:
+            m_t = titulo.minimumSizeHint().width()
+            tope = max(m_t, m_t + bar.width() - base - extra - 24)
+        self._ajustando_arriba = True
+        try:
+            for b in list(self.interruptores.values()) + [x for x in [getattr(self, "_btn_alto", None)] if x]:
+                minimo = int(b.property("ancho_icono"))       # (también los escondidos: igual al volver a salir)
+                if b.toolButtonStyle() != estilo:
+                    b.setToolButtonStyle(estilo)
+                if b.minimumWidth() != minimo:
+                    b.setMinimumWidth(minimo)
+            if titulo is not None and titulo.maximumWidth() != tope:
+                titulo.setMaximumWidth(tope)
+        finally:
+            self._ajustando_arriba = False
+
+    # (agrupación 20/11, decisión del usuario: abajo solo Editar · Escenas · Miniatura · Entrega, a la mitad de alto.
+    #  Medios y Efectos → sus interruptores; Palabras clave/Audio/Transcripción → «Voz y texto» y «Audio»; Montaje
+    #  guiado → botón en la barra de menús. go_page sigue aceptando esas claves y lleva a su sitio nuevo)
+    PAGES = [("edit", "🎞", "Editar"), ("scenes", "🎬", "Escenas"), ("thumb", "🖼", "Miniatura"),
+             ("deliver", "🚀", "Entrega")]
+    # (el nombre completo de las páginas con nombre corto en la barra: en su tooltip)
+    PAGE_TIPS = {"effects": "✦ Efectos (solo lo visual): Transiciones · Efectos · Filtros (color y aspecto) · "
+                            "Figuras geométricas (tapar / censurar y figuras de color)",
+                 "fairlight": "🎚 Audio: volumen y ecualizador, mezcla y música, limpieza de la voz, sonidos y corte "
+                              "de audio",
+                 "transcripcion": "📝 Transcripción y subtítulos: transcribir y la narración, el texto, los "
+                                  "subtítulos y la IA (IA ✨, Momentos, Voz IA)"}
     # (14/11: «IA» ya no va en esta barra: la IA tiene UN sitio, la pestaña «IA ✨» del panel, con «✨ Más»)
 
     def _page_bar(self) -> QWidget:
@@ -1260,30 +2924,85 @@ class MainWindow(QMainWindow):
         from .theme import glyph_icon
         bar = QWidget()
         bar.setObjectName("pagebar")
-        bar.setFixedHeight(58)
+        bar.setFixedHeight(30)                         # (a la mitad: icono y nombre en una línea)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(0, 2, 0, 4)
+        lay.setContentsMargins(0, 1, 0, 1)
         lay.setSpacing(6)
         lay.addStretch()
         self.page_buttons = {}
         for key, icon, label in self.PAGES:            # icono de un color encima del nombre, como en Resolve
             b = QToolButton()
             b.setText(label)
-            b.setIcon(glyph_icon(icon, 22))
-            b.setIconSize(QSize(22, 22))
-            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setIcon(glyph_icon(icon, 16))
+            b.setIconSize(QSize(16, 16))
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             b.setObjectName("page")
             b.setCheckable(True)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(lambda _c=False, k=key: self.go_page(k))
+            b.setToolTip(self.PAGE_TIPS.get(key, label))   # (con la barra en solo iconos, el nombre aquí)
             self.page_buttons[key] = b
             lay.addWidget(b)
         lay.addStretch()
         self.page_buttons["edit"].setChecked(True)
+        # ↔ La barra nunca obliga a una ventana más ancha (con 🔑 Palabras clave y 📝 Transcripción pedía ~1600 px):
+        # cada botón puede quedarse en su icono (mínimo = solo icono) y, si los nombres no caben, van todos con
+        # solo el icono (el nombre, en el tooltip); al ensancharse vuelven los nombres.
+        from PySide6.QtCore import QEvent, QObject
+
+        class _VigiaPaginas(QObject):
+            def __init__(self, win):
+                super().__init__(win)
+                self.win = win
+
+            def eventFilter(self, obj, ev):
+                if ev.type() in (QEvent.Resize, QEvent.Show):
+                    self.win._paginas_que_caben()
+                return False
+        self._vigia_paginas = _VigiaPaginas(self)
+        bar.installEventFilter(self._vigia_paginas)
+        self._page_bar_w = bar
+        self._medir_paginas()
         return bar
 
+    def _medir_paginas(self):
+        """Ancho de cada botón de página con su nombre y con solo el icono (con la letra de ahora)."""
+        for b in getattr(self, "page_buttons", {}).values():
+            estilo = b.toolButtonStyle()
+            b.ensurePolished()
+            b.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            corto = b.sizeHint().width()
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setProperty("ancho_largo", b.sizeHint().width())
+            b.setToolButtonStyle(estilo)
+            b.setMinimumWidth(corto)
+        self._paginas_que_caben()
+
+    def _paginas_que_caben(self):
+        bar = getattr(self, "_page_bar_w", None)
+        if bar is None or not getattr(self, "page_buttons", None):
+            return
+        lay = bar.layout()
+        m = lay.contentsMargins()
+        botones = list(self.page_buttons.values())
+        largo = m.left() + m.right() + lay.spacing() * (len(botones) + 1) +             sum(int(b.property("ancho_largo") or b.sizeHint().width()) for b in botones)
+        estilo = Qt.ToolButtonTextBesideIcon if bar.width() >= largo else Qt.ToolButtonIconOnly
+        for b in botones:
+            if b.toolButtonStyle() != estilo:
+                b.setToolButtonStyle(estilo)
+
     def go_page(self, key: str):
-        """Cambiar de «página» como en Resolve (todas trabajan sobre el mismo proyecto)."""
+        """Cambiar de «página» como en Resolve (todas trabajan sobre el mismo proyecto). Las que ya no están abajo
+        (agrupación 20/11) llevan a su sitio nuevo: Palabras clave / Transcripción → «Voz y texto»; Audio → «Limpieza
+        y mezcla»; Efectos → el panel «Transiciones y efectos» en Editar; Entrega → exportar. Abajo queda marcada la
+        página en la que estás: lo que no tiene botón propio (🧭 Montaje guiado, Medios…) se hace en «Editar»."""
+        destino = {"keywords": ("palabras", "palabras"), "transcripcion": ("voz_texto", "transcripcion"),
+                   "fairlight": ("audio", "limpieza")}.get(key)
+        if destino is not None:
+            return self.abrir_seccion(*destino)
+        if key == "effects":
+            self.go_page("edit")
+            return self.show_panel(self.effects)
         if key != "thumb" and self._thumb_page is not None and getattr(self, "_thumb_editor", None) is not None:
             self._thumb_editor.close()             # sale de 🖼 Miniatura (se guarda) y vuelve el editor
         if key != "scenes" and getattr(self, "_scenes_state", None) is not None:
@@ -1292,41 +3011,24 @@ class MainWindow(QMainWindow):
                 for k, b in self.page_buttons.items():
                     b.setChecked(k == "scenes")
                 return
+        marcada = key if key in self.page_buttons else "edit"     # (Montaje guiado, Medios…: se está en Editar)
         for k, b in self.page_buttons.items():
-            b.setChecked(k == key)
-        self.inspector.prefer_audio = (key == "fairlight")   # 🎚 en la página Audio, el ecualizador no se va
+            b.setChecked(k == marcada)
         if key == "scenes":
             self.open_scenes()
         elif key == "media":
             self.show_panel(self.library)
             self.library.search.setFocus()
-        elif key == "effects":
-            self.show_panel(self.effects)
-            self.show_panel(self.inspector)
         elif key == "edit":
             self.show_panel(self.library)
             self.show_panel(self.inspector)
         elif key == "guided":
             d = self.docks
-            self.show_panel(self.clips)
             if d["guided"] in self.tabifiedDockWidgets(d["clips"]) or d["guided"].isFloating() or                     d["guided"].isHidden():      # (en pestaña con 🎬 Clips se tapaban: el guiado, debajo, a la vista)
                 d["guided"].setFloating(False)
                 self.removeDockWidget(d["guided"])
                 self.addDockWidget(Qt.RightDockWidgetArea, d["guided"], Qt.Vertical)
             self.show_panel(self.guided)
-            self.show_panel(self.clips)         # 🎬 Clips y el guiado se ven a la vez
-        elif key == "fairlight":
-            sel = list(self.inspector._ids)   # una imagen con su sonido vinculado cuenta como uno
-            c = self.ctrl.project.clips.get(sel[0]) if len(sel) == 1 else None
-            m = self.ctrl.project.media_of(c) if c else None
-            if m and (m.kind == "audio" or m.has_audio):
-                self.right_tabs.setCurrentWidget(self.inspector)
-                self.inspector.clip_tabs.setCurrentIndex(2)
-            else:
-                self.right_tabs.setCurrentWidget(self.ai_panel)
-                self.ai_panel.show_audio_section()
-                self.statusBar().showMessage("Selecciona un clip de audio para ver su ecualizador en el Inspector.",
-                                             6000)
         elif key == "thumb":
             self.open_thumbnail()
         elif key == "deliver":
@@ -1419,6 +3121,7 @@ class MainWindow(QMainWindow):
         undo.setShortcut(QKeySequence.Undo)
         redo = self.ctrl.undo_group.createRedoAction(self, "Rehacer")
         redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self._act_deshacer, self._act_rehacer = undo, redo       # (🧭 el cuadro del texto del Inspector usa sus atajos)
         m.addAction(undo)
         m.addAction(redo)
         self.addAction(undo)
@@ -1453,6 +3156,23 @@ class MainWindow(QMainWindow):
         if a_div.shortcut().toString() == "Ctrl+B" and \
                 extra_permitido(next(k for k, (a, _d) in self.shortcut_actions.items() if a is a_div), "S"):
             a_div.setShortcuts([QKeySequence("Ctrl+B"), QKeySequence("S")])   # (también la S de siempre)
+        act(m, "Recortar el inicio hasta el cabezal (y cerrar el hueco)", "Q", lambda: self._trim_playhead("start"),
+            "Quita lo que hay antes del cabezal en el clip elegido (si no, en el del canal elegido o la pista principal) "
+            "y ese tramo sale de todas las pistas a la vez: nada se desincroniza")
+        act(m, "Recortar el final hasta el cabezal (y cerrar el hueco)", "W", lambda: self._trim_playhead("end"),
+            "Quita lo que hay después del cabezal en el clip elegido (si no, en el del canal elegido o la pista "
+            "principal) y ese tramo sale de todas las pistas a la vez: nada se desincroniza")
+        act(m, "Mover el clip 1 fotograma a la izquierda", ",", lambda: self._nudge_frames(-1),
+            "Mueve el clip elegido (y su imagen o sonido vinculado) un fotograma antes. No tapa nada: si está pegado "
+            "a otro clip, avisa y no se mueve. Varias pulsaciones seguidas se deshacen con un Ctrl+Z")
+        act(m, "Mover el clip 1 fotograma a la derecha", ".", lambda: self._nudge_frames(1),
+            "Mueve el clip elegido (y su imagen o sonido vinculado) un fotograma después. No tapa nada: si está "
+            "pegado a otro clip, avisa y no se mueve. Varias pulsaciones seguidas se deshacen con un Ctrl+Z")
+        act(m, "Seleccionar todo lo que hay desde el cabezal hacia delante", "Y", lambda: self._select_from_playhead(True),
+            "Elige los clips que pasan por el cabezal o van después (solo en los canales elegidos, si hay)")
+        act(m, "Seleccionar todo lo que hay desde el cabezal hacia atrás", "Alt+Y",
+            lambda: self._select_from_playhead(False),
+            "Elige los clips que pasan por el cabezal o van antes (solo en los canales elegidos, si hay)")
         act(m, "Eliminar", "Delete", lambda: self._delete(False))
         act(m, "Eliminar y cerrar hueco", "Shift+Delete", lambda: self._delete(True))
         act(m, "⇤ Juntar: todo se pega a la izquierda (canal seleccionado o todo)", "Ctrl++", self._join_right,
@@ -1463,6 +3183,22 @@ class MainWindow(QMainWindow):
         act(m, "Seleccionar todos los clips", "Ctrl+A", self.timeline.select_all)
         act(m, "Añadir marcador", "M", self._marker)
         m.addSeparator()
+        # 🎬 Modos de edición (como Resolve): lo elegido en Medios, en el cabezal, en el canal elegido (fase 6)
+        sub = m.addMenu("Poner lo elegido en Medios")
+        sub.setToolTipsVisible(True)
+        for modo, atajo, tip in (
+                ("insertar", "F9", "Lo pone en el cabezal abriendo su hueco en TODAS las pistas: lo de detrás se corre "
+                                   "entero y nada se desincroniza ni se tapa (lo que cruza el cabezal se parte)."),
+                ("sobrescribir", "F10", "Lo pone en el cabezal tapando solo lo de la pista de destino (su sonido va a "
+                                        "una pista libre: tu narración no se pisa)."),
+                ("reemplazar", "Shift+F11", "El clip de la pista de destino que pasa por el cabezal enseña este archivo "
+                                            "(mismo sitio y largo). En Resolve es F11; aquí F11 es el visor en la "
+                                            "segunda pantalla (se cambia en ⌨ Personalizar atajos)."),
+                ("encima", "F12", "Lo pone en la primera pista de video libre por encima de la de destino (o en una "
+                                  "nueva arriba), en el cabezal."),
+                ("al_final", "Shift+F12", "Lo pone justo detrás del último clip de la pista de destino.")):
+            a_ = act(sub, self.ctrl.MODOS_EDICION[modo], atajo, lambda _=False, md=modo: self._modo_edicion(md), tip)
+            a_.setToolTip(tip + "\nLa pista de destino es el canal elegido en la línea de tiempo (si no, la principal).")
         act(m, "Marcar entrada", "I", lambda: self.ctrl.set_mark("in", self.engine.time))
         act(m, "Marcar salida", "O", lambda: self.ctrl.set_mark("out", self.engine.time))
         act(m, "Ir a la entrada", "Shift+I", lambda: self._go_mark("in"))
@@ -1516,7 +3252,9 @@ class MainWindow(QMainWindow):
         a_live.setChecked(self.engine.live is not None)
         a_live.toggled.connect(self.engine.set_live_audio)
         self.a_live_audio = a_live
-        a_scrub = act(m, "🔊 Oír al arrastrar el cabezal", None, lambda: None,
+        act(m, "Reproducir alrededor del cabezal", "/", self._play_alrededor,
+            "2 s antes y 2 s después del cabezal, y el cabezal vuelve a donde estaba: revisar un corte sin mover nada")
+        a_scrub = act(m, "🔊 Oír al arrastrar el cabezal", "Shift+S", lambda: None,
                       "Mientras arrastras la barra roja suena un trocito de lo que hay ahí (como en Resolve o "
                       "Premiere): así encuentras los cortes sin darle a play. Va con «🎧 Audio en directo».")
         a_scrub.setCheckable(True)
@@ -1597,20 +3335,52 @@ class MainWindow(QMainWindow):
         self.preview.btn_loop.toggled.connect(self.act_loop.setChecked)
         act(m, "Fotograma anterior", "Left", lambda: self.engine.step(-1))
         act(m, "Fotograma siguiente", "Right", lambda: self.engine.step(1))
+        act(m, "⏪ Retroceder 5 segundos", "Shift+Left", lambda: self.engine.nudge(-5.0))     # (botones −5s / +5s)
+        act(m, "⏩ Avanzar 5 segundos", "Shift+Right", lambda: self.engine.nudge(5.0))
+        act(m, "⏩ Velocidad siguiente (1× → 2× → 4× → 8× → 1×)", None, self.engine.cycle_speed)
+        act(m, "▶ Velocidad normal (1×)", None, lambda: self.engine.set_speed(1.0))
+        act(m, "🔇 Silenciar / quitar el silencio de la escucha", None,
+            lambda: self.preview.btn_vol.model.toggle_mute())
+        act(m, "📊 Sonoridad para plataformas (LUFS)…", None, lambda: self.engine.loudness.start(self))
         act(m, "Ir al inicio", "Home", lambda: self.engine.seek(0))
         act(m, "Ir al final", "End", lambda: self.engine.seek(self.ctrl.project.duration()))
+        a_up = act(m, "Ir al corte anterior", "Up", lambda: self._go_edit(-1),
+                   "El cabezal salta al inicio o final de clip anterior (en los canales elegidos, si hay)")
+        a_dn = act(m, "Ir al corte siguiente", "Down", lambda: self._go_edit(1),
+                   "El cabezal salta al inicio o final de clip siguiente (en los canales elegidos, si hay)")
+        a_mu = act(m, "Ir a la marca anterior", "Shift+Up", lambda: self._go_marca(-1),
+                   "El cabezal salta a la marca anterior de la capa de marcas (tomas repetidas, muletillas, cortes "
+                   "dudosos, OBS, temas, huecos sin imagen, material repetido, tus marcadores; los tipos que dejes "
+                   "a la vista en el índice)")
+        a_md = act(m, "Ir a la marca siguiente", "Shift+Down", lambda: self._go_marca(1),
+                   "El cabezal salta a la marca siguiente de la capa de marcas (los tipos que dejes a la vista en el "
+                   "índice: la sección «Marcadores» del Inspector)")
+        for a_ in (a_up, a_dn, a_mu, a_md):  # (↑ ↓ solo con la línea de tiempo enfocada: las listas siguen con sus flechas)
+            a_.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            self.removeAction(a_)
+            self.timeline.addAction(a_)
         act(m, "Corte de audio anterior (línea roja)", "Alt+Left", lambda: self._go_cut(-1))
         act(m, "Corte de audio siguiente (línea roja)", "Alt+Right", lambda: self._go_cut(1))
 
         m = mb.addMenu("&Voz")
+        act(m, "🎚 Voz pareja: el mismo volumen en cada frase", None, self._voz_pareja,
+            "Lleva cada frase de tu narración al mismo nivel con una ganancia suave (±6 dB como mucho, cambios en las "
+            "pausas, los silencios no suben). SOLO volumen: ni ecualizador ni compresor (tu voz ya viene igualada de "
+            "OBS). Se oye al momento y un Ctrl+Z lo quita. Con clips de narración elegidos, solo en ellos.")
+        act(m, "Quitar la voz pareja", None, lambda: self.statusBar().showMessage(
+            __import__("editoria.core.voz_pareja", fromlist=["quitar"]).quitar(
+                self.ctrl, [i for i in self.timeline.selected] or None), 6000))
         act(m, "Transcribir y analizar la narración", "Ctrl+T",                # (🎙 vive en la pestaña IA)
-            lambda: (self.show_panel(self.ai_panel), self.ai_panel.tabs.setCurrentIndex(0), self.voice.transcribe()))
+            lambda: (self.abrir_seccion("voz_texto", "transcribir"), self.voice.transcribe()))
         act(m, "Volver a analizar (silencios, muletillas…)", "Ctrl+Shift+T",
-            lambda: (self.right_tabs.setCurrentWidget(self.voice), self.voice.analyze()))
+            lambda: (self.go_page("fairlight"), self.right_tabs.setCurrentWidget(self.voice), self.voice.analyze()))
         act(m, "🔎 Buscar en lo que dijiste", "Ctrl+Alt+F",           # (Ctrl+F ya es de «Buscar clips por contenido»)
-            lambda: (self.right_tabs.setCurrentWidget(self.transcript), self.transcript.focus_search()))
-        act(m, "Ver transcripción", None, lambda: self.right_tabs.setCurrentWidget(self.transcript))
-        act(m, "Estilo de subtítulos", None, lambda: self.right_tabs.setCurrentWidget(self.subtitles))
+            lambda: (self.go_page("transcripcion"), self.right_tabs.setCurrentWidget(self.transcript),
+                     self.transcript.focus_search()))
+        act(m, "Ver transcripción", None,               # (📝 en su página: Transcripción y subtítulos)
+            lambda: (self.go_page("transcripcion"), self.right_tabs.setCurrentWidget(self.transcript)))
+        act(m, "Estilo de subtítulos", None,
+            lambda: (self.go_page("transcripcion"), self.right_tabs.setCurrentWidget(self.subtitles)))
         act(m, "Exportar subtítulos (.srt)…", None, self.transcript.export_srt)
         m.addSeparator()
         act(m, "🎙 Grabar voz en off…", "Ctrl+Shift+R", self.open_voice_record)
@@ -1643,7 +3413,8 @@ class MainWindow(QMainWindow):
         act(m, "📜 Montaje desde el guion…", None, lambda: __import__(
             "editoria.ui.script_dialog", fromlist=["open_script_dialog"]).open_script_dialog(self))
         act(m, "Buscar clips por contenido", "Ctrl+F",
-            lambda: (self.library.btn_ai_search.setChecked(True), self.library.search.setFocus()))
+            lambda: (self.library.btn_ai_search.setChecked(True),
+                     self.abrir_para_usar(self.library.search, self.library.search, True)))
         m.setTitle("IA ✨")
         # 14/11 (él): una sola IA = la pestaña «IA ✨» del panel. El menú sale de la barra de arriba; sus acciones van al
         # botón «✨ Más» de esa pestaña y sus atajos siguen funcionando (las acciones quedan en la ventana).
@@ -1661,8 +3432,27 @@ class MainWindow(QMainWindow):
             lambda: self.timeline.selected and self.open_tracking(sorted(self.timeline.selected)[0]))
         act(m, "📌 Pegar el clip elegido a un objeto seguido…", None,
             lambda: self.timeline.selected and self.timeline._pegar(sorted(self.timeline.selected)[0]))
+        self._act_fila_kw = act(m, "Fila ⚡ de material por palabra clave", None,
+                                lambda on=None: self.timeline.poner_fila_kw(self._act_fila_kw.isChecked()),
+                                "Un chip por palabra clave en la regla con el material de su carpeta (gameplay o "
+                                "cinemática). Lo mismo que «Dijiste…» → Material")
+        self._act_fila_kw.setCheckable(True)
+        self._act_fila_kw.setChecked(self.timeline.kw_visible)
+        self.timeline.kw_fila_changed.connect(lambda on: (self._act_fila_kw.blockSignals(True),
+                                                          self._act_fila_kw.setChecked(on),
+                                                          self._act_fila_kw.blockSignals(False)))
+        self.menu_clip_elegido = m.addMenu("Clip elegido")     # 🖱 = el clic derecho del clip elegido, aquí arriba
+        self.menu_clip_elegido.setToolTipsVisible(True)
+        self.menu_clip_elegido.aboutToShow.connect(self._llenar_menu_clip_elegido)
         act(m, "Acercar", "+", lambda: self.timeline.zoom(1.5))
         act(m, "Alejar", "-", lambda: self.timeline.zoom(1 / 1.5))
+        act(m, "Detalle (10 s alrededor del cabezal)", None, self.timeline.detalle,
+            "Otra vez = el zoom de antes")
+        a_res = act(m, "Barra resumen de todo el video", None, lambda: None,
+                    "Una franja fina encima de la línea de tiempo con todo el video: clic = ver ese momento")
+        a_res.setCheckable(True)
+        a_res.setChecked(self.resumen.encendida())
+        a_res.toggled.connect(self.resumen.poner_visible)
         a_fit = act(m, "Ajustar a la ventana", "Ctrl+0", self.timeline.fit)
         if a_fit is not None and "Shift+Z" not in [k.toString() for k in a_fit.shortcuts()] and \
                 extra_permitido(next(k for k, (a, _d) in self.shortcut_actions.items() if a is a_fit), "Shift+Z"):
@@ -1728,10 +3518,19 @@ class MainWindow(QMainWindow):
         self._llenar_menu_ventana()
         m.aboutToShow.connect(self._llenar_menu_ventana)
         act(m, "Restablecer la distribución de paneles", None, self.reset_layout)
+        self._act_alto = act(m, "◧ Paneles de la izquierda a todo el alto", None, lambda: None,
+                             "Los paneles de la izquierda llegan hasta abajo y la línea de tiempo empieza a su derecha, "
+                             "como en DaVinci (apagado: la línea de tiempo a todo el ancho de abajo)")
+        self._act_alto.setCheckable(True)
+        self._act_alto.setChecked(self.biblioteca_alto())
+        self._act_alto.toggled.connect(self.set_biblioteca_alto)
         m.addSeparator()
         act(m, "🔠 Tamaño de letra…", "Ctrl+Alt+=", self.open_font_size)
         self._ui_scale_menu(m)
         self._tema_menu(m)
+        acm = m.addMenu("🎨 Color de acento")
+        acm.setToolTipsVisible(True)
+        self._llenar_acentos(acm)
         act(m, "⌨ Personalizar atajos de teclado…", None, self.open_shortcuts)
 
         m = mb.addMenu("&Convertir")
@@ -1741,6 +3540,9 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("Ay&uda")
         act(m, "📖 Guía paso a paso", "F1", lambda: self.open_guide())
+        act(m, "Guía de primer uso", None, self.abrir_guia_primer_uso,
+            "Un recorrido corto por lo de siempre: importar, transcribir, limpiar, recortar, palabras clave y "
+            "exportar. Se salta cuando quieras y todo vuelve a como estaba.")
         act(m, "🎓 Proyecto de ejemplo", None, self.open_example,
             "Abre un proyecto genérico de YouTube para aprender sin usar tu material: una narración de prueba, "
             "música propia y clips libres de Pexels (se descargan la primera vez, con sus créditos). "
@@ -1768,6 +3570,10 @@ class MainWindow(QMainWindow):
             act(m, "♥ Apoyar Reclaimer…", None, lambda: QDesktopServices.openUrl(QUrl(SUPPORT_URL)))
         act(m, "Acerca de Reclaimer", None, self._about)
 
+        self.act_guiado = QAction("🧭 Montaje guiado", self)
+        self.act_guiado.setToolTip("Los pasos de un montaje, uno a uno (antes, una página de abajo)")
+        self.act_guiado.triggered.connect(lambda: self.go_page("guided"))
+        mb.addAction(self.act_guiado)
         m = mb.addMenu("🔄 &Reinicio")
         act(m, "🔄 Reinicio de proyecto (empezar de cero)…", None, self.reset_project,
             "Vacía la línea de tiempo, Medios, subtítulos y marcadores de esta pestaña para empezar de cero. Antes se "
@@ -1895,10 +3701,13 @@ class MainWindow(QMainWindow):
         except Exception as ex:  # noqa: BLE001 - EditError
             self.statusBar().showMessage(str(ex), 6000)
             return
+        self._copia_externa = False                  # (Ctrl+V pegará estos clips, no lo del portapapeles de Windows)
         self.statusBar().showMessage(f"{'✂ Cortados' if cut else '⧉ Copiados'} {n} clips. Ctrl+V los pega en el "
                                      "cabezal · Alt+V pega sus ajustes en otros clips.", 6000)
 
     def _paste(self):
+        if self._pegar_de_fuera():                   # 🖼 lo último copiado fue una imagen o un archivo de fuera
+            return
         try:
             created = self.ctrl.paste_clips(self.engine.time)
         except Exception as exc:  # noqa: BLE001 - EditError (p. ej. no hay nada copiado)
@@ -1906,6 +3715,92 @@ class MainWindow(QMainWindow):
             return
         if isinstance(created, list):
             self.timeline.set_selection(created)
+
+    # ------------------------------------------------------------ 🖼 pegar imágenes copiadas fuera
+    def _al_cambiar_portapapeles(self):
+        self._copia_externa = True
+
+    def _pegar_de_fuera(self) -> bool:
+        """Ctrl+V con una imagen (o archivos, o la dirección de una imagen) copiada FUERA de Reclaimer después de
+        tu último Ctrl+C de clips: se guarda, se importa a Medios y se pone en el cabezal. True si lo hizo."""
+        from PySide6.QtCore import QUrl
+        cb = QApplication.clipboard()
+        md = cb.mimeData()
+        if md is None:
+            return False
+        hay_clips = bool(getattr(self.ctrl, "_clipboard", None) or getattr(self.ctrl, "clipboard", None))
+        if hay_clips and not getattr(self, "_copia_externa", False):
+            return False
+        pegar = getattr(getattr(self, "descargas_web", None), "pegar_portapapeles", None)
+        if pegar is not None and pegar(md, self.engine.time):    # (22/11: lo copiado en Descargas, con su sonido)
+            return True
+        rutas = [u.toLocalFile() for u in (md.urls() if md.hasUrls() else []) if u.isLocalFile()]
+        rutas = [r for r in rutas if os.path.isfile(r)]
+        if rutas:
+            from ..core.model import kind_for_path
+            rutas = [r for r in rutas if kind_for_path(r)]
+            if rutas:
+                self._poner_pegado(rutas)
+                return True
+        if md.hasImage():
+            img = cb.image()
+            if not img.isNull():
+                ruta = self._ruta_pegado(".png")
+                if img.save(ruta, "PNG"):
+                    self._poner_pegado([ruta])
+                    return True
+        texto = (md.text() if md.hasText() else "").strip()
+        if texto.lower().startswith(("http://", "https://")) and not any(c.isspace() for c in texto) and \
+                QUrl(texto).path().lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+            self._bajar_imagen_pegada(texto)
+            return True
+        return False
+
+    def _ruta_pegado(self, ext: str) -> str:
+        """Dónde se guarda lo pegado: junto al proyecto («Imágenes pegadas»); sin proyecto guardado, en los datos."""
+        import time
+        from ..core.paths import app_data_dir
+        base = os.path.dirname(self.ctrl.path) if self.ctrl.path else str(app_data_dir())
+        carpeta = os.path.join(base, "Imágenes pegadas")
+        os.makedirs(carpeta, exist_ok=True)
+        nombre = time.strftime("Pegada %Y-%m-%d %H-%M-%S")
+        ruta, n = os.path.join(carpeta, nombre + ext), 2
+        while os.path.exists(ruta):
+            ruta, n = os.path.join(carpeta, f"{nombre} ({n}){ext}"), n + 1
+        return ruta
+
+    def _poner_pegado(self, rutas: list[str]):
+        ids = [i for i in (self.ctrl.import_now(rutas) or []) if i]
+        if not ids:
+            self.statusBar().showMessage("No pude pegar eso en la línea de tiempo.", 6000)
+            return
+        created = self.ctrl.add_media(ids, None, self.engine.time)
+        if isinstance(created, list) and created:
+            self.timeline.set_selection(created)
+        nombre = os.path.basename(rutas[0]) if len(rutas) == 1 else f"{len(rutas)} archivos"
+        self.statusBar().showMessage(f"🖼 Pegado «{nombre}» en el cabezal (también está en Medios). Ctrl+Z lo quita.",
+                                     8000)
+
+    def _bajar_imagen_pegada(self, url: str):
+        from .jobs import BackgroundJob
+        ext = os.path.splitext(url.split("?")[0])[1].lower() or ".png"
+        ruta = self._ruta_pegado(ext if len(ext) <= 5 else ".png")
+
+        def bajar(_p, _c):
+            import urllib.request
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                datos = r.read(50 * 1024 * 1024)
+            with open(ruta, "wb") as f:
+                f.write(datos)
+            return ruta
+
+        job = BackgroundJob(bajar, self)
+        job.done.connect(lambda r: self._poner_pegado([r]))
+        job.failed.connect(lambda m: self.statusBar().showMessage(f"No pude bajar la imagen copiada: {m[:120]}", 8000))
+        self._job_pegado = job
+        self.statusBar().showMessage("🖼 Bajando la imagen copiada…", 4000)
+        job.start()
 
     # ------------------------------------------------------------ clic derecho como en Resolve
     def _sel_or_msg(self, what: str = "Selecciona antes los clips.") -> list[str]:
@@ -1927,6 +3822,7 @@ class MainWindow(QMainWindow):
         sel = self._sel_or_msg("Selecciona los clips que quieres cortar.")
         if sel:
             self.ctrl.copy_clips(sel)
+            self._copia_externa = False                       # (Ctrl+V pegará estos clips)
             self.ctrl.delete_clips(sel, ripple=True)          # (solo lo seleccionado, como Ctrl+X y Supr)
 
     def _insert_gap(self):
@@ -2111,8 +4007,11 @@ class MainWindow(QMainWindow):
         if not self.timeline.selected:
             self.statusBar().showMessage("Selecciona un clip para cambiar su velocidad.", 5000)
             return
-        self.show_panel(self.inspector)
-        self.inspector.focus_speed()
+        if self.inspector.speed_sec.isHidden():          # (oculta a propósito = imagen)
+            self.ctrl.message.emit("🐢 La velocidad es para videos y audios (no para imágenes).")
+            return
+        # 🧭 su pestaña (Video o Audio, donde viva ahora), su sección abierta, a la vista y con el foco en la velocidad
+        self.abrir_para_usar(self.inspector.speed, self.inspector.speed, True)
 
     def _freeze(self):
         sel = [cid for cid in self.timeline.selected if cid in self.ctrl.project.clips]
@@ -2230,13 +4129,22 @@ class MainWindow(QMainWindow):
         self.view_comp.setChecked(mode == "comp")
 
     def _comp_drop(self, ids, box):
-        """⊞ Archivos soltados en un hueco (o en el fondo) de la composición, desde el cabezal."""
-        made = self.ctrl.place_composition(ids, box, self.engine.time)
+        """⊞ Archivos soltados en un hueco (o en el fondo) de la composición, desde el cabezal. box = una caja (o None
+        = fondo) o una lista, una por archivo (varios a la vez llenan los huecos en orden; core/composicion.py)."""
+        from ..core import composicion
+        cajas = composicion.caja_por_id(ids, box)
+        made = composicion.colocar(self.ctrl, list(zip(ids, cajas)), self.engine.time)
+        fuera, self.preview.canvas.comp_fuera = getattr(self.preview.canvas, "comp_fuera", 0), 0   # (siempre a 0)
         if made:
             self.timeline.set_view("comp")             # se ve en su propia línea de tiempo
             self.timeline.set_selection(made)
-            self.statusBar().showMessage("⊞ Puesto en la composición" + (" (de fondo)" if box is None else "") +
-                                         ": arrástralo en el visor para moverlo · Ctrl+Z lo quita.", 8000)
+            n, voz = sum(1 for c in cajas if c is not None), composicion.con_sonido(self.ctrl, made)
+            self.statusBar().showMessage(
+                "⊞ Puesto en la composición" + (f" ({n} a la vez)" if n > 1 else "") +
+                (" (de fondo)" if n == 0 else "") +
+                (f" · {fuera} no cupieron: elige más huecos en ⊞ Composición" if fuera else "") +
+                (f" · suenan {voz}: silencia los que sobren en su pista" if voz > 1 else "") +
+                " · Ctrl+rueda acerca · Ctrl+Z lo quita.", 10000)
 
     def _gap_ai(self, track_id: str, a: float, b: float, apply: bool):
         """💡 / ⚡ en un hueco: el B-roll de la IA solo para ese tramo y en esa pista."""
@@ -2288,6 +4196,80 @@ class MainWindow(QMainWindow):
                                              "Clic derecho → «Deshacer clip compuesto» para volver.", 12000)
         manager().start("⧉ Clip compuesto", work, done,
                         lambda m: self.statusBar().showMessage("✗ " + m, 10000))
+
+    def _trim_playhead(self, edge: str):
+        """Q / W: recorta hasta el cabezal y cierra el hueco (ver ctrl.trim_to_playhead)."""
+        tl, p = self.timeline, self.ctrl.project
+        sel = [i for i in sorted(tl.selected) if i in p.clips]
+        nt = self.ctrl.trim_to_playhead(self.engine.time, edge, sel, tl.channel_ids(), ref_track=tl.main_track_id())
+        if nt is not None:
+            self.engine.user_seek(nt)
+            tl.set_playhead(nt, follow=True)
+
+    def _cambiar_fundidos(self, on: bool):
+        """〰 «Fundidos automáticos» (Limpieza y mezcla → 4 · Cortes de audio): se recuerda y se aplica al momento a todo
+        el proyecto. Es una preferencia, no un paso de deshacer (Ctrl+Z no la cambia: ver ctrl.set_fundidos_auto)."""
+        self.settings.setValue("audio/fundidos_auto", "true" if on else "false")
+        self.ctrl.set_fundidos_auto(on)
+
+    def _nudge_frames(self, frames: int):
+        """«,» / «.»: el clip elegido (con su pareja vinculada, si la selección va vinculada) se mueve 1 fotograma."""
+        tl = self.timeline
+        sel = self._sel_or_msg("Elige antes el clip que quieres mover (clic en él).")
+        if sel:
+            self.ctrl.nudge_clips(tl._with_links(sel), frames)
+
+    def _llenar_menu_clip_elegido(self):
+        """Timeline → «Clip elegido ▸»: las mismas opciones que el clic derecho en el clip elegido (lo que allí va en
+        «Más ▸», aquí también), para que ninguna viva solo en el clic derecho."""
+        sub = self.menu_clip_elegido
+        sub.clear()
+        viejo = getattr(self, "_menu_clip_armado", None)
+        if viejo is not None:
+            viejo.deleteLater()
+        self._menu_clip_armado = None
+        tl, p = self.timeline, self.ctrl.project
+        sel = [i for i in sorted(tl.selected) if i in p.clips]
+        if not sel:
+            sub.addAction("Elige antes un clip en la línea de tiempo").setEnabled(False)
+            return
+        ancla = getattr(tl, "_clip_ancla", None)            # (el que pulsaste; si no, el primero de video)
+        cid = ancla if ancla in sel else min(sel, key=lambda i: (p.track(p.clips[i].track_id).kind == TRACK_AUDIO,
+                                                                 p.clips[i].start))
+        clip = p.clips[cid]
+        armado = tl.build_clip_menu(clip, tl.mapToGlobal(tl.clip_rect(clip).center().toPoint()))
+        self._menu_clip_armado = armado
+        for a in armado.actions():
+            sub.addAction(a)
+
+    def _go_edit(self, step: int):
+        """↑ / ↓: el cabezal al corte anterior / siguiente (inicio o final de clip; en los canales elegidos, si hay)."""
+        tl, t = self.timeline, self.engine.time
+        medio = 0.5 / max(1.0, float(self.ctrl.project.fps or 30))
+        pts = self.ctrl.edit_points(tl.channel_ids() or None)
+        if step > 0:
+            cand = [x for x in pts if x > t + medio]
+            nt = cand[0] if cand else None
+        else:
+            cand = [x for x in [0.0] + pts if x < t - medio]
+            nt = cand[-1] if cand else None
+        if nt is None:
+            self.statusBar().showMessage("No hay más cortes " + ("después" if step > 0 else "antes") + " del cabezal.",
+                                         3000)
+            return
+        self.engine.user_seek(nt)
+        tl.set_playhead(nt, follow=True)
+
+    def _select_from_playhead(self, forward: bool):
+        """Y / Alt+Y: elige los clips que pasan por el cabezal y los de delante (Y) o los de detrás (Alt+Y); en los
+        canales elegidos si hay, si no en todas las pistas que se ven."""
+        tl, p, t = self.timeline, self.ctrl.project, self.engine.time
+        eps = 1e-6
+        tids = set(tl.channel_ids()) or {tr.id for k, tr in enumerate(p.tracks) if tl.track_h(k) > 0}
+        ids = [c.id for c in p.clips.values() if c.track_id in tids and (c.end > t + eps if forward else c.start < t - eps)]
+        tl.set_selection(ids)
+        self.statusBar().showMessage(f"{len(ids)} clip(s) elegidos desde el cabezal hacia " +
+                                     ("delante." if forward else "atrás."), 4000)
 
     def _delete(self, ripple: bool):
         if self.timeline.delete_transition():                           # transición seleccionada
@@ -2600,14 +4582,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"⚡ Ráfaga: {n} cortes al ritmo de la canción. Ctrl+Z la deshace.", 7000)
 
     def open_voz_ia(self):
-        """🗣 El panel «Voz IA» a la vista (y se queda en esta pestaña de trabajo), con el cursor en el guion."""
-        d = self.docks.get("voz_ia")
-        if d is None:
+        """🗣 «Voz y texto» → 5 · Voz IA a la vista (y se queda en esta pestaña de trabajo), con el cursor en el guion."""
+        if self.abrir_seccion("voz_texto", "voz_ia") is None:
             return
-        d.show()
-        d.raise_()
-        self._remember_tab_panel("voz_ia", True)
-        self.voz_ia.texto.setFocus()
+        self._remember_tab_panel("voz_texto", True)
+        QTimer.singleShot(0, self.voz_ia.texto.setFocus)
+
+    def open_subtitles(self):
+        """💬 «Voz y texto» → 3 · Subtítulos a la vista (y se queda en esta pestaña de trabajo)."""
+        if self.abrir_seccion("voz_texto", "subtitulos") is None:
+            return
+        self._remember_tab_panel("voz_texto", True)
 
     def _acceso_voz_ia_en_transcribir(self):
         """🗣 «Que lo lea la IA» en la pestaña «🎙 Transcribir» del panel IA (debajo del estado de la transcripción)."""
@@ -2615,13 +4600,24 @@ class MainWindow(QMainWindow):
         lay = st.parentWidget().layout() if st is not None and st.parentWidget() is not None else None
         if lay is None:
             return
-        b = QPushButton("🗣 Que lo lea la IA")
-        b.setObjectName("flat")
-        b.setToolTip("¿No quieres hablar? Pega tu guion y una voz sintética lo lee. Sale ya transcrito: subtítulos y "
-                     "palabras clave al momento, sin esperar a Whisper.")
+        from . import diseno as _Dv    # (21/11: con aspecto de botón e icono monocromo; antes parecían etiquetas)
+        b = QPushButton("Que lo lea la IA")
+        b.setIcon(_Dv.icono("audio-waveform"))
+        _Dv.alto_fijo(b)
+        b.setToolTip("Que lo lea la IA: ¿no quieres hablar? Pega tu guion y una voz sintética lo lee. Sale ya "
+                     "transcrito: subtítulos y palabras clave al momento, sin esperar a Whisper.")
         b.clicked.connect(lambda: self.open_voz_ia())
         lay.insertWidget(lay.indexOf(st) + 1, b)
         self._btn_voz_ia_tr = b
+        # 🎙 la otra forma de tener narración: grabarla tú mientras ves el video (lo mismo que Voz → Ctrl+Mayús+R)
+        g = QPushButton("Grabar la narración…")
+        g.setIcon(_Dv.icono("mic"))
+        _Dv.alto_fijo(g)
+        g.setToolTip("Grabar la narración… (voz en off): grabas tu voz mientras ves el video; la toma cae en la pista "
+                     "de voz, en el cabezal (Ctrl+Mayús+R, también en el menú Voz).")
+        g.clicked.connect(lambda: self.open_voice_record())
+        lay.insertWidget(lay.indexOf(b) + 1, g)
+        self._btn_grabar_tr = g
 
     def open_voice_record(self):
         """🎙 Grabar la voz en off mientras ves el video (la toma cae en la pista de voz, en el cabezal)."""
@@ -2732,6 +4728,8 @@ class MainWindow(QMainWindow):
             self.open_moments("")
         elif key == "voice":
             self.show_panel(self.voice)
+        elif key == "audio":                         # 🔊 Audio inteligente: «Audio» → 2 · Mezcla y música
+            self.abrir_seccion("audio", "mezcla")
         elif key == "edit":
             self.open_edit_maker()
         elif key == "audit":
@@ -2774,6 +4772,7 @@ class MainWindow(QMainWindow):
         ed.show()
         ed.setFocus()
         self.btn_export_thumb.setVisible(True)
+        QTimer.singleShot(0, self._barras_sueltas_fuera)     # (ninguna barra de pestañas de otra página)
         for k, b in self.page_buttons.items():
             b.setChecked(k == "thumb")
         return ed
@@ -2824,6 +4823,7 @@ class MainWindow(QMainWindow):
         pg.setFocus()
         for k, b in self.page_buttons.items():
             b.setChecked(k == "scenes")
+        QTimer.singleShot(0, self._barras_sueltas_fuera)     # (ninguna barra de pestañas de otra página)
         return pg
 
     def put_template(self, archivo: str, t: float):
@@ -2867,7 +4867,7 @@ class MainWindow(QMainWindow):
             pg.deleteLater()
             self._scenes_widget = None
         if st is not None:
-            self.restoreState(st["state"], 3)
+            self._restaurar_paneles(st["state"])
             for a, ctx in st["acts"]:
                 try:
                     a.setShortcutContext(ctx)
@@ -2908,7 +4908,7 @@ class MainWindow(QMainWindow):
             ed.deleteLater()
             self._thumb_editor = None
         if st is not None:
-            self.restoreState(st["state"], 3)
+            self._restaurar_paneles(st["state"])
             for a, ctx in st["acts"]:
                 try:
                     a.setShortcutContext(ctx)
@@ -3013,8 +5013,325 @@ class MainWindow(QMainWindow):
         d = self.docks["timeline"]
         n = len(self.ctrl.project.tracks)
         title = max(0, d.height() - self.timeline_box.height()) or 22
-        tb = self.timeline_box.layout().itemAt(0).widget().sizeHint().height()
+        from .responsive import widgets_en               # (sin itemAt: ver responsive.py)
+        tb = widgets_en(self.timeline_box.layout())[0].sizeHint().height()
         return int(title + tb + self.timeline.track_y(n) + self.timeline.NEW_ZONE + 8 + self.hbar.sizeHint().height())
+
+    # (el lado de entrada de cada panel: los de la izquierda; el resto, a la derecha)
+    LADO_IZQ = ("media", "effects", "ai", "moments", "descargas_web", "memes", "voz_texto", "edit_clips", "audio_mix",
+                "sounds",
+                "fx_trans", "fx_efectos",
+                "fx_filtros", "fx_figuras")
+
+    def _paneles_a_su_sitio(self, solo=None) -> list[str]:
+        """Un panel principal (Inspector, Medios…) que quedó SUELTO encima de la ventana principal —o fuera de toda
+        pantalla— vuelve acoplado a su lado de entrada (el usuario: el Inspector salía como ventana suelta «Inspector -
+        Reclaimer» encima del visor, con un hueco negro donde debía estar). Y uno que una distribución vieja dejó arriba
+        o abajo (ahora solo se acomodan a los lados) pasa a su lado. Al abrir y al pulsar su interruptor. La 📖 guía
+        flota a propósito: no se toca.
+        (20/11) Y un panel con interruptor acoplado en el lado CONTRARIO al de su interruptor vuelve a su lado (el
+        usuario abrió «Inspector» —interruptor de la derecha— y salió a la izquierda, debajo de «Transiciones y
+        efectos», con todo el lado derecho vacío): una distribución vieja incoherente se corrige sola al abrir."""
+        from PySide6.QtGui import QGuiApplication
+        movidos = []
+        try:
+            marco = self.frameGeometry()
+            pantallas = [s.availableGeometry() for s in QGuiApplication.screens()]
+        except RuntimeError:
+            return movidos
+        for k, d in self.docks.items():
+            if k in ("timeline", "guide") or (solo is not None and k not in solo):
+                continue
+            if d.isFloating():
+                g = d.frameGeometry()
+                mover = g.intersects(marco) or not any(s.intersects(g) for s in pantallas)
+            else:
+                mover = self.dockWidgetArea(d) in (Qt.TopDockWidgetArea, Qt.BottomDockWidgetArea) or \
+                    self._lado_incoherente(k)
+            if not mover:
+                continue
+            lado = self._area_lado(k)
+            ancla = self._ancla_lado(k, lado)
+            visible = not d.isHidden()
+            d._arrastre_usuario = False                # (lo movemos nosotros: no cambia el lado de su interruptor)
+            d.setFloating(False)
+            if ancla is not None:
+                self.tabifyDockWidget(ancla, d)
+            else:
+                self.addDockWidget(lado, d)
+            d.setVisible(visible)
+            if visible:
+                d.raise_()
+            movidos.append(k)
+        if movidos:
+            QTimer.singleShot(0, self._barras_sueltas_fuera)
+            QTimer.singleShot(0, self._ajustar_paneles)
+            QTimer.singleShot(0, self._ensure_side_widths)    # (nunca un panel solo en un lado a 200 px)
+        return movidos
+
+    # ------------------------------------------------ ↔ lado y fila coherentes (20/11)
+    def _lado_panel(self, k: str) -> str:
+        """«izq» o «der»: el lado donde se abre el panel k y la fila donde está su interruptor (siempre el mismo). Lo
+        de fábrica: INTERRUPTORES_IZQ / LADO_IZQ a la izquierda y el resto a la derecha; si lo arrastraste al otro
+        lado, el que elegiste (QSettings «paneles/lado/<k>»)."""
+        v = str(self.settings.value(f"paneles/lado/{k}", "") or "")
+        if v in ("izq", "der"):
+            return v
+        return self._lado_de_fabrica(k)
+
+    def _lado_de_fabrica(self, k: str) -> str:
+        return "izq" if k in dict(self.INTERRUPTORES_IZQ) or k in self.LADO_IZQ else "der"
+
+    def _area_lado(self, k: str):
+        return Qt.LeftDockWidgetArea if self._lado_panel(k) == "izq" else Qt.RightDockWidgetArea
+
+    def _lado_incoherente(self, k: str) -> bool:
+        """¿El panel k (con interruptor) está acoplado en el lado contrario al de su interruptor?"""
+        d = self.docks.get(k)
+        if d is None or k not in getattr(self, "interruptores", {}) or d.isFloating():
+            return False
+        zona = self.dockWidgetArea(d)
+        return zona in (Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea) and zona != self._area_lado(k)
+
+    def _ancla_lado(self, k: str, lado):
+        """Con quién va en pestaña un panel que vuelve a su lado: Medios o el Inspector si están allí a la vista; si no,
+        otro panel a la vista de ese lado con interruptor de ese lado; None = solo en su lado."""
+        d = self.docks.get(k)
+        inter = getattr(self, "interruptores", {})
+        prefer = ["media" if lado == Qt.LeftDockWidgetArea else "inspector"] + [x for x in inter if x != k]
+        for x in prefer:
+            o = self.docks.get(x)
+            if o is None or o is d or o.isFloating() or o.isHidden() or self.dockWidgetArea(o) != lado:
+                continue
+            if x in inter and self._area_lado(x) != lado:
+                continue
+            return o
+        return None
+
+    def _marcar_arrastre(self, d, suelto: bool):
+        """El panel se soltó de su sitio con el botón del ratón pulsado: lo está arrastrando el usuario."""
+        if suelto and QApplication.mouseButtons() & Qt.LeftButton:
+            d._arrastre_usuario = True
+
+    def _panel_cambio_de_lado(self, k: str, area):
+        """Un panel con interruptor se acopló en un lado: si lo llevó el usuario (arrastrándolo) al otro lado, su
+        interruptor pasa a la fila de ese lado y se recuerda. Lo que mueve el programa no cambia el lado."""
+        d = self.docks.get(k)
+        if d is None:
+            return
+        pulsado = bool(QApplication.mouseButtons() & Qt.LeftButton)
+        if area not in (Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea):
+            if not pulsado:                            # (suelto o quitado por el programa: no es un arrastre)
+                d._arrastre_usuario = False
+            return
+        usuario = bool(getattr(d, "_arrastre_usuario", False)) or pulsado
+        d._arrastre_usuario = False
+        if usuario:
+            self._poner_lado(k, "izq" if area == Qt.LeftDockWidgetArea else "der")
+            QTimer.singleShot(0, self._ensure_side_widths)   # (el panel que se queda solo en un lado, con ancho)
+
+    def _poner_lado(self, k: str, lado: str):
+        """El panel k se abre desde ahora en ese lado y su interruptor va a la fila de ese lado (se recuerda)."""
+        if lado == self._lado_de_fabrica(k):
+            self.settings.remove(f"paneles/lado/{k}")
+        else:
+            self.settings.setValue(f"paneles/lado/{k}", lado)
+        self._mover_interruptor(k, lado)
+
+    def _mover_interruptor(self, k: str, lado: str):
+        b = getattr(self, "interruptores", {}).get(k)
+        filas = getattr(self, "_filas_inter", None)
+        if b is None or not filas or b.parentWidget() is filas[lado]:
+            return
+        orden = [x for x, _n in self.INTERRUPTORES_IZQ + self.INTERRUPTORES_DER]
+        destino = filas[lado]
+        antes = [x for x in orden[:orden.index(k)] if x in self.interruptores
+                 and self.interruptores[x].parentWidget() is destino]
+        origen = b.parentWidget()
+        if origen is not None and origen.layout() is not None:
+            origen.layout().removeWidget(b)
+        b.setParent(destino)
+        # (en la fila derecha van antes «A todo el alto» y su separación)
+        destino.layout().insertWidget(len(antes) + (2 if lado == "der" else 0), b)
+        b.setVisible(self._interruptor_util(k))
+        QTimer.singleShot(0, self._interruptores_que_caben)
+
+    # ------------------------------------------------ sin huecos: el alto libre, al panel vecino que lo usa (20/11)
+    def _revisar_crecer(self):
+        """(tabs.avisar_contenido desde un panel que se plegó o abrió, y el repaso tras recolocar paneles) → repartir
+        el alto de los paneles apilados en cuanto Qt termine."""
+        t = getattr(self, "_t_ceder", None)
+        if t is None:
+            t = self._t_ceder = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(80)
+            t.timeout.connect(self._ceder_alto)
+        t.start()
+
+    def _alto_que_pide(self, d) -> int | None:
+        """El alto que necesita el panel d para enseñar todo lo suyo; None si aprovecha cualquier alto extra (una
+        lista o un texto a la vista: tabs.quiere_crecer)."""
+        from .tabs import quiere_crecer
+        panel, zona = getattr(d, "panel", None), d.widget()
+        if panel is None or zona is None or quiere_crecer(panel):
+            return None
+        lay = panel.layout()
+        ancho = zona.viewport().width() if hasattr(zona, "viewport") else zona.width()
+        alto = lay.totalHeightForWidth(ancho) if lay is not None and lay.hasHeightForWidth() else -1
+        if alto <= 0:
+            alto = max(panel.sizeHint().height(), panel.minimumSizeHint().height())
+        return alto + max(0, d.height() - zona.height()) + 2
+
+    def _columnas_lado(self, area) -> list:
+        """Los paneles a la vista de un lado, por columnas (cada una de arriba abajo)."""
+        docks = [d for k, d in self.docks.items() if k not in ("timeline", "guide") and not d.isHidden()
+                 and not d.isFloating() and self.dockWidgetArea(d) == area and not d.visibleRegion().isEmpty()]
+        cols: list = []
+        for d in sorted(docks, key=lambda x: (x.x(), x.y())):
+            for c in cols:
+                if abs(c[0].x() - d.x()) <= 6:
+                    c.append(d)
+                    break
+            else:
+                cols.append([d])
+        return [sorted(c, key=lambda x: x.y()) for c in cols]
+
+    def _ceder_alto(self):
+        """↕ Paneles apilados en el mismo lado («Voz y texto» encima de «Limpieza y mezcla»): el que enseña poco
+        (secciones plegadas, sin transcripción…) se queda con lo que necesita y el resto va al vecino que lo usa (una
+        lista, un texto). Nunca pisa lo que pusiste a mano con el divisor (hasta que cambien los paneles de esa
+        columna)."""
+        if not self.isVisible() or getattr(self, "_cediendo", False):
+            return
+        if getattr(self, "_scenes_state", None) is not None or getattr(self, "_thumb_page", None) is not None:
+            return
+        if not hasattr(self, "_altos_a_mano"):
+            self._altos_a_mano = set()
+        self._cediendo = True
+        try:
+            columnas = [c for a in (Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea) for c in self._columnas_lado(a)]
+            firmas = {frozenset(d.objectName() for d in c) for c in columnas}
+            self._altos_a_mano &= firmas               # (cambiaron los paneles de una columna: se olvida su marca)
+            for area in (Qt.LeftDockWidgetArea, Qt.RightDockWidgetArea):
+                for col in self._columnas_lado(area):
+                    self._vigilar_divisor(col)
+                    if len(col) < 2 or frozenset(d.objectName() for d in col) in self._altos_a_mano:
+                        continue
+                    pide = [self._alto_que_pide(d) for d in col]
+                    crecen = [d for d, p in zip(col, pide) if p is None]
+                    if not crecen or len(crecen) == len(col):
+                        continue                       # (todos usan el alto, o ninguno: nada que ceder)
+                    total = sum(d.height() for d in col)
+                    fijos = {id(d): max(p, d.minimumSizeHint().height()) for d, p in zip(col, pide) if p is not None}
+                    resto = total - sum(fijos.values())
+                    if resto < 140 * len(crecen):
+                        continue                       # (no hay sitio para que el vecino gane nada útil)
+                    base = sum(d.height() for d in crecen) or 1
+                    nuevos = [fijos[id(d)] if id(d) in fijos else int(resto * d.height() / base) for d in col]
+                    if max(abs(n - d.height()) for n, d in zip(nuevos, col)) <= 8:
+                        continue
+                    self.resizeDocks(col, nuevos, Qt.Vertical)
+        finally:
+            self._cediendo = False
+
+    def _vigilar_divisor(self, col):
+        """Si mueves a mano el divisor entre paneles apilados (un panel cambia de alto con el botón del ratón
+        pulsado), esa columna se queda como la dejas."""
+        from PySide6.QtCore import QEvent, QObject
+        vig = getattr(self, "_vigia_divisor", None)
+        if vig is None:
+            class _VigiaDivisor(QObject):
+                def __init__(self, win):
+                    super().__init__(win)
+                    self.win = win
+
+                def eventFilter(self, obj, ev):
+                    if ev.type() == QEvent.Resize and ev.oldSize().height() != ev.size().height() and \
+                            not getattr(self.win, "_cediendo", False) and self.win._boton_pulsado():
+                        self.win._alto_puesto_a_mano(obj, ev.oldSize().height())
+                    return False
+            vig = self._vigia_divisor = _VigiaDivisor(self)
+        for d in col:
+            if not getattr(d, "_vigilado_divisor", False):
+                d._vigilado_divisor = True
+                d.installEventFilter(vig)
+
+    TOLERANCIA_A_MANO = 3      # (px que un arrastre tiene que acumular para contar como «puesto a mano»)
+
+    def _boton_pulsado(self) -> bool:
+        """¿Está pulsado el botón izquierdo? (aparte para que las pruebas puedan simular un arrastre)"""
+        return bool(QApplication.mouseButtons() & Qt.LeftButton)
+
+    def _alto_puesto_a_mano(self, d, alto_antes: int | None = None):
+        """Un panel cambió de alto con el botón pulsado (alto_antes = el que tenía justo antes). Cuenta como «puesto a
+        mano» SOLO un arrastre real del divisor ENTRE paneles apilados, medido desde que se pulsó el botón (no paso a
+        paso): el total de la columna sigue igual (± la tolerancia) y algún panel acumuló más que la tolerancia.
+        Arrastrar despacio el divisor de la línea de tiempo (pasos de 2 px) o estirar la ventana cambian el total
+        según avanzan: nunca marcan, por lenta que sea."""
+        if not hasattr(self, "_altos_a_mano"):
+            self._altos_a_mano = set()
+        arr = getattr(self, "_arrastre_divisor", None)
+        if arr is None:
+            arr = self._arrastre_divisor = {}
+            t = getattr(self, "_t_suelta_divisor", None)
+            if t is None:                              # (al soltar el botón, el arrastre se olvida)
+                t = self._t_suelta_divisor = QTimer(self)
+                t.setInterval(120)
+                t.timeout.connect(self._revisar_suelta_divisor)
+            t.start()
+        tol = self.TOLERANCIA_A_MANO
+        for col in self._columnas_lado(self.dockWidgetArea(d)):
+            if d in col and len(col) > 1:
+                firma = frozenset(x.objectName() for x in col)
+                inicio = arr.setdefault(firma, {})
+                # (el alto de cada panel al empezar el arrastre: el de antes de su primer cambio en este arrastre o,
+                #  si aún no ha cambiado, el que tiene ahora)
+                if d.objectName() not in inicio:
+                    inicio[d.objectName()] = alto_antes if alto_antes is not None else d.height()
+                base = {x.objectName(): inicio.get(x.objectName(), x.height()) for x in col}
+                total_ini = sum(base.values())
+                total = sum(x.height() for x in col)
+                movido = max(abs(x.height() - base[x.objectName()]) for x in col)
+                if abs(total - total_ini) <= tol and movido > tol:
+                    self._altos_a_mano.add(firma)
+
+    def _revisar_suelta_divisor(self):
+        if not self._boton_pulsado():
+            self._fin_arrastre_divisor()
+
+    def _fin_arrastre_divisor(self):
+        """Se soltó el botón: el próximo arrastre se mide desde cero."""
+        self._arrastre_divisor = None
+        t = getattr(self, "_t_suelta_divisor", None)
+        if t is not None:
+            t.stop()
+
+    def _acoplar_timeline_si_tapa(self) -> bool:
+        """Al abrir: si la distribución guardada trae la línea de tiempo SUELTA (flotando: en Windows sale como una ventana
+        aparte «Línea de tiempo - Reclaimer», siempre encima de la principal) y cae encima de la ventana, vuelve a su
+        sitio abajo. Si no, tapaba la parte de abajo del visor (el lienzo y la barra de ▶) y el visor, sin la línea de
+        tiempo debajo, se estiraba hasta abajo del todo por detrás de ella. Una línea de tiempo suelta en OTRA pantalla
+        (sin tocar la ventana) se respeta. El resto de la distribución guardada no se toca."""
+        d = self.docks.get("timeline")
+        if d is None or not (d.isFloating() or d.window() is not self):
+            return False
+        suelta = d.window().frameGeometry()
+        marco = self.frameGeometry()
+        if self.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen) and self.screen() is not None:
+            marco = marco.united(self.screen().availableGeometry())   # (al abrir maximizada aún puede dar la normal)
+        comun = suelta.intersected(marco)
+        area = max(1, suelta.width() * suelta.height())
+        en_pantalla = any(s.geometry().contains(suelta.center()) for s in QApplication.screens())
+        if en_pantalla and comun.width() * comun.height() < area * 0.1:
+            return False
+        if d.isFloating():
+            d.setFloating(False)
+        self.removeDockWidget(d)
+        self.addDockWidget(Qt.BottomDockWidgetArea, d)
+        d.show()
+        self.statusBar().showMessage("La línea de tiempo estaba suelta encima del visor: ha vuelto a su sitio, abajo.",
+                                     10000)
+        return True
 
     def _ensure_timeline_size(self):
         """Al abrir, la línea de tiempo siempre con su altura natural (todas las pistas a la vista), sin
@@ -3135,6 +5452,16 @@ class MainWindow(QMainWindow):
             from ..core.model import KIND_IMAGE as _KI
             m_ = self.ctrl.project.media_of(c)
             lay = _TR.layout_at(c, self.engine.time - c.start, bool(m_ and m_.kind == _KI))   # 🎞 la de ahora
+        else:            # 📝 un texto seleccionado (si se ve ahora): su caja, para moverlo y escalarlo en el visor
+            ids = list(self.inspector._ids)
+            tc = self.ctrl.project.clips.get(ids[0]) if len(ids) == 1 else None
+            t = self.engine.time
+            tr_ = self.ctrl.project.track(tc.track_id) if tc is not None else None
+            if tc is not None and tc.text is not None and tc.enabled and tr_ is not None and not tr_.hidden \
+                    and tc.start - 1e-3 <= t < tc.end and not tc.locked and not tr_.locked:
+                from ..core import nota_texto as _NT
+                c = tc
+                lay = _NT.text_box(tc.text, t - tc.start, canvas.W, canvas.H)
         canvas.set_transform_edit(c.id if c else None, lay)
         # 🔍 zoom dinámico: los rectángulos de inicio y final sobre la imagen entera
         dz = None
@@ -3256,17 +5583,53 @@ class MainWindow(QMainWindow):
     def _clip_on_track_now(self, track_id: str) -> str | None:
         from ..core import generators as _G
         p = self.ctrl.project
+        if "~" in (track_id or ""):                   # 🎬 pista de una escena desplegada: es su clip de escena
+            cid = track_id.split("~")[1]
+            return cid if cid in p.clips else None
         c = p.clip_at(track_id, self.engine.time)
         if c is None or not c.enabled or c.text is not None or _G.is_adjust(p.media_of(c)):
             return None
         return c.id
 
+    def _text_at_now(self, fx: float, fy: float) -> str | None:
+        """📝 El texto que se ve en ese punto del visor ahora (el de la pista de más arriba), para elegirlo con un clic."""
+        from ..core import nota_texto as _NT
+        p = self.ctrl.project
+        t = self.engine.time
+        W, H = self.preview.canvas.W, self.preview.canvas.H
+        for tr in p.tracks:                         # (las pistas de texto van arriba: la primera es la de encima)
+            if tr.kind != TRACK_TEXT or tr.hidden or tr.locked:
+                continue
+            c = p.clip_at(tr.id, t)
+            if c is None or not c.enabled or c.text is None or c.locked:
+                continue
+            b = _NT.text_box(c.text, t - c.start, W, H)
+            if b["x"] <= fx <= b["x"] + b["w"] and b["y"] <= fy <= b["y"] + b["h"]:
+                return c.id
+        return None
+
     def _pick_from_viewer(self, clip_id: str):
+        clip_id = self._clip_real(clip_id)
         tl = self.timeline
         tl.set_selection(self.ctrl.linked_ids([clip_id]) if tl.linked else [clip_id])
 
+    def _clip_real(self, clip_id: str) -> str:
+        """🎬 Un personaje de una escena desplegada («clip~1») es su clip de escena."""
+        base = (clip_id or "").split("~")[0]
+        return base if "~" in (clip_id or "") and base in self.ctrl.project.clips else clip_id
+
     def _tf_live(self, clip_id: str, box: dict):
+        if "~" in (clip_id or ""):                    # (una pieza de una escena: se retoca en 🎬 Escenas)
+            return
         c = self.ctrl.project.clips.get(clip_id)
+        if c is not None and c.text is not None:     # 📝 un texto: x, y y tamaño (provisional hasta soltar)
+            orig = (self.preview.canvas._tf or {}).get("orig")
+            if orig:
+                from ..core import nota_texto as _NT
+                t0 = self.__dict__.setdefault("_tf_text0", {}).setdefault(clip_id, dict(c.text))   # (Ctrl+rueda)
+                c.text = _NT.text_from_box(t0, orig, box)
+                self.engine._sync()
+            return
         if c is not None:              # solo para verlo mientras arrastras (se guarda al soltar, con Ctrl+Z)
             if c.layout_kf:            # 🎞 animado: una caja provisional (las claves no se tocan hasta soltar)
                 from ..core import transform as _TR
@@ -3275,9 +5638,45 @@ class MainWindow(QMainWindow):
                 c.layout = dict(box)
             self.engine._sync()
 
+    def _tf_started(self, clip_id: str):
+        """Empieza un arrastre en el visor: la copia del texto, la de AHORA (nunca la de un arrastre anterior)."""
+        c = self.ctrl.project.clips.get(clip_id)
+        t0 = self.__dict__.setdefault("_tf_text0", {})
+        t0.pop(clip_id, None)
+        if c is not None and c.text is not None:
+            t0[clip_id] = dict(c.text)
+
+    def _tf_cancel(self, clip_id: str, orig):
+        """Soltado sin moverlo: todo como antes, sin paso de deshacer."""
+        c = self.ctrl.project.clips.get(clip_id)
+        t0 = self.__dict__.setdefault("_tf_text0", {}).pop(clip_id, None)
+        if c is None or "~" in (clip_id or ""):
+            return
+        if c.text is not None:
+            if t0 is not None:
+                c.text = t0
+        else:
+            from ..core import transform as _TR
+            if _TR.LIVE.pop(clip_id, None) is None and not c.layout_kf:
+                c.layout = dict(orig) if orig else None
+        self.engine._sync()
+
     def _tf_done(self, clip_id: str, orig, box):
+        if "~" in (clip_id or ""):
+            return
         c = self.ctrl.project.clips.get(clip_id)
         if c is None:
+            return
+        if c.text is not None:         # 📝 un texto: lo movido/escalado en el visor, en UN paso de deshacer
+            from ..core import nota_texto as _NT
+            t0 = self.__dict__.setdefault("_tf_text0", {}).pop(clip_id, None) or dict(c.text)
+            c.text = t0                                # lo de antes, para que Ctrl+Z vuelva ahí
+            if orig and box:
+                new = _NT.text_from_box(t0, orig, box)
+                ch = {k: new[k] for k in ("x", "y", "size", "zoom_x", "zoom_y") if k in new and new[k] != t0.get(k)}
+                if ch:
+                    self.ctrl.set_text_step(clip_id, "Mover / escalar texto en el visor", **ch)
+            self.engine._sync()
             return
         from ..core import transform as _TR
         _TR.LIVE.pop(clip_id, None)
@@ -3320,7 +5719,169 @@ class MainWindow(QMainWindow):
         self.voice.select_suggestion(sid)
 
     def _marker(self):
+        """M: un marcador en el cabezal. M otra vez en el mismo sitio (ya hay uno ahí) = escribir su nota (M+M)."""
+        from ..core import marcadores_auto as MA
+        mk = MA.marcador_en(self.ctrl.project, self.engine.time, self.ctrl.project.fps)
+        if mk is not None:
+            self._nota_marcador(mk.id)
+            return
         self.ctrl.add_marker(self.engine.time)
+
+    def _nota_marcador(self, marker_id: str):
+        """📍 M+M: la nota de ese marcador, a la vista y con el foco (sección «Marcadores» del Inspector)."""
+        panel = getattr(self, "marcadores_panel", None)
+        if panel is None:
+            return
+        if panel.window() is self:                 # (el índice ya está en el Inspector: se enseña)
+            ins = getattr(self, "inspector", None)
+            if ins is not None and hasattr(ins, "mostrar_marcadores"):
+                ins.mostrar_marcadores()
+            else:
+                self.show_panel(ins) if ins is not None else None
+            panel.editar_nota(marker_id)
+            return
+        from PySide6.QtWidgets import QInputDialog             # (sin el gancho del Inspector todavía)
+        mk = next((x for x in self.ctrl.project.markers if x.id == marker_id), None)
+        if mk is None:
+            return
+        txt, ok = QInputDialog.getText(self, "Nota del marcador", f"Nota de «{mk.label}»:", text=mk.note)
+        if ok:
+            self.ctrl.update_marker(marker_id, note=txt.strip())
+
+    def _crear_marcas(self):
+        try:
+            from .marcadores_panel import CapaViva, PanelMarcadores
+            from .marcadores_panel import instalar as _instalar_marcas
+            self.capa_marcas = CapaViva(self.ctrl, self.timeline, self)
+            self.timeline.capa = self.capa_marcas
+            self.capa_marcas.cambio.connect(self.timeline.update)
+            self.marcadores_panel = PanelMarcadores(self.ctrl, self.capa_marcas, self._ir_a_marca)
+            QTimer.singleShot(0, lambda: _instalar_marcas(self))
+        except Exception:                       # (si fallara, la ventana arranca igual; se apunta en errores.log)
+            try:
+                import time as _t
+                import traceback as _tb
+                from ..core.paths import log_path as _log
+                with open(_log(), "a", encoding="utf-8") as _f:
+                    _f.write(f"\n[{_t.strftime('%Y-%m-%d %H:%M:%S')}] Marcadores automáticos:\n{_tb.format_exc()}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ------------------------------------------------------------ 🔍 zoom y navegación (fase 8)
+    def _zoom_desde_deslizador(self, v: int):
+        import math
+        tl = self.timeline
+        tl.poner_pps(tl.PPS_MIN * math.exp(v / 1000 * math.log(tl.PPS_MAX / tl.PPS_MIN)))
+
+    def _sync_zoom_slider(self):
+        import math
+        tl = self.timeline
+        v = int(round(1000 * math.log(max(tl.pps, tl.PPS_MIN) / tl.PPS_MIN) / math.log(tl.PPS_MAX / tl.PPS_MIN)))
+        if self.zoom_slider.value() != v:
+            self.zoom_slider.blockSignals(True)
+            self.zoom_slider.setValue(v)
+            self.zoom_slider.blockSignals(False)
+
+    def _play_alrededor(self, antes: float = 2.0, despues: float = 2.0):
+        """«/»: suena de 2 s antes a 2 s después del cabezal y el cabezal vuelve a donde estaba."""
+        eng = self.engine
+        previo = getattr(self, "_alrededor_t0", None)
+        t0 = previo if (previo is not None and eng.playing) else eng.time   # («/» otra vez: el mismo sitio)
+        self._alrededor_t0 = t0
+        if eng.playing:
+            eng.pause()
+
+        def volver(playing: bool, _t=t0):
+            if playing:
+                return
+            try:
+                eng.playing_changed.disconnect(volver)
+            except (RuntimeError, TypeError):
+                pass
+            eng.seek(_t)
+            self.timeline.set_playhead(_t)
+            self._alrededor_t0 = None
+        eng.play_ranges([(max(0.0, t0 - antes), t0 + despues)])
+        if eng.playing:
+            eng.playing_changed.connect(volver)
+
+    def _voz_pareja(self):
+        """🎚 Voz pareja: lee el audio de la narración en segundo plano (puede ser largo) y aplica la curva (un Ctrl+Z)."""
+        from ..core import voz_pareja as VP
+        p = self.ctrl.project
+        elegidos = [i for i in self.timeline.selected if i in p.clips] or None
+        clips = VP._clips_voz(p, set(elegidos) if elegidos else None)
+        if not clips:
+            self.statusBar().showMessage("🎚 No hay ninguna narración transcrita en la línea de tiempo (o en lo "
+                                         "elegido): transcríbela antes (Voz → Transcribir).", 7000)
+            return
+        rutas = {c.media_id: p.media[c.media_id].path for c in clips if c.media_id in p.media}
+
+        def work(_progress, _cancelled):
+            return {mid: VP.leer(ruta) for mid, ruta in rutas.items()}   # (la pista que suena: la del clip)
+
+        def done(muestras):
+            self.statusBar().showMessage(VP.igualar(self.ctrl, elegidos, muestras), 9000)
+        from .jobs import BackgroundJob
+        job = BackgroundJob(work, self)
+        job.title = "🎚 Midiendo cada frase de la narración"
+        job.done.connect(done)
+        job.failed.connect(lambda msg: self.statusBar().showMessage(f"🎚 No pude leer la narración: {msg}", 7000))
+        self._voz_pareja_job = job
+        self.statusBar().showMessage("🎚 Midiendo cada frase de la narración…", 4000)
+        job.start()
+
+    def _modo_edicion(self, modo: str, t: float | None = None, ids=None):
+        """🎬 F9/F10/Mayús+F11/F12/Mayús+F12: lo elegido en Medios, en el cabezal, en el canal elegido (o la pista
+        principal). Un Ctrl+Z; los clips nuevos quedan elegidos."""
+        ids = list(ids) if ids is not None else self.library.selected_media_ids()
+        if not ids:
+            self.statusBar().showMessage("Elige antes en 🗂 Medios lo que quieres poner (clic en un archivo).", 6000)
+            return None
+        p = self.ctrl.project
+        m0 = p.media.get(ids[0])
+        destino = None
+        t_ = self.engine.time if t is None else t
+        if m0 is not None:                         # (el primer canal elegido del tipo de ese archivo)
+            quiere = self.ctrl.track_kind_for(m0)
+            destino = next((tid for tid in self.timeline.channel_ids()
+                            if p.track(tid) is not None and p.track(tid).kind == quiere), None)
+            if destino is None and modo == "reemplazar":     # (o el clip elegido que pasa por el cabezal)
+                elegidos = [p.clips[i] for i in self.timeline.selected if i in p.clips]
+                bajo = [c for c in elegidos if c.start - 1e-6 <= t_ < c.end - 1e-6 and p.track(c.track_id) is not None
+                        and p.track(c.track_id).kind == quiere]
+                destino = bajo[0].track_id if bajo else None
+        aviso = ""
+        if modo == "reemplazar" and len(ids) > 1:
+            aviso = f" Se usó el primero de {len(ids)}."
+            ids = ids[:1]
+        creados = self.ctrl.edit_mode(ids, modo, t_, destino)
+        if isinstance(creados, list) and creados:
+            self.timeline.set_selection(creados)
+            self.statusBar().showMessage(f"🎬 {self.ctrl.MODOS_EDICION[modo]}: {len(creados)} clip(s). Ctrl+Z lo "
+                                         "deshace." + aviso, 6000)
+        return creados
+
+    def _ir_a_marca(self, t: float):
+        self.engine.user_seek(t)
+        self.timeline.set_playhead(t, follow=True)
+
+    def _go_marca(self, step: int):
+        """Mayús+↑ / Mayús+↓: el cabezal a la marca anterior / siguiente de la capa (los tipos a la vista)."""
+        capa = getattr(self, "capa_marcas", None)
+        if capa is None:
+            return
+        if capa._timer.isActive():                 # (justo tras editar: al día; si no, la lista ya calculada)
+            capa._timer.stop()
+            capa.recalcular()
+        mk = capa.siguiente(self.engine.time, step)
+        if mk is None:
+            self.statusBar().showMessage("No hay más marcas " + ("después" if step > 0 else "antes") + " del cabezal.",
+                                         3000)
+            return
+        from ..core.marcadores_auto import TIPOS
+        self._ir_a_marca(mk.t)
+        self.statusBar().showMessage(f"{TIPOS[mk.tipo][0]}: {mk.texto}", 6000)
 
     def _show_shortcuts(self):
         box = QMessageBox(self)
@@ -3532,7 +6093,7 @@ class MainWindow(QMainWindow):
             lay.addWidget(b)
             return b
         boton("🎙 Transcribir", "Transcribe la narración (para subtítulos, palabras clave y quitar silencios)",
-              lambda: (self.show_panel(self.ai_panel), self.ai_panel.tabs.setCurrentIndex(0), self.voice.transcribe()))
+              lambda: (self.abrir_seccion("voz_texto", "transcribir"), self.voice.transcribe()))
         boton("🗣 Que lo lea la IA", "¿No quieres hablar? Pega tu guion y una voz sintética lo lee (ya transcrito: "
                                     "subtítulos y palabras clave al momento)", lambda: self.open_voz_ia())
         boton("💬 Subtítulos", "Subtítulos grandes para Short (después de transcribir)",
@@ -4202,8 +6763,48 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"🎨 Tema: {TM.NOMBRES[tt]}. Se aplica al volver a abrir Reclaimer.",
                                              8000)
             a.triggered.connect(elegir)
-        self.tema_menu = sm
+        if getattr(self, "tema_menu", None) is None:   # (está en Ventana y en «🎨 Diseño»: el primero)
+            self.tema_menu = sm
         return sm
+
+    def _llenar_acentos(self, menu):
+        """🎨 Color de acento: una muestra de color y su nombre por acento; al elegir, se aplica AL MOMENTO (sin volver a
+        abrir Reclaimer) y se recuerda. Está en «🎨 Diseño» (barra de arriba) y en Ventana."""
+        from PySide6.QtGui import QActionGroup, QColor, QIcon, QPainter, QPixmap
+        from . import theme as TH
+        grupo = QActionGroup(menu)
+        if not hasattr(self, "_acciones_acento"):
+            self._acciones_acento = []
+        for clave, (nombre, color, _hi) in TH.ACENTOS.items():
+            pm = QPixmap(32, 32)
+            pm.setDevicePixelRatio(2.0)
+            pm.fill(Qt.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(QColor("#5d6068"))
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(1, 1, 14, 14, 3, 3)
+            p.end()
+            a = menu.addAction(QIcon(pm), nombre)
+            a.setCheckable(True)
+            a.setChecked(clave == TH.ACENTO)
+            a.setData(clave)
+            a.setToolTip(f"{nombre}: el color de lo elegido, lo activo y el botón principal. Se ve al momento.")
+            grupo.addAction(a)
+            a.triggered.connect(lambda _on=False, k=clave: self.poner_acento(k))
+            self._acciones_acento.append(a)
+
+    def poner_acento(self, clave: str):
+        """🎨 Cambia el color de acento al momento (theme.poner_acento) y marca la opción en los dos menús."""
+        from . import theme as TH
+        if not TH.poner_acento(clave, QApplication.instance()):
+            return
+        for a in getattr(self, "_acciones_acento", []):
+            try:
+                a.setChecked(a.data() == clave)
+            except RuntimeError:
+                pass
+        self.statusBar().showMessage(f"🎨 Color de acento: {TH.ACENTOS[clave][0]}.", 6000)
 
     def _ui_scale_menu(self, parent):
         """🔍 Ventana → Escala de la interfaz (se aplica al volver a abrir Reclaimer)."""
@@ -4336,6 +6937,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_sizes_pending", False):
             self._sizes_pending = False
             QTimer.singleShot(0, self._apply_dock_sizes)
+        if not getattr(self, "_tl_revisada", False):     # (solo al abrir: suelta encima del visor → a su sitio)
+            self._tl_revisada = True
+            self._acoplar_timeline_si_tapa()
+            QTimer.singleShot(0, self._paneles_a_su_sitio)   # (y los paneles sueltos encima o fuera, a su lado)
         # siempre al abrir: la línea de tiempo con todas sus pistas a la vista (también tras maximizar)
         QTimer.singleShot(0, self._ensure_timeline_size)
         QTimer.singleShot(400, self._ensure_timeline_size)

@@ -1,8 +1,9 @@
 """
 🧭 Organización de la interfaz (13/11, sin ventanas visibles):
   · menú «IA ✨» a la vista (B-roll, temas, edit musical, Shorts, primera versión…); «Voz» solo con lo de la voz;
-  · barra de la línea de tiempo: ✨ B-roll, 🎬 Escenas, 📱 Vertical (solo en proyectos verticales), 🖼 Miniatura y
-    ⬆ Exportar a la vista; ⚡ Ráfaga y 〰 Curvas dentro de «⋯ Más»; si no cabe, se compacta (primero lo menos usado);
+  · barra de la línea de tiempo (agrupación del 20/11): B-roll vive en IA ✨, Miniatura y Exportar son páginas de
+    abajo y «Escenas» pasa a «⋯ Más → ✂ Cambios de plano» (sus botones, ocultos); 📱 Vertical solo en proyectos
+    verticales; ⚡ Ráfaga y 〰 Curvas dentro de «⋯ Más»; si no cabe, se compacta (primero lo menos usado);
   · ⇤ Huecos: el mismo menú en el visor y en Timeline, con «Juntar (Ctrl++)» el primero;
   · «🗣 Buscar lo que se dice» ya no se llama igual que 🔑 Palabras clave (tus carpetas).
 Ejecutar:  .venv/Scripts/python.exe tests/test_organizacion.py
@@ -56,17 +57,20 @@ def main():
     assert not any("B-roll" in t or "edit musical" in t for t in voz), voz
     print("✓ lo de la IA en la pestaña «IA ✨» → «✨ Más»; «Voz» solo con lo de la voz")
 
-    for b in (win.btn_broll, win.btn_scenes, win.btn_thumb, win.btn_export, win.btn_more):
-        assert b.isVisible(), b.text()
+    # (20/11: B-roll en IA ✨, Miniatura y Exportar = páginas de abajo, Escenas = «⋯ Más → ✂ Cambios de plano»)
+    assert win.btn_more.isVisible(), win.btn_more.text()
+    for b in (win.btn_broll, win.btn_scenes, win.btn_thumb, win.btn_export):
+        assert not b.isVisible(), b.text()
     assert not win.btn_burst.isVisible() and not win.tool_curves.isVisible()
     mas = [a.text() for a in win.btn_more.menu().actions()]
     assert "⚡ Ráfaga de cortes al ritmo" in mas and any(t.startswith("〰 Curvas") for t in mas), mas
+    assert "✂ Cambios de plano" in mas, mas
     win.btn_more.menu().aboutToShow.emit()
     win.act_curves.trigger()
     assert win.tool_curves.isChecked()
     win.act_curves.trigger()
     assert not win.tool_curves.isChecked()
-    print("✓ barra: ✨ B-roll, 🎬 Escenas, 🖼 Miniatura y ⬆ Exportar a la vista; ⚡ Ráfaga y 〰 Curvas en «⋯ Más»")
+    print("✓ barra: ✂ Cambios de plano, ⚡ Ráfaga y 〰 Curvas en «⋯ Más» (B-roll, Miniatura y Exportar, en su sitio)")
 
     assert not win.btn_vertical.isVisible(), "en YouTube (16:9) no tiene sentido"
     win.workspaces.switch("short")
@@ -88,7 +92,7 @@ def main():
     bar.show()
     pump(app, 0.1)
     win._tl_fit_bar()
-    assert win.btn_export.text() == "⬆ Exportar" and win.btn_bars.text() == "▭ Quitar barras"
+    assert win.btn_bars.text() == "▭ Quitar barras", win.btn_bars.text()
     bar.resize(1300, 40)
     pump(app, 0.1)
     win._tl_fit_bar()
@@ -100,7 +104,7 @@ def main():
     bar.resize(ancho + 4, 40)
     pump(app, 0.1)
     win._tl_fit_bar()
-    assert win.btn_export.text() == "⬆ Exportar"
+    assert win.btn_bars.text() == "▭ Quitar barras", win.btn_bars.text()
     win._sync_cut_badge(3)                        # aparece «⚠ 3 cortes ◀ ▶»: ya no cabe → se vuelve a encajar
     pump(app, 0.1)
     assert bar.layout().sizeHint().width() <= bar.width(), (bar.layout().sizeHint().width(), bar.width())

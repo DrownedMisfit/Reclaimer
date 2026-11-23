@@ -83,7 +83,8 @@ def main():
     arrastrar(centro + QPointF(10, 10), 80)
     la, lb = ed.layer(abajo["id"]), ed.layer(arriba["id"])
     assert cv.sel == abajo["id"], "la selección no debe cambiar con un clic encima de otra capa"
-    assert abs(float(la["x"]) - (xa + 80)) < 2 and abs(float(lb["x"]) - xb) < 0.5, (la["x"], xa, lb["x"], xb)
+    un_px = 1.0 / max(1e-6, cv.transform().m11())
+    assert abs(float(la["x"]) - (xa + 80)) < max(2.0, un_px + 0.5) and abs(float(lb["x"]) - xb) < 0.5, (la["x"], xa, lb["x"], xb)
     print("✓ con una capa elegida en «Capas», arrastrar encima de otra mueve la elegida")
     # 2) doble clic en la de arriba (en una zona donde solo está ella) → pasa a ser la elegida
     solo_arriba = QPointF(float(lb["x"]) - 120, float(lb["y"]))
@@ -96,7 +97,9 @@ def main():
     assert cv.sel == arriba["id"] and ed.cur()["id"] == arriba["id"], (cv.sel, arriba["id"])
     xb = float(ed.layer(arriba["id"])["x"])
     arrastrar(solo_arriba, -60)
-    assert abs(float(ed.layer(arriba["id"])["x"]) - (xb - 60)) < 2
+    # (los eventos van en píxeles ENTEROS de pantalla: con el lienzo pequeño, 1 px de pantalla son varios del lienzo)
+    un_px = 1.0 / max(1e-6, cv.transform().m11())
+    assert abs(float(ed.layer(arriba["id"])["x"]) - (xb - 60)) < max(2.0, un_px + 0.5), (ed.layer(arriba["id"])["x"], xb, un_px)
     print("✓ doble clic en otra capa del lienzo la elige; después se mueve esa")
     # 3) sin nada elegido, un clic elige la de arriba como siempre
     cv.sel = ""

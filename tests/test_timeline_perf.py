@@ -43,7 +43,7 @@ def main():
     keep = {k: st.value(k) for k in ("ventana/paneles", "geometry")}
     app = QApplication(sys.argv)
     from editoria.core import media as M
-    from editoria.core.model import TRACK_VIDEO
+    from editoria.core.model import TRACK_AUDIO, TRACK_VIDEO
     from editoria.ui import nudge as NG
     from editoria.ui.main_window import MainWindow
     from editoria.ui.theme import apply_dark_theme
@@ -106,6 +106,96 @@ def main():
         assert t_paint < 110, t_paint
         assert t_edit < 200, t_edit
         print(f"✓ con {clips} clips sigue fluido (antes se volvía lento con cada clip añadido)")
+
+        # 🔁 material repetido (fases 4 + 14): aquí los 400 clips repiten el mismo archivo (cada 18 s) → todos llevan
+        #   franja y botón. Pintar con las marcas no puede costar más de un 10 % que sin ellas (el mapa se calcula
+        #   fuera del pintado: al pintar solo se mira un diccionario). Se mide alejado (todo el video) y de cerca.
+        tl.repetidos.recalcular()
+        marcados = sum(1 for c in ctrl.project.clips_on(v1.id) if tl.repetidos.de(c.id))
+        assert marcados >= 300, marcados
+
+        import statistics
+        rep_vivo = tl.repetidos
+
+        def con_sin(medir, poner_con, poner_sin, vueltas=7):
+            """Mediana de «con» y de «sin», medidos ALTERNANDO (el ruido del PC cae igual en los dos)."""
+            con, sin = [], []
+            for _ in range(vueltas):
+                poner_con()
+                con.append(medir())
+                poner_sin()
+                sin.append(medir())
+            poner_con()
+            return statistics.median(con), statistics.median(sin)
+        res = []
+        for pps in (None, 70.0):
+            if pps is not None:
+                tl.pps, tl.scroll = pps, 100.0
+                tl.update()
+                pump(app, 0.2)
+            avg(lambda: tl.repaint())                     # (calentar: miniaturas y tira en caché)
+            t_con, t_sin = con_sin(lambda: avg(lambda: tl.repaint(), 3),
+                                   lambda: setattr(tl, "repetidos", rep_vivo), lambda: setattr(tl, "repetidos", None))
+            res.append((pps, t_con, t_sin))
+        tl.repaint()                                      # (la última medida fue sin marcas: se pintan otra vez)
+        botones = len(tl._rep_btns)
+        print("  🔁 pintar con / sin marcas de repetido: " + " · ".join(
+            f"{'alejado' if pps is None else 'de cerca'} {a_:.1f} / {b_:.1f} ms" for pps, a_, b_ in res)
+            + f" ({marcados} clips marcados, {botones} botones a la vista)")
+        assert botones > 0, "de cerca, los clips repetidos llevan su botón"
+        for pps, t_con, t_sin in res:
+            assert t_con <= t_sin * 1.10 + 0.5, (pps, t_con, t_sin)
+        tl.fit()
+        pump(app, 0.3)
+        print("✓ las marcas de material repetido no empeoran el pintado más de un 10 %")
+
+        # ⏱ arrastrar y recortar con ~2500 clips (20/11: el banco pesado subió de ~144 a ~380 ms porque los fundidos
+        #   automáticos buscaban la pareja de cada audio recorriendo todos los clips)
+        ctrl.insert_ranges([{"media_id": mid, "start": 400.0 + i * 1.0, "duration": 1.0,
+                             "source_in": (i % 18) * 1.0} for i in range(1100)], v1.id, "más")
+        pump(app, 0.5)
+        assert ctrl.fundidos_auto, "la regla de fundidos encendida (como la usa el usuario)"
+        t0 = time.perf_counter()
+        ctrl._fundidos_auto(ctrl.project)
+        t_fund = (time.perf_counter() - t0) * 1000
+        # ⚡ una edición pequeña (el volumen de un clip) con ~3000 clips: los fundidos solo se rehacen en las pistas de
+        #   audio que toca la edición (Fable, 21/11: con todas, de 26 a 37 ms)
+        aud = next(c.id for c in ctrl.project.clips.values() if ctrl.project.track(c.track_id).kind == TRACK_AUDIO)
+        vol2 = {"v": 1.0}
+
+        def edit_vol():
+            vol2["v"] = 0.8 if vol2["v"] == 1.0 else 1.0
+            ctrl.set_clip_props([aud], "vol", volume=vol2["v"])
+        edit_vol()
+        # (solo para medir: sin tocar los fundidos ya puestos; alternando, por la mediana)
+        t_on, t_off = con_sin(lambda: avg(edit_vol, 3), lambda: setattr(ctrl, "fundidos_auto", True),
+                              lambda: setattr(ctrl, "fundidos_auto", False))
+        print(f"  edición pequeña con {len(ctrl.project.clips)} clips: {t_on:.1f} ms con fundidos automáticos · "
+              f"{t_off:.1f} ms sin ellos (medianas)")
+        assert t_on <= t_off * 1.15 + 3.0, (t_on, t_off)
+        tl.pps, tl.scroll = 30.0, 900.0
+        tl._update_scrollbar()
+        tl.repaint()
+        cand = [c for c in ctrl.project.clips_on(v1.id) if 900 < c.start < 1000][:8]
+        arr, rec = [], []
+        for c in cand:
+            t0 = time.perf_counter()
+            ctrl.move_clips({c.id: (c.start + 0.2, v1.id)})
+            tl.repaint()
+            arr.append((time.perf_counter() - t0) * 1000)
+            app.processEvents()
+            cc = ctrl.project.clips[c.id]
+            t0 = time.perf_counter()
+            ctrl.trim_clip(cc.id, "right", cc.end - 0.3)
+            tl.repaint()
+            rec.append((time.perf_counter() - t0) * 1000)
+            app.processEvents()
+        m_arr, m_rec = sorted(arr)[len(arr) // 2], sorted(rec)[len(rec) // 2]
+        print(f"  {len(ctrl.project.clips)} clips: arrastrar {m_arr:.0f} ms · recortar {m_rec:.0f} ms · fundidos "
+              f"automáticos {t_fund:.1f} ms")
+        assert t_fund < 25, f"los fundidos automáticos no pueden recorrer todo por cada clip: {t_fund:.1f} ms"
+        assert m_arr < 150 and m_rec < 150, (m_arr, m_rec)
+        print("✓ arrastrar y recortar con muchos clips: sin la subida de los fundidos automáticos")
         ctrl.undo_stack.setClean()
         ctrl._media_dirty = False
         win.close()

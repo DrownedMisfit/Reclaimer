@@ -105,6 +105,9 @@ def find_free(taken: dict, mid: str, src0: float, dur: float, cdur: float) -> fl
 def claim(taken: dict, mid: str, src: float, dur: float, image: bool = False) -> tuple[float, float]:
     rng = (0.0, math.inf) if image else (src, src + dur)
     taken.setdefault(mid, []).append(rng)
+    hook = getattr(taken, "al_reservar", None)     # 🧬 core/repetidos.Tomados: lo MISMO en otros archivos, también
+    if hook is not None:
+        hook(mid, rng)
     return rng
 
 
@@ -112,6 +115,9 @@ def release(taken: dict, mid: str, rng: tuple[float, float]) -> None:
     rngs = taken.get(mid, [])
     if rng in rngs:
         rngs.remove(rng)
+    hook = getattr(taken, "al_soltar", None)
+    if hook is not None:
+        hook(mid, rng)
 
 
 def _user_words(c: "ClipInfo") -> tuple[set[str], set[str]]:
@@ -368,6 +374,9 @@ def _restore(s: dict, taken: dict, old: dict | None) -> None:
     """El hueco se queda con la reserva que tenía (se había liberado para decidir de nuevo)."""
     if old:
         taken.setdefault(old["media_id"], []).append(old["rng"])
+        hook = getattr(taken, "al_reservar", None)    # 🧬 (como claim: lo mismo en los otros archivos, otra vez)
+        if hook is not None:
+            hook(old["media_id"], old["rng"])
         s["_claim"] = old
 
 

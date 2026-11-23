@@ -55,9 +55,19 @@ def kind_for_path(path: str) -> str | None:
     return None
 
 
-def _build(cls, data: dict):
-    """Crea un dataclass ignorando claves desconocidas (compatibilidad con versiones futuras)."""
-    names = {f.name for f in fields(cls)}
+_NAME_SETS: dict = {}
+
+
+def _build(cls, data: dict, copiar: bool = False):
+    """Crea un dataclass ignorando claves desconocidas (compatibilidad con versiones futuras). copiar: sus listas y
+    diccionarios son copias (el objeto no comparte nada con data: data puede ser un estado del historial)."""
+    names = _NAME_SETS.get(cls)
+    if names is None:
+        names = _NAME_SETS[cls] = frozenset(f.name for f in fields(cls))
+    if copiar:
+        return cls(**{k: (v if type(v) in _ATOMS else _plain(v)) for k, v in data.items() if k in names})
+    if names.issuperset(data):
+        return cls(**data)
     return cls(**{k: v for k, v in data.items() if k in names})
 
 
@@ -87,6 +97,107 @@ def fast_asdict(o) -> dict:
     if names is None:
         names = _FIELD_NAMES[type(o)] = tuple(f.name for f in fields(o))
     return {n: _plain(getattr(o, n)) for n in names}
+
+
+# ⚡ Foto de deshacer COMPARTIDA (21/11, ronda 2): cada edición copiaba los ~2500 clips del proyecto aunque solo cambiara
+# uno (~12 ms y ~400 000 objetos nuevos por edición, con pausas del recolector de hasta 170 ms). snap_asdict devuelve el
+# MISMO diccionario de la vez anterior si el objeto no cambió (se compara por valor, en C: attrgetter + ==, también los
+# tipos), y uno nuevo si cambió. ⚠ Esos diccionarios son de SOLO LECTURA (los comparten varios pasos del historial):
+# nunca se modifican ni se usan para crear objetos vivos sin copiar (apply_timeline_state copia por defecto).
+_SNAP: dict = {}          # (tipo, id) → (valores, tipos, dict)
+_GETTERS: dict = {}       # tipo → (attrgetter de todos sus campos, nombres)
+
+
+def _getter(t):
+    g = _GETTERS.get(t)
+    if g is None:
+        import operator
+        names = _FIELD_NAMES.get(t)
+        if names is None:
+            names = _FIELD_NAMES[t] = tuple(f.name for f in fields(t))
+        g = _GETTERS[t] = (operator.attrgetter(*names), names)
+    return g
+
+
+def snap_asdict(o) -> dict:
+    """fast_asdict compartido (ver arriba): el mismo dict si el objeto no cambió desde la última foto. SOLO LECTURA."""
+    t = type(o)
+    getter, names = _getter(t)
+    vals = getter(o)
+    tipos = tuple(map(type, vals))
+    key = (t, getattr(o, "id", None))
+    hit = _SNAP.get(key)
+    if hit is not None and hit[1] == tipos and hit[0] == vals:
+        return hit[2]
+    d = fast_asdict(o)
+    _SNAP[key] = (tuple(d[n] for n in names), tipos, d)
+    return d
+
+
+def snap_lista(objs) -> list:
+    """⚡ snap_asdict de muchos objetos del MISMO tipo en un solo bucle (sin una llamada de Python por objeto): con
+    2500 clips, la foto de deshacer de cada edición. Mismo resultado que [snap_asdict(o) for o in objs]."""
+    out = []
+    objs = list(objs)
+    if not objs:
+        return out
+    t = type(objs[0])
+    getter, names = _getter(t)
+    get, snap, asd = _SNAP.get, _SNAP, fast_asdict
+    append = out.append
+    for o in objs:
+        if type(o) is not t:                     # (tipos mezclados: el camino de siempre)
+            append(snap_asdict(o))
+            continue
+        vals = getter(o)
+        key = (t, o.id)
+        hit = get(key)
+        if hit is not None and hit[0] == vals:
+            tipos = tuple(map(type, vals))
+            if hit[1] == tipos:
+                append(hit[2])
+                continue
+        else:
+            tipos = tuple(map(type, vals))
+        dd = asd(o)
+        snap[key] = (tuple(dd[n] for n in names), tipos, dd)
+        append(dd)
+    return out
+
+
+def _podar_snap(vivos: int):
+    """La memoria de fotos no crece sin fin (clips que ya no existen): se vacía al pasar de 4 veces lo vivo."""
+    if len(_SNAP) > 4 * vivos + 2000:
+        _SNAP.clear()
+
+
+
+
+def _rehacer(cls, datos, viejos, copiar: bool) -> list:
+    """Objetos de cls desde sus diccionarios. copiar: sin compartir nada con los diccionarios, y reutilizando los
+    objetos vivos (viejos) que valen exactamente lo mismo (mismos valores y tipos): ⚡ deshacer sin rehacer 2500 clips."""
+    if not copiar:
+        return [_build(cls, d) for d in datos]
+    getter, names = _getter(cls)
+    import operator
+    leer_d = operator.itemgetter(*names)          # (en C: sin bucle de Python por campo)
+    por_id = {getattr(o, "id", None): o for o in viejos} if viejos else {}
+    usados: set = set()
+    out = []
+    for d in datos:
+        o = por_id.get(d.get("id")) if por_id else None
+        if o is not None and type(o) is cls and id(o) not in usados:
+            vals = getter(o)
+            try:
+                ref = leer_d(d)
+            except KeyError:                      # (un estado sin algún campo: se crea de nuevo)
+                ref = None
+            if ref is not None and vals == ref and tuple(map(type, vals)) == tuple(map(type, ref)):
+                usados.add(id(o))
+                out.append(o)
+                continue
+        out.append(_build(cls, d, copiar=True))
+    return out
 
 
 @dataclass
@@ -216,6 +327,8 @@ class Marker:
     origin: str = ORIGIN_USER
     end: float | None = None     # si tiene fin, es un tramo (p. ej. un tema de la narración)
     kind: str = "marker"         # marker | topic
+    note: str = ""               # 📍 nota (M dos veces en el mismo sitio la abre; ver core/marcadores_auto.py)
+    resuelto: bool = False       # 📍 dado por revisado: deja de salir en la capa de marcas y en el índice
 
 
 SUG_PENDING = "pending"
@@ -355,27 +468,33 @@ class Project:
         if minimal:       # proyecto nuevo de la ventana: una pista de video («V1») y una de audio («A1»)
             p.tracks = [
                 Track(new_id(), TRACK_VIDEO, "V1"),
-                Track(new_id(), TRACK_AUDIO, "A1", fx={"eq": True, "compress": True}),
+                Track(new_id(), TRACK_AUDIO, "A1"),     # (22/11: sin EQ ni compresor: nada procesa sin pedirlo)
             ]
             return p
         p.tracks = [
             Track(new_id(), TRACK_VIDEO, "V2"),
             Track(new_id(), TRACK_VIDEO, "V1"),
-            Track(new_id(), TRACK_AUDIO, "A1", fx={"eq": True, "compress": True}),   # una sola (con mejora de voz)
+            Track(new_id(), TRACK_AUDIO, "A1"),         # una sola (EQ y compresor, a mano: audio_fx.AYUDA_FX)
         ]
         return p
 
     # ---- estado para deshacer/rehacer (todo menos la biblioteca) ----
-    def timeline_state(self) -> dict:
+    def timeline_state(self, compartir: bool = False) -> dict:
+        """El estado de la línea de tiempo (todo menos la biblioteca). compartir=True (el historial de deshacer): los
+        diccionarios de pistas, clips, marcadores y sugerencias que no cambiaron son LOS MISMOS de la foto anterior
+        (⚡ snap_asdict; SOLO LECTURA). Sin compartir (guardar, copiar el proyecto…), todo copias nuevas."""
+        asd = snap_asdict if compartir else fast_asdict
+        if compartir:
+            _podar_snap(len(self.clips) + len(self.markers) + len(self.suggestions) + len(self.tracks))
         return {
             "name": self.name,
             "width": self.width,
             "height": self.height,
             "fps": self.fps,
-            "tracks": [fast_asdict(t) for t in self.tracks],
-            "clips": [fast_asdict(c) for c in self.clips.values()],
-            "markers": [fast_asdict(m) for m in self.markers],
-            "suggestions": [fast_asdict(s) for s in self.suggestions],
+            "tracks": [asd(t) for t in self.tracks],
+            "clips": snap_lista(self.clips.values()) if compartir else [asd(c) for c in self.clips.values()],
+            "markers": [asd(m) for m in self.markers],
+            "suggestions": [asd(s) for s in self.suggestions],
             "subtitles": fast_asdict(self.subtitles),
             "loudnorm": self.loudnorm,
             "project_type": self.format,   # «format» ya identifica el archivo de proyecto
@@ -388,18 +507,20 @@ class Project:
             "scenes": json.loads(json.dumps(self.scenes)),
         }
 
-    def apply_timeline_state(self, s: dict) -> None:
+    def apply_timeline_state(self, s: dict, copiar: bool = True) -> None:
+        """Pone ese estado. copiar (por defecto): lo nuevo no comparte listas ni diccionarios con s (s puede ser un paso
+        del historial, compartido y de solo lectura) y los objetos que no cambiaron se REUTILIZAN (⚡ deshacer: con 2500
+        clips ya no se rehacen todos). copiar=False: datos recién leídos de un archivo (from_dict), tal cual."""
         self.__dict__.pop("_lect_rev", None)       # (clips nuevos: lo memorizado en lectura() ya no vale)
         self.name = s.get("name", self.name)
         self.width = int(s.get("width", self.width))
         self.height = int(s.get("height", self.height))
         self.fps = float(s.get("fps", self.fps))
-        self.tracks = [_build(Track, d) for d in s.get("tracks", [])]
-        clips = (_build(Clip, d) for d in s.get("clips", []))
-        self.clips = {c.id: c for c in clips}
-        self.markers = [_build(Marker, d) for d in s.get("markers", [])]
-        self.suggestions = [_build(Suggestion, d) for d in s.get("suggestions", [])]
-        self.subtitles = _build(SubtitleStyle, s.get("subtitles", {}))
+        self.tracks = _rehacer(Track, s.get("tracks", []), self.tracks, copiar)
+        self.clips = {c.id: c for c in _rehacer(Clip, s.get("clips", []), self.clips.values(), copiar)}
+        self.markers = _rehacer(Marker, s.get("markers", []), self.markers, copiar)
+        self.suggestions = _rehacer(Suggestion, s.get("suggestions", []), self.suggestions, copiar)
+        self.subtitles = _build(SubtitleStyle, s.get("subtitles", {}), copiar)
         self.loudnorm = bool(s.get("loudnorm", True))
         self.format = s.get("project_type", "short" if self.height > self.width else "youtube")
         self.edits = json.loads(json.dumps(s.get("edits") or []))
@@ -426,13 +547,15 @@ class Project:
         if d.get("format") != FORMAT_NAME and "format_version" not in d:
             raise ValueError("Este archivo no es un proyecto de Reclaimer.")
         p = cls()
-        p.apply_timeline_state(d)
+        p.apply_timeline_state(d, copiar=False)    # (datos recién leídos: no hace falta copiarlos)
         media = (_build(MediaItem, m) for m in d.get("media", []))
         p.media = {m.id: m for m in media}
         p.transcripts = {k: v for k, v in d.get("transcripts", {}).items() if k in p.media}
         p.favorites = [f for f in d.get("favorites", []) if f.get("media_id") in p.media]
         p.thumbnails = dict(d.get("thumbnails", {}))
         p.mark_in, p.mark_out = (list(d.get("marks") or [None, None]) + [None, None])[:2]
+        from . import curves                       # 〰 proyectos de antes: cada pieza, solo los puntos de su tramo
+        curves.podar(p)
         return p
 
     def reparar_vinculos(self) -> int:

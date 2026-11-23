@@ -29,6 +29,8 @@ VOICE_PAD = 0.02       # margen tras el primer silencio que se encuentra (segund
 NOISE_MULT = 6.0       # «voz» = pico por encima de este múltiplo del ruido de fondo del archivo…
 LOUD_FLOOR = 0.05      # …y por encima de -26 dBFS (≈0.05)
 
+PUNTO_BUSCA = 1.5      # puntos de unión: hasta dónde se busca el final (o inicio) de la palabra en lo quitado (s)
+
 _THRESHOLDS: dict[int, tuple[np.ndarray, float]] = {}   # caché: id(picos) → (picos, umbral)
 
 
@@ -121,14 +123,15 @@ def _edge_peak(arr: np.ndarray, a: int, b: int) -> float:
     return float(arr[a:b].max()) if b > a else 0.0
 
 
-def _quiet_distance(arr: np.ndarray, thr: float, out: float, inn: float, side: str) -> float | None:
+def _quiet_distance(arr: np.ndarray, thr: float, out: float, inn: float, side: str,
+                    search: float = QUIET_SEARCH) -> float | None:
     """Distancia (s) desde el borde del corte hasta el primer trozo en silencio hacia dentro del hueco quitado
     (como mucho QUIET_SEARCH). side «antes»: se busca desde el final de la izquierda hacia el hueco; «despues»: desde
     el principio de la derecha hacia atrás. None si no hay silencio en ese tramo."""
     R = PEAK_RATE
     m = max(1, int(round(QUIET_MS * R / 1000)))         # muestras de la ventana en silencio
     a, b = int(round(out * R)), int(round(inn * R))     # el hueco, en muestras
-    lim = int(round(QUIET_SEARCH * R))
+    lim = int(round(search * R))
     if side == "antes":
         s = _first_quiet(arr, thr, m, a, min(b - m, a + lim), 1)
         return None if s is None else (s - a) / R
@@ -219,6 +222,44 @@ def _judge(j: dict, ctx: _Ctx):
     if not reasons:
         return None
     return reasons, severity, cands, inn - out
+
+
+def puntos_union(j: dict, ctx: _Ctx) -> dict:
+    """🔴 Puntos de unión (fase 1b de la línea de tiempo): para cada lado del corte, si parece cortado y hasta dónde
+    llegaría la palabra (en tiempo del ARCHIVO; None si no se sabe).
+    «arriba» = el final de la pieza de la izquierda (out); «abajo» = el inicio de la de la derecha (in).
+    Cortado = la palabra de la transcripción sigue después del corte (o empezó antes), o la voz todavía suena justo en
+    el borde (los mismos picos y el mismo umbral que las líneas rojas). Devuelve {lado: (cortado, estimado, motivo)}."""
+    out, inn = j["out"], j["in"]
+    res = {"arriba": [False, None, ""], "abajo": [False, None, ""]}
+    W = ctx.words(j["media_id"])
+    if W is not None:
+        starts, ws = W.starts, W.w
+        i_out = bisect.bisect_left(starts, out)
+        for k in range(i_out - 1, max(-1, i_out - 9), -1):
+            w = ws[k]
+            if float(w[0]) < out < float(w[1]) - WORD_EDGE:
+                res["arriba"] = [True, float(w[1]), f"«{w[2] if len(w) > 2 else ''}» termina después del corte"]
+                break
+        i_in = bisect.bisect_left(starts, inn)
+        for k in range(i_in - 1, max(-1, i_in - 9), -1):
+            w = ws[k]
+            if float(w[0]) + WORD_EDGE < inn < float(w[1]):
+                res["abajo"] = [True, float(w[0]), f"«{w[2] if len(w) > 2 else ''}» empieza antes del corte"]
+                break
+    pk = ctx.peaks(j["media_id"])
+    if pk is not None:
+        arr, thr = pk
+        i = int(round(out * PEAK_RATE))
+        before = _edge_peak(arr, i - EDGE_MS, i)
+        j0 = int(round(inn * PEAK_RATE))
+        after = _edge_peak(arr, j0, j0 + EDGE_MS)
+        for lado, loud, side in (("arriba", before, "antes"), ("abajo", after, "despues")):
+            if loud > thr and not res[lado][0]:
+                d = _quiet_distance(arr, thr, out, inn, side, search=min(PUNTO_BUSCA, max(0.0, inn - out)))
+                est = None if d is None else (out + d if side == "antes" else inn - d)
+                res[lado] = [True, est, "la voz todavía suena justo en el corte"]
+    return {k: tuple(v) for k, v in res.items()}
 
 
 def _pick_fix(cands: list[tuple[str, float, str]], gap: float) -> dict | None:

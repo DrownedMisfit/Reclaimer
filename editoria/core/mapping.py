@@ -107,6 +107,39 @@ def map_range(p: Project, media_id: str, a: float, b: float,
     return out
 
 
+def cut_point(p: Project, media_id: str, s: float, clips: list[Clip] | None = None) -> float | None:
+    """Si el segundo s del archivo está QUITADO de la timeline, dónde quedó su corte: el final (en la timeline) del
+    último trozo de ese archivo que va antes de s en el archivo; si no hay ninguno, el inicio del primero de después.
+    None si no queda ningún trozo de ese archivo."""
+    cs = [c for c in (clips if clips is not None else clips_of_media(p, media_id)) if c.speed > 0]
+    if not cs:
+        return None
+    antes = [c for c in cs if c.source_in + c.src_len <= s + TOL]
+    if antes:
+        return max(antes, key=lambda c: (c.source_in + c.src_len, -c.start)).end
+    despues = [c for c in cs if c.source_in >= s - TOL]
+    return min(despues, key=lambda c: (c.source_in, c.start)).start if despues else None
+
+
+class CutIndex:
+    """⚡ cut_point para muchas menciones seguidas: los trozos de un archivo ordenados una vez (bisect)."""
+
+    def __init__(self, p: Project, media_id: str, clips: list[Clip] | None = None):
+        cs = [c for c in (clips if clips is not None else clips_of_media(p, media_id)) if c.speed > 0]
+        self._por_fin = sorted(cs, key=lambda c: (c.source_in + c.src_len, -c.start))
+        self._fines = [c.source_in + c.src_len for c in self._por_fin]
+        self._por_ini = sorted(cs, key=lambda c: (c.source_in, c.start))
+        self._inis = [c.source_in for c in self._por_ini]
+
+    def point(self, s: float) -> float | None:
+        """Lo mismo que cut_point(p, media_id, s), en O(log n)."""
+        j = bisect.bisect_right(self._fines, s + TOL) - 1
+        if j >= 0:
+            return self._por_fin[j].end
+        k = bisect.bisect_left(self._inis, s - TOL)
+        return self._por_ini[k].start if k < len(self._por_ini) else None
+
+
 def find_cut(p: Project, media_id: str, a: float, b: float,
              clips: list[Clip] | None = None) -> tuple[Clip | None, Clip | None, float] | None:
     """

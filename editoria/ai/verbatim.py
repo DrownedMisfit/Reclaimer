@@ -21,7 +21,8 @@ Probado con una narración real de 12 min: Whisper se había comido 14 trozos, c
   recover(audio, transcript, model_key, language, progress, cancelled) -> transcripción con lo recuperado
       (en transcript["recovered"]: [[inicio, fin, texto, "whisper" | "oído"], …])
 
-Todo en el procesador y sin internet. Tarda más o menos lo que la transcripción.
+Sin internet. Con el motor de IA y tarjeta gráfica, el oído literal y los trozos se escuchan en la tarjeta
+(⚡ mucho más rápido); si no, en el procesador (tarda más o menos lo que la transcripción).
 """
 from __future__ import annotations
 
@@ -138,23 +139,28 @@ def _greedy(em: np.ndarray, inv: dict[int, str], offset: float, lo: float, hi: f
 
 def literal_words(audio: np.ndarray, progress: ProgressFn = None, cancelled: CancelFn = None) -> list[list]:
     """Todo lo que se oye en el audio, palabra a palabra, tal cual (con faltas de ortografía)."""
-    _m, vocab = align._load()
-    inv = {v: k for k, v in vocab.items()}
+    inv = {v: k for k, v in align.vocab().items()}
     dur = len(audio) / SR
     starts = list(np.arange(0.0, max(dur - 1.0, 0.0) + 1e-6, STEP)) or [0.0]
     out: list[list] = []
-    for n, a in enumerate(starts):
-        check_cancel(cancelled)
+    tramos = [(float(a), min(dur, float(a) + WINDOW)) for a in starts]
+    largos = [i for i, (a, b) in enumerate(tramos) if int(b * SR) - int(a * SR) >= SR // 5]
+
+    def prog(f, _t=""):
+        a = tramos[min(len(tramos) - 1, int(f * len(tramos)))][0]
         m, s = divmod(int(a), 60)
-        report(progress, n / len(starts), f"🔁 Escuchando palabra por palabra… {m:02d}:{s:02d} de "
-                                          f"{int(dur) // 60:02d}:{int(dur) % 60:02d}")
-        b = min(dur, a + WINDOW)
-        seg = audio[int(a * SR):int(b * SR)]
-        if len(seg) < SR // 5:
+        report(progress, f, f"🔁 Escuchando palabra por palabra… {m:02d}:{s:02d} de "
+                            f"{int(dur) // 60:02d}:{int(dur) % 60:02d}")
+    # ⚡ en la tarjeta (todos los tramos de una vez) si se puede; si no, en el procesador
+    ems = align.emissions_many(audio, [tramos[i] for i in largos], prog, cancelled)
+    check_cancel(cancelled)
+    for n, em in zip(largos, ems):
+        if em is None:
             continue
+        a = tramos[n][0]
         lo = 0.0 if n == 0 else a + (WINDOW - STEP) / 2
         hi = dur + 1 if n == len(starts) - 1 else a + STEP + (WINDOW - STEP) / 2
-        out += _greedy(align._emissions(seg), inv, a, lo, hi)
+        out += _greedy(em, inv, a, lo, hi)
     out.sort(key=lambda w: w[0])
     report(progress, 1.0, f"🔁 Oído literal: {len(out)} palabras.")
     return out
@@ -308,15 +314,25 @@ def recover(audio: np.ndarray, transcript: dict, model_key: str = "equilibrado",
     if not missed:
         report(progress, 1.0, "🔁 Whisper no se saltó nada.")
         return dict(transcript, words=words, literal=True, recovered=[])
-    model = transcription._load(transcription.MODELS[model_key][0])
+    clips = [_clip_bounds(a, b, literal, dur) for a, b, _h in missed]
+    # ⚡ todos los trozos de una vez en la tarjeta (modelo ya cargado); si no se puede, uno a uno en el procesador
+    report(progress, 0.7, f"🔁 Recuperando lo que Whisper se saltó… ({len(missed)} trozos)")
+    oidos = transcription.oir_tramos_tarjeta(audio, clips, model_key, language, prompt=VERBATIM_PROMPT, beam=5,
+                                             cancelled=cancelled)
+    model = None
     recovered, new_words = [], list(words)
     for n, (a, b, heard) in enumerate(missed):
         check_cancel(cancelled)
         report(progress, 0.7 + 0.3 * n / len(missed), f"🔁 Recuperando lo que Whisper se saltó… {n + 1}/{len(missed)}")
-        c0, c1 = _clip_bounds(a, b, literal, dur)
+        c0, c1 = clips[n]
         old = [w for w in new_words if c0 <= (w[0] + w[1]) / 2 < c1]
-        fresh = [[round(c0 + w[0], 3), round(c0 + w[1], 3), w[2], round(w[3], 3)]
-                 for w in _whisper_clip(model, audio[int(c0 * SR):int(c1 * SR)], language)]
+        if oidos is not None:
+            fresh = [list(w) for w in oidos[n]]
+        else:
+            if model is None:
+                model = transcription._load(transcription.MODELS[model_key][0])
+            fresh = [[round(c0 + w[0], 3), round(c0 + w[1], 3), w[2], round(w[3], 3)]
+                     for w in _whisper_clip(model, audio[int(c0 * SR):int(c1 * SR)], language)]
         fresh = [w for w in fresh if c0 <= (w[0] + w[1]) / 2 < c1]
         need = _letters(old) + 0.6 * len(sound(heard.replace(" ", "")))
         if fresh and _letters(fresh) >= need:

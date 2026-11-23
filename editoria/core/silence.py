@@ -822,3 +822,246 @@ def short_pauses(project, clips, fps: float, settings: dict) -> dict:
                 margenes += 1
     return {"total": total, "cortas": cortas, "margenes": margenes, "min_frames": minf}
 
+
+# ------------------------------------------------------------------ ✋ retoques a mano (con la ventana abierta)
+# Con «✂ Eliminar silencio» abierto se puede arrastrar en la línea de tiempo el borde de un corte (o sobre el audio)
+# para alargar o encoger lo que se queda. Cada retoque es «quedarse» (keep) o «cortar» (cut) un tramo; se guardan
+# anclados al clip y al segundo DEL ARCHIVO (si el clip se mueve o se parte, el retoque lo sigue) y se aplican por
+# orden encima de lo que calcula plan() (el último manda). Además se propone qué parámetro explicaría el cambio.
+_EPS = 1e-6
+
+
+def _union(rs: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    out: list[list[float]] = []
+    for a, b in sorted((float(a), float(b)) for a, b in rs if b - a > _EPS):
+        if out and a <= out[-1][1] + _EPS:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _minus(rs: list[tuple[float, float]], a: float, b: float) -> list[tuple[float, float]]:
+    out = []
+    for ra, rb in rs:
+        if rb <= a + _EPS or ra >= b - _EPS:
+            out.append((ra, rb))
+            continue
+        if ra < a - _EPS:
+            out.append((ra, a))
+        if rb > b + _EPS:
+            out.append((b, rb))
+    return out
+
+
+def apply_retouches(regions: list[tuple[float, float]], retouches: list[tuple[str, float, float]]
+                    ) -> list[tuple[float, float]]:
+    """Los tramos a quitar con los retoques a mano encima, por orden: ("keep", a, b) = eso se queda; ("cut", a, b) =
+    eso se quita. Todo en la LÍNEA DE TIEMPO."""
+    out = _union(regions)
+    for op, a, b in retouches:
+        a, b = min(a, b), max(a, b)
+        if b - a <= 1e-3:
+            continue
+        out = _minus(out, a, b) if op == "keep" else _union(out + [(a, b)])
+    return [(a, b) for a, b in out if b - a > 1e-3]
+
+
+def region_at(regions: list[tuple[float, float]], t: float) -> tuple[float, float] | None:
+    for a, b in regions:
+        if a - _EPS <= t <= b + _EPS:
+            return a, b
+    return None
+
+
+def edge_retouch(region: tuple[float, float], side: str, t: float) -> tuple[str, float, float] | None:
+    """Arrastrar el borde de un corte hasta t: side "start" (donde acaba el sonido de antes) o "end" (donde vuelve
+    a sonar). Hacia dentro del corte = se queda más; hacia fuera = se corta más."""
+    a, b = region
+    if side == "start":
+        if t > a + _EPS:
+            return "keep", a, min(t, b)
+        if t < a - _EPS:
+            return "cut", t, a
+    else:
+        if t < b - _EPS:
+            return "keep", max(t, a), b
+        if t > b + _EPS:
+            return "cut", b, t
+    return None
+
+
+def classify(regions: list[tuple[float, float]], op: str, a: float, b: float, fps: float) -> dict:
+    """Qué es un retoque respecto a los cortes de ahora: {"kind": start|end|gone|new|split|none, "frames":
+    fotogramas (positivo = se queda más), "region": (a, b) | None}. start = cambia donde acaba el sonido (margen
+    «después del final»); end = donde vuelve a sonar («antes del inicio»); gone = se queda el silencio entero; new =
+    corta donde no había corte; split = se queda algo en medio de un corte."""
+    a, b = min(a, b), max(a, b)
+    tol = 0.5 / max(fps, 1.0)
+    if op == "keep":
+        for ra, rb in regions:
+            if b <= ra + _EPS or a >= rb - _EPS:
+                continue
+            if a <= ra + tol and b >= rb - tol:
+                return {"kind": "gone", "frames": int(round((rb - ra) * fps)), "region": (ra, rb)}
+            if a <= ra + tol:
+                return {"kind": "start", "frames": int(round((min(b, rb) - ra) * fps)), "region": (ra, rb)}
+            if b >= rb - tol:
+                return {"kind": "end", "frames": int(round((rb - max(a, ra)) * fps)), "region": (ra, rb)}
+            return {"kind": "split", "frames": int(round((b - a) * fps)), "region": (ra, rb)}
+        return {"kind": "none", "frames": 0, "region": None}
+    best = None
+    for ra, rb in regions:
+        if b < ra - tol or a > rb + tol:
+            continue
+        if a < ra - _EPS:
+            ext = {"kind": "start", "frames": -int(round((ra - a) * fps)), "region": (ra, rb)}
+            if best is None or abs(ext["frames"]) > abs(best["frames"]):
+                best = ext
+        if b > rb + _EPS:
+            ext = {"kind": "end", "frames": -int(round((b - rb) * fps)), "region": (ra, rb)}
+            if best is None or abs(ext["frames"]) > abs(best["frames"]):
+                best = ext
+    if best is not None:
+        return best
+    return {"kind": "new", "frames": int(round((b - a) * fps)), "region": None}
+
+
+def _half_up(x: float) -> float:
+    return float(np.ceil(x * 2.0) / 2.0)
+
+
+def _half_down(x: float) -> float:
+    return float(np.floor(x * 2.0) / 2.0)
+
+
+LIMITS = {"threshold_db": (-60.0, 0.0), "before": (0, 30), "after": (0, 30), "min_frames": (1, 90)}
+
+
+def suggest(change: dict, settings: dict, level_db: float | None = None) -> dict | None:
+    """Qué parámetro explicaría un retoque (para proponerlo): {"key", "old", "new", "clamped"} o None si ninguno lo
+    explica. level_db: el volumen más alto (dBFS, por fotograma) del tramo retocado, para proponer el umbral."""
+    kind, fr = change.get("kind"), int(change.get("frames", 0))
+    thr = float(settings.get("threshold_db", -32.0))
+    bef, aft = int(settings.get("before", 0)), int(settings.get("after", 0))
+    minf = max(1, int(settings.get("min_frames", 1)))
+    mode = settings.get("mode", "volumen")
+
+    def out(key, new):
+        lo, hi = LIMITS[key]
+        if key == "threshold_db" and not lo <= new <= hi:
+            return None              # (ningún umbral posible lo explica: p. ej. quedarse un silencio total)
+        val = min(max(new, lo), hi)
+        old = thr if key == "threshold_db" else {"before": bef, "after": aft, "min_frames": minf}[key]
+        if key != "threshold_db":
+            val = int(round(val))
+        if abs(val - old) < 1e-6:
+            return None
+        return {"key": key, "old": old, "new": val, "clamped": abs(val - new) > 1e-6}
+
+    def louder():                    # cortar donde ahora suena: que eso cuente como silencio
+        if level_db is None or mode == "voz":
+            return None
+        return out("threshold_db", _half_up(level_db + 0.5)) if level_db + 0.5 > thr else None
+
+    if kind in ("start", "end"):
+        key, cur = ("after", aft) if kind == "start" else ("before", bef)
+        if cur + fr < 0:
+            return louder() or out(key, 0)
+        return out(key, cur + fr)
+    if kind == "gone":               # el silencio entero se queda: que el mínimo sea más largo que esta pausa
+        return out("min_frames", fr + bef + aft + 1)
+    if kind == "new":                # cortar una pausa que se respetaba: más corta que el mínimo o más fuerte que el umbral
+        pausa = fr + bef + aft
+        if pausa < minf:
+            return out("min_frames", max(1, pausa))
+        return louder()
+    if kind == "split":              # algo que suena en medio del corte: umbral más bajo que eso
+        if level_db is None or mode == "voz" or level_db - 0.5 >= thr:
+            return None
+        return out("threshold_db", _half_down(level_db - 0.5))
+    return None
+
+
+def _clip_src(c, t: float) -> float:
+    return c.source_in + (t - c.start) * c.speed
+
+
+def anchor(clips, op: str, a: float, b: float) -> list[dict]:
+    """El retoque [a, b] (línea de tiempo) anclado a cada clip y al segundo del archivo."""
+    a, b = min(a, b), max(a, b)
+    out = []
+    for c in clips:
+        if c.speed <= 0 or c.reverse:
+            continue
+        s, e = max(a, c.start), min(b, c.end)
+        if e - s <= 1e-4:
+            continue
+        out.append({"op": op, "clip": c.id, "media": c.media_id, "sa": _clip_src(c, s), "sb": _clip_src(c, e),
+                    "a": s, "b": e})
+    if not out:                      # (fuera de los clips: se queda en la línea de tiempo tal cual)
+        out.append({"op": op, "clip": None, "media": None, "sa": None, "sb": None, "a": a, "b": b})
+    return out
+
+
+def on_timeline(project, clips, items: list[dict]) -> list[tuple[str, float, float]]:
+    """Los retoques anclados, otra vez en la línea de tiempo (siguen a su clip aunque se haya movido o partido)."""
+    from .mapping import map_range
+    res = []
+    for it in items:
+        if it.get("media") is None:
+            res.append((it["op"], float(it["a"]), float(it["b"])))
+            continue
+        cs = [c for c in clips if c.id == it.get("clip")] or [c for c in clips if c.media_id == it["media"]]
+        for _c, ta, tb in map_range(project, it["media"], float(it["sa"]), float(it["sb"]), cs):
+            res.append((it["op"], ta, tb))
+    return res
+
+
+def level_max(project, clips, a: float, b: float, fps: float) -> float | None:
+    """El volumen más alto (dBFS por fotograma, como el umbral) entre a y b de la línea de tiempo."""
+    best = None
+    for c in clips:
+        m = project.media_of(c)
+        s, e = max(a, c.start), min(b, c.end)
+        if m is None or e - s <= 1e-4 or c.speed <= 0 or c.reverse:
+            continue
+        try:
+            db = frame_levels(m.path, fps)
+        except Exception:  # noqa: BLE001 - sin audio legible: no cuenta
+            continue
+        f0 = max(0, int(np.floor(_clip_src(c, s) * fps + 1e-6)))
+        f1 = min(len(db), max(f0 + 1, int(np.ceil(_clip_src(c, e) * fps - 1e-6))))
+        if f1 > f0:
+            v = float(np.max(db[f0:f1]))
+            best = v if best is None else max(best, v)
+    return best
+
+
+def words_cut(project, clips, regions: list[tuple[float, float]], a: float, b: float,
+              min_overlap: float = 0.02) -> list[str]:
+    """Palabras transcritas entre a y b (línea de tiempo) que algún corte se come en parte o entera (≥ 20 ms)."""
+    found: list[str] = []
+    regs = [(ra, rb) for ra, rb in regions if rb > a - 1.0 and ra < b + 1.0]
+    if not regs:
+        return found
+    for c in clips:
+        m = project.media_of(c)
+        if m is None or c.speed <= 0 or c.reverse:
+            continue
+        words = (project.transcripts.get(m.id) or {}).get("words") or []
+        s0, s1 = _clip_src(c, max(a, c.start) - 0.5), _clip_src(c, min(b, c.end) + 0.5)
+        for w in words:
+            try:
+                ws, we, txt = float(w[0]), float(w[1]), str(w[2]).strip()
+            except (TypeError, ValueError, IndexError):
+                continue
+            if we < s0 or ws > s1 or we <= c.source_in or ws >= c.source_in + c.src_len:
+                continue
+            wa, wb = c.start + (ws - c.source_in) / c.speed, c.start + (we - c.source_in) / c.speed
+            if wb < a - 1e-3 or wa > b + 1e-3:
+                continue
+            ov = sum(max(0.0, min(wb, rb) - max(wa, ra)) for ra, rb in regs)
+            if ov >= min(min_overlap, 0.5 * (wb - wa)) and txt and txt not in found:
+                found.append(txt)
+    return found

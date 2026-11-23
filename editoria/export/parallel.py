@@ -252,9 +252,17 @@ class ParallelExport:
                 for p_ in parts:
                     f.write("file '" + p_.replace("\\", "/").replace("'", "'\\''") + "'\n")
             o = self.opts
+            capitulos, meta = [], None                 # 📍 los capítulos dentro del MP4 (una entrada más, ffmetadata)
+            if getattr(o, "chapters", False):
+                from .ffmpeg_export import escribir_capitulos
+                meta = escribir_capitulos(self.project, self.total, self.dir)
+            if meta:
+                capitulos = ["-map_chapters", "2"]
             args = [self.ffmpeg, "-nostdin", "-y", "-hide_banner", "-nostats", "-progress", "pipe:1",
-                    "-f", "concat", "-safe", "0", "-i", lst, "-i", wav, "-map", "0:v:0", "-map", "1:a:0",
-                    "-c", "copy", "-t", f"{self.total:.3f}", "-movflags", "+faststart", o.path]
+                    "-f", "concat", "-safe", "0", "-i", lst, "-i", wav] + \
+                (["-f", "ffmetadata", "-i", meta] if meta else []) + \
+                ["-map", "0:v:0", "-map", "1:a:0", "-c", "copy"] + capitulos + \
+                ["-t", f"{self.total:.3f}", "-movflags", "+faststart", o.path]
             if self._run(args, lambda s: None) != 0:
                 raise RuntimeError("cancelado" if self.cancel else "no se pudieron juntar los trozos")
             return o.path

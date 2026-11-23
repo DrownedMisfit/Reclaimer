@@ -376,6 +376,12 @@ def _aparece_golpe(c: _Ctx):
     c.destello(1.2, 0.2)
 
 
+def _risa(c: _Ctx):
+    c.actor("A", 0.5, F((0, "e", "pop", 0.35), (0.4, "a", "habla", 0.9), (1.3, "a", "salta", 0.9),
+                        (2.2, "a", "habla", 0.6)))
+    c.sonido("brillo", 0.05, 0.25)
+
+
 def _acerca_y_va(c: _Ctx):
     c.actor("A", 0.5, F((0, "e", "izquierda", 1.0), (3.4, "s", "derecha", 1.0), fin=""), lado=1)
     c.sonido("pasos", 0.0, 0.3, 1.0)
@@ -502,6 +508,8 @@ CATALOGO = [
     dict(clave="aparece_golpe", nombre="👻 Aparece de golpe", grupo=GRUPOS[2], dur=3.5, fondo="dark",
          fn=_aparece_golpe, papeles=[("A", "Se asusta", None), ("B", "Aparece", None)],
          desc="Algo aparece de golpe con destello; el otro se asusta y retrocede."),
+    dict(clave="risa", nombre="😂 Se muere de risa", grupo=GRUPOS[2], dur=3.2, fondo="blur", fn=_risa,
+         papeles=[("A", "Se ríe", None)], desc="Aparece de golpe y se ríe a carcajadas: gesticula y da saltitos."),
     dict(clave="acerca_y_va", nombre="🚶 Se acerca y se va", grupo=GRUPOS[2], dur=4.5, fondo="blur",
          fn=_acerca_y_va, papeles=[("A", "Personaje", None)],
          desc="Entra por la izquierda, se queda un momento y se va por la derecha."),

@@ -1,7 +1,8 @@
 """
-🔑 Palabras clave → «📍 Todas»: marcas de TODAS las palabras clave en la línea de tiempo; la elegida, resaltada (las
-demás atenuadas); 🧭 ◀ / ▶ (anterior / siguiente al cabezal) y ⇢ más cercana / más lejana.
-También: 🔎 Buscar no se atenúa, ✕ con «Todas», clic en muescas, tope de marcas.
+🔑 Palabras clave → modo «Todas»: marcas de TODAS las palabras clave en la línea de tiempo; la elegida, resaltada (las
+demás enteras pero más tenues); 🧭 ◀ / ▶ (anterior / siguiente al cabezal) y ⇢ más cercana / más lejana.
+También: 🔎 Buscar no se atenúa, ✕ = modo «Ninguna», clic en la banderita de otra palabra, tope de marcas.
+(20/11: las muescas son ahora solo lo dicho en partes quitadas: ver test_palabras_en_linea.)
 Ejecutar:  .venv/Scripts/python.exe tests/test_palabras_todas.py <carpeta_salida>
 """
 from __future__ import annotations
@@ -49,7 +50,7 @@ def main():
     cl.menciones = [{"term": "La ciudad", "hits": [h(3.0), h(21.0), h(40.0)]},
                     {"term": "El río", "hits": [h(12.0), h(30.0)]}]
     cl.mencion = None
-    cl.btn_todas.setChecked(False)
+    cl.set_modo("elegida")
     cl._elegir_mencion(0, buscar=False)
     app.processEvents()
     assert [w for _t, w in tl.hint_marks] == ["🎬 La ciudad"] * 3, tl.hint_marks
@@ -104,12 +105,12 @@ def main():
     assert tl.hint_focus == "La ciudad" and not tl._hint_dim("🔎 El río") and tl._hint_dim("🎬 El río")
     i50 = next(k for k, (t, _l) in enumerate(tl.hint_marks) if t == 50.0)
     assert not tl._hint_notch(i50)
-    cl.btn_todas.setChecked(False)
+    cl.set_modo("elegida")
     app.processEvents()
-    assert tl.hint_focus == "", "sin «📍 Todas» no se atenúa nada"
+    assert not any(tl._hint_dim(l) for _t, l in tl.hint_marks), "con «Elegida» no se atenúa nada"
     assert any(l == "🔎 El río" for _t, l in tl.hint_marks)
     marcas_set(tl, "buscar", [])
-    print("✓ las marcas de 🔎 Buscar no se atenúan; sin «📍 Todas», ningún foco")
+    print("✓ las marcas de 🔎 Buscar no se atenúan; con «Elegida», nada atenuado")
 
     # clic en una muesca pegada a una banderita resaltada: gana la que se ve
     cl.btn_todas.setChecked(True)
@@ -125,22 +126,21 @@ def main():
     i21 = next(k for k, (t, l) in enumerate(tl.hint_marks) if t == 21.0 and l == "🎬 La ciudad")
     ip = next(k for k, (t, l) in enumerate(tl.hint_marks) if abs(t - t_pegada) < 1e-6)
     assert tl._hint_rect(i21) is not None and tl._hint_rect(ip) is not None
-    assert tl._hint_notch(ip) and not tl._hint_notch(i21)
-    pos = QPointF(tl.x_for(t_pegada) + 2, tl.TOPIC_H + 10)
-    assert tl._hint_rect(i21).contains(pos), "la muesca debe quedar dentro de la banderita"
+    assert not tl._hint_notch(ip) and not tl._hint_notch(i21), "otra palabra: entera (más tenue), no muesca"
+    assert not tl._hint_rect(ip).intersects(tl._hint_rect(i21)), "cada una en su sitio (otra fila)"
+    pos = QPointF(tl.x_for(t_pegada) + 2, tl._hint_rect(i21).center().y())
     assert tl.hint_mark_at(pos) == i21, (tl.hint_mark_at(pos), i21, ip)
+    assert tl.hint_mark_at(tl._hint_rect(ip).center()) == ip
     i12 = next(k for k, (t, _l) in enumerate(tl.hint_marks) if t == 12.0)
-    pos12 = QPointF(tl.x_for(12.0) + 2, tl.TOPIC_H + 10)
+    pos12 = tl._hint_rect(i12).center()
     assert tl.hint_mark_at(pos12) == i12
-    lejos = QPointF(tl.x_for(12.0) + 30, tl.TOPIC_H + 10)            # (donde iría su texto invisible: nada)
-    assert tl.hint_mark_at(lejos) != i12
     snap = [t for t, _q in tl._snap_points(set()) if _q == "marca"]
     assert 21.0 in snap and 12.0 not in snap, "el imán no se pega a las atenuadas"
     tl.select_hint(-1)
     tgt = tl.keyword_target(21.0 + (t_pegada - 21.0) / 2, near=1.0)
     assert tgt and tgt["word"] == "La ciudad", tgt
-    print("✓ clic junto a la banderita resaltada: gana la visible; la muesca sola responde; imán y "
-          "«Añadir en…» sin las atenuadas")
+    print("✓ las de otra palabra van enteras y en su fila; cada clic da la suya; imán y «Añadir en…» sin las "
+          "atenuadas")
 
     # clic en una muesca → «Dijiste…» pasa a esa palabra
     for m_ in cl.menciones:
@@ -150,18 +150,19 @@ def main():
     assert cl.mencion["term"] == "El río" and cl.lista_menciones.currentItem().text().startswith("El río")
     assert tl.hint_focus == "El río" and abs(win.engine.time - 12.0) < 0.01, (tl.hint_focus, win.engine.time)
     assert tl.hint_marks[tl.hint_selected][0] == 12.0
-    print("✓ clic en una muesca atenuada: la lista pasa a esa palabra y el cabezal va ahí")
+    print("✓ clic en la banderita de otra palabra: la lista pasa a esa palabra y el cabezal va ahí")
 
-    # ✕ con «📍 Todas»: se apaga y no vuelven solas
+    # ✕ = modo «Ninguna»: se ocultan las de «Dijiste…» (las de 🔎 Buscar se quedan), sin perderlas, y no vuelven solas
     marcas_set(tl, "buscar", [(50.0, "🔎 El río")])
     cl._quitar_marcas()
     app.processEvents()
-    assert not cl.btn_todas.isChecked() and tl.hint_focus == ""
+    assert not cl.btn_todas.isChecked() and cl.modo == "ninguna" and tl.marcas_modo == "ninguna"
     assert tl.hint_marks == [(50.0, "🔎 El río")], tl.hint_marks
     cl._elegir_mencion(0, buscar=False)
     assert tl.hint_marks == [(50.0, "🔎 El río")], "tras ✕ no deben volver solas"
     marcas_set(tl, "buscar", [])
-    print("✓ ✕ con «📍 Todas»: lo apaga, quita las marcas y no vuelven solas (las de 🔎 se quedan)")
+    cl.set_modo("todas")
+    print("✓ ✕ = «Ninguna»: oculta las de «Dijiste…» (las de 🔎 se quedan) y no vuelven solas")
 
     # palabra elegida sin momentos con hora → se recorren todas
     cl.menciones.append({"term": "Sin hora", "hits": [], "no_dicha": True})

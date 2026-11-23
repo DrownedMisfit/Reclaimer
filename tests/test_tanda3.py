@@ -98,7 +98,7 @@ def main():
         pump(app, 0.1)
     assert dlg.entries and dlg.rows
     names = [k for k, _v in dlg.rows]
-    assert "FFmpeg" in names and "Historial de deshacer" in names and "Exportar con la tarjeta AMD" in names
+    assert "FFmpeg" in names and "Historial de deshacer" in names and "Exportar con la tarjeta gráfica" in names
     dlg.b_safe.click()
     pump(app, 0.5)
     left = {e["key"]: e for e in D.scan()}

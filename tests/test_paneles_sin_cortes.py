@@ -123,7 +123,19 @@ def revisar(dock, cortes: dict, vistos: set, modo: str):
                         apunta(w, "texto cortado a lo alto", f"(necesita {alto} px de alto, tiene {QWidget.height(w)})")
                 elif QWidget.width(w) + 2 < w.sizeHint().width():
                     apunta(w, "texto cortado", f"(necesita {w.sizeHint().width()} px, tiene {QWidget.width(w)})")
-            elif isinstance(w, QAbstractButton):
+            # c') ningún texto cortado A LO ALTO: el alto que el estilo deja al texto (sin borde ni relleno) frente al
+            # de la letra (un alto fijo de 24 px con el relleno de 5 px y el borde dejaba 12 px: «Aqreqar»)
+            corte_v = corte_vertical(w)
+            if corte_v:
+                apunta(w, "texto cortado a lo alto", corte_v)
+            if isinstance(w, QAbstractButton):
+                from editoria.ui import diseno as _D
+                if isinstance(w, _D.CasillaTexto):
+                    # (la casilla del diseño parte su texto en líneas: basta con que el panel le dé el alto)
+                    alto = w.heightForWidth(QWidget.width(w))
+                    if alto > QWidget.height(w) + 3:
+                        apunta(w, "texto cortado a lo alto", f"(necesita {alto} px de alto, tiene {QWidget.height(w)})")
+                    continue
                 if R.es_multilinea(w):
                     # (con alto fijo puesto en el código no se puede partir: «…» y entero al pasar el ratón; si no,
                     # el panel tiene que darle el alto que necesita su texto partido)
@@ -167,6 +179,63 @@ def revisar(dock, cortes: dict, vistos: set, modo: str):
                         break
         except RuntimeError:
             continue
+
+
+def corte_vertical(w) -> str:
+    """'' si el texto de w cabe a lo alto; si no, el detalle. Mide con el estilo de verdad (la hoja general y la del
+    control): el rectángulo de contenido que le queda al texto tras el borde y el relleno, frente al alto de la letra.
+    Botones con texto (también los que se parten en líneas), desplegables, cajas numéricas y campos de texto."""
+    from PySide6.QtWidgets import (QAbstractSpinBox, QComboBox, QLineEdit, QPushButton, QStyle, QStyleOptionButton,
+                                   QStyleOptionComboBox, QStyleOptionFrame, QStyleOptionSpinBox)
+
+    def opcion(op):
+        try:
+            w.initStyleOption(op)
+        except Exception:  # noqa: BLE001  (creado desde C++: sin acceso a initStyleOption)
+            op.initFrom(w)
+        return op
+
+    from PySide6.QtWidgets import QWidget
+    if not isinstance(w, (QPushButton, QComboBox, QAbstractSpinBox, QLineEdit)):
+        return ""
+    st = QWidget.style(w)                      # (como QWidget.width: hay paneles que llaman «style» a un control)
+    if isinstance(w, QPushButton):
+        if type(w).paintEvent is not QPushButton.paintEvent and not _R().es_multilinea(w):
+            return ""                          # (se pinta a mano —BotonIcono, BotonPrincipal—: no usa el relleno)
+        if not _texto(w).strip():
+            return ""
+        util = st.subElementRect(QStyle.SE_PushButtonContents, opcion(QStyleOptionButton()), w).height()
+    elif isinstance(w, QComboBox):
+        if not w.currentText().strip() and w.isEditable() is False:
+            return ""
+        util = st.subControlRect(QStyle.CC_ComboBox, opcion(QStyleOptionComboBox()),
+                                 QStyle.SC_ComboBoxEditField, w).height()
+    elif isinstance(w, QAbstractSpinBox):
+        util = st.subControlRect(QStyle.CC_SpinBox, opcion(QStyleOptionSpinBox()),
+                                 QStyle.SC_SpinBoxEditField, w).height()
+    elif isinstance(w, QLineEdit):
+        if type(w.parentWidget()).__name__ in ("QComboBox",) or isinstance(w.parentWidget(), (QComboBox,
+                                                                                               QAbstractSpinBox)):
+            return ""                          # (el campo interno de un desplegable o caja numérica: ya medido)
+        m = w.textMargins()
+        util = st.subElementRect(QStyle.SE_LineEditContents, opcion(QStyleOptionFrame()), w).height() - \
+            m.top() - m.bottom()
+    else:
+        return ""
+    letra = w.fontMetrics().height()
+    if QWidget_alto(w) > 3 and util + 1 < letra:
+        return f"(le quedan {util} px para una letra de {letra} px; mide {QWidget_alto(w)} de alto)"
+    return ""
+
+
+def QWidget_alto(w) -> int:   # noqa: N802
+    from PySide6.QtWidgets import QWidget
+    return QWidget.height(w)
+
+
+def _R():
+    from editoria.ui import responsive as R
+    return R
 
 
 PINTADOS: dict = {}           # id(widget) → veces que Qt llamó a SU dibujo nuevo (el de responsive.py)
@@ -247,6 +316,26 @@ def una_pantalla(out, nombre):
     from editoria.ui.main_window import MainWindow
     from editoria.ui.theme import apply_dark_theme
     apply_dark_theme(app)                        # (con el tema de verdad: sus letras y rellenos cambian los anchos)
+    # (la medida del corte vertical se comprueba a sí misma: 24 px fijos con el relleno viejo —5 px— = cortado; con
+    #  diseno.alto_fijo, no; y un botón normal de la hoja general —24 px desde el 21/11— tampoco)
+    from PySide6.QtWidgets import QPushButton as _QPB, QVBoxLayout as _QVL
+    from editoria.ui import diseno as _Dd
+    caja = QWidget()
+    _l = _QVL(caja)
+    viejo, nuevo, normal = _QPB("Agregar todo"), _QPB("Agregar todo"), _QPB("Agregar todo")
+    viejo.setStyleSheet("QPushButton { padding: 5px 12px; }")
+    viejo.setFixedHeight(_Dd.px(_Dd.ALTO_CAMPO))
+    _Dd.alto_fijo(nuevo)
+    for b_ in (viejo, nuevo, normal):
+        _l.addWidget(b_)
+    caja.show()
+    pump(app, 0.1)
+    assert corte_vertical(viejo), "la medida vertical no ve el corte de un botón de 24 px con 5 px de relleno"
+    assert not corte_vertical(nuevo), f"diseno.alto_fijo sigue cortando: {corte_vertical(nuevo)}"
+    assert not corte_vertical(normal), f"el botón de la hoja general corta: {corte_vertical(normal)}"
+    caja.close()
+    print("✓ c') la medida del corte vertical ve «Aqreqar» (24 px con 5 px de relleno) y no con diseno.alto_fijo ni "
+          "con el botón de la hoja general", flush=True)
     win = MainWindow()
     win.resize(ww, wh)
     win.show()
@@ -269,7 +358,7 @@ def una_pantalla(out, nombre):
     en_paneles = {a.text() for a in win._menu_paneles.actions()}
     en_ventana = set(win._menu_ventana.actions())
     for k, d in win.docks.items():
-        if k == "timeline":
+        if k == "timeline" or getattr(d, "absorbido", False):   # (agrupación 20/11: viven en «Voz y texto»/«Audio»)
             continue
         assert d.features() & QDockWidget.DockWidgetClosable, f"«{d.nombre}» no se puede cerrar"
         assert d.toggleViewAction() in en_ventana, f"«{d.nombre}» no está en el menú Ventana"
@@ -293,7 +382,7 @@ def una_pantalla(out, nombre):
     cortes: dict = {}
     vistos: set = set()
     alto_suelto = min(900, scr.height() - 80)
-    claves = [k for k in win.docks if k != "timeline"]
+    claves = [k for k in win.docks if k != "timeline" and not getattr(win.docks[k], "absorbido", False)]
     t0 = time.time()
 
     def captura(d, nombre):
@@ -380,8 +469,13 @@ def una_pantalla(out, nombre):
                     f"{alto_pag} px (cuenta el alto de otra página que no se ve)")
 
     for k in claves:
-        revisar_panel(k, win.docks[k], [("suelto", w, alto_suelto) for w in ANCHOS] +
-                      [("derecha", 220, 0), ("arriba", 0, 220)], k)
+        acordeon = {"voz_texto": getattr(win, "voz_texto", None), "audio": getattr(win, "audio_panel", None)}.get(k)
+        for sec in (acordeon.claves() if acordeon is not None else [None]):
+            if sec is not None:                      # (los agrupados: cada sección abierta, una a una)
+                acordeon.abrir(sec, guardar=False)
+            revisar_panel(k, win.docks[k], [("suelto", w, alto_suelto) for w in ANCHOS] +
+                          [("derecha", 220, 0), ("arriba", 0, 220)], k if sec is None else f"{k}_{sec}",
+                          "" if sec is None else f" · {sec}")
 
     # el Inspector con un clip elegido: video (Clip · Video · Audio · Color), audio (ecualizador) y texto
     from editoria.core.model import KIND_AUDIO, KIND_VIDEO, TRACK_AUDIO, TRACK_VIDEO, Clip, MediaItem, new_id

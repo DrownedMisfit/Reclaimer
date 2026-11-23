@@ -176,7 +176,8 @@ def main():
             seen["answer"] = "Narración"
             tl._rename_track(ctrl.project.track(a1.id))
             a1n = ctrl.project.track(a1.id)
-            assert a1n.role == "voz" and a1n.fx.get("eq")
+            # (22/11: llamarla «Narración» le da el papel de voz, pero ya no le pone EQ ni compresor sin pedirlo)
+            assert a1n.role == "voz" and not (a1n.fx or {}).get("eq") and not (a1n.fx or {}).get("compress"), a1n.fx
             v = [t for t in ctrl.project.tracks if t.kind == TRACK_VIDEO][-1]
             seen["answer"] = "Gameplay"
             tl._rename_track(v)

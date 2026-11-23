@@ -75,6 +75,24 @@ class UnusedScenes(QWidget):
         lay.setContentsMargins(0, 6, 0, 0)
         lay.addLayout(head)
         lay.addWidget(self.list, 1)
+        # (🎨 20/11: sin escenas, una línea —nada de una rejilla vacía de 230 px— y sin los botones que no sirven)
+        from . import diseno as D
+        self.vacio = D.aviso_vacio("Ninguna escena sin usar", "Pulsa «Buscar»: Reclaimer busca los cortes de cámara de "
+                                   "tus videos y aquí salen las escenas que aún no están en la línea de tiempo")
+        lay.addWidget(self.vacio)
+        D.ocultar_si_vacia(self.list, self.vacio)
+        m = self.list.model()
+
+        def _botones(*_a, b=(self.btn_fill, self.btn_scratch, self.btn_none)):
+            try:
+                hay = m.rowCount() > 0
+                for x in b:
+                    x.setVisible(hay)
+            except RuntimeError:
+                pass
+        for s in (m.rowsInserted, m.rowsRemoved, m.modelReset):
+            s.connect(_botones)
+        _botones()
         lay.addLayout(row)
         lay.addWidget(self.info)
         from .common import lazy_refresh

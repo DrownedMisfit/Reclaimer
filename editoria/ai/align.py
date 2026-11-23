@@ -8,7 +8,9 @@ precisión. Sirve para cortar silencios sin comerse palabras, para los subtítul
   available() -> (bool, motivo)
   align_words(path, words, progress=None, cancelled=None) -> palabras afinadas [[inicio, fin, texto, prob], …]
 
-El modelo vive en motor_ia/alineador_es (descargado una vez, con permiso del usuario). Todo en el procesador.
+El modelo vive en motor_ia/alineador_es (descargado una vez, con permiso del usuario).
+⚡ Con el motor de IA y una tarjeta gráfica, el modelo escucha en la tarjeta (servidor de voz del motor, el mismo que
+transcribe): medido en una RX 9060 XT, 90 s de voz de ~30 s a ~2 s. Sin tarjeta, en el procesador, como siempre.
 """
 from __future__ import annotations
 
@@ -65,19 +67,107 @@ def refined(transcript: dict, new_words: list) -> dict:
 
 
 def _load():
-    global _model, _vocab
+    global _model
     if _model is None:
-        import json
         import torch
         from transformers import Wav2Vec2ForCTC
         torch.set_num_threads(max(2, (os.cpu_count() or 4) // 2))
         _model = Wav2Vec2ForCTC.from_pretrained(model_dir()).eval()
-        with open(os.path.join(model_dir(), "vocab.json"), encoding="utf-8") as f:
-            _vocab = json.load(f)
-    return _model, _vocab
+    return _model, vocab()
 
 
 _vocab: dict = {}
+
+
+def vocab() -> dict:
+    """Las letras que conoce el modelo (sin cargar el modelo: cuando escucha la tarjeta no hace falta)."""
+    global _vocab
+    if not _vocab:
+        import json
+        with open(os.path.join(model_dir(), "vocab.json"), encoding="utf-8") as f:
+            _vocab = json.load(f)
+    return _vocab
+
+
+# ------------------------------------------------------------------ ⚡ en la tarjeta (servidor de voz del motor)
+_sin_tarjeta = False                       # (el motor dijo que no hay tarjeta, o falló 2 veces: el resto, procesador)
+_fallos_tarjeta = 0
+
+
+def _tarjeta_ok() -> bool:
+    if _sin_tarjeta or os.environ.get("EDITORIA_TARJETA_MOTOR") == "0":
+        return False
+    try:
+        from PySide6.QtCore import QSettings
+        if str(QSettings("EditorIA", "EditorIA").value("voz/tarjeta_motor", "true")).lower() != "true":
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    from ..core import motor_ia
+    ta = motor_ia.DATOS_MOTOR / ".venv" / "Lib" / "site-packages" / "torchaudio" / "__init__.py"
+    return motor_ia.PYTHON.exists() and ta.exists()
+
+
+def _emisiones_tarjeta(audio: np.ndarray, tramos: list, progress=None, cancelled=None) -> list | None:
+    """log-probabilidades de cada tramo, calculadas en la tarjeta. None = no se pudo (se hace en el procesador)."""
+    global _sin_tarjeta, _fallos_tarjeta
+    if not tramos or not _tarjeta_ok():
+        return None
+    import tempfile
+    import wave
+    from ..core import media as media_tools
+    from ..core import motor_ia
+    from ..core.paths import temp_dir
+    fd, wav = tempfile.mkstemp(prefix="alinear_", suffix=".wav", dir=str(temp_dir()))
+    os.close(fd)
+    npz = wav[:-4] + ".npz"
+    try:
+        with wave.open(wav, "wb") as w:              # (16 kHz mono, por trozos de 60 s)
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            paso = 60 * SR
+            for i in range(0, len(audio), paso):
+                w.writeframes((np.clip(audio[i:i + paso], -1, 1) * 32767).astype("<i2").tobytes())
+        ruta = motor_ia.servidor_voz().pedir(
+            {"cmd": "emisiones", "ffmpeg": media_tools.ffmpeg(), "entrada": wav, "salida": npz,
+             "tramos": [[round(float(a), 3), round(float(b), 3)] for a, b in tramos]},
+            progress, cancelled)
+        with np.load(ruta) as z:
+            out = [z[f"e{i}"] if f"e{i}" in z.files else None for i in range(len(tramos))]
+        _fallos_tarjeta = 0
+        return out
+    except Exception as exc:  # noqa: BLE001 - la tarjeta no pudo: en el procesador
+        if cancelled is not None and cancelled():
+            return [None] * len(tramos)
+        _fallos_tarjeta += 1
+        if isinstance(exc, motor_ia.SinTarjeta) or _fallos_tarjeta >= 2:
+            _sin_tarjeta = True
+        return None
+    finally:
+        for x in (wav, npz):
+            try:
+                os.remove(x)
+            except OSError:
+                pass
+
+
+def emissions_many(audio: np.ndarray, tramos: list, progress=None, cancelled=None, label: str = "") -> list:
+    """log-probabilidades [T, letras] de cada tramo [inicio, fin] (s) del audio (None si es demasiado corto). En la
+    tarjeta si se puede (todos de una vez); si no, en el procesador, uno a uno."""
+    got = _emisiones_tarjeta(audio, tramos, progress, cancelled)
+    if got is not None:
+        return got
+    out = []
+    for i, (a, b) in enumerate(tramos):
+        if cancelled and cancelled():
+            out += [None] * (len(tramos) - i)
+            break
+        if progress:
+            progress(i / max(1, len(tramos)), label or f"🎯 Afinando palabras… {i + 1}/{len(tramos)}")
+        seg = audio[int(float(a) * SR):int(float(b) * SR)]
+        out.append(_emissions(seg) if len(seg) >= SR // 10 else None)
+    return out
 
 
 def _tokens(text: str, vocab: dict) -> list[int]:
@@ -197,30 +287,28 @@ def align_words(path: str, words: list, progress=None, cancelled=None) -> list:
     """Palabras con su inicio y fin afinados. Las que no se pueden alinear (números, símbolos) quedan entre sus
     vecinas, como estaban."""
     from ..core import media as media_tools
-    _m, vocab = _load()
+    vocab_ = vocab()
     audio = media_tools.decode_mono(path, SR).astype(np.float32)
     dur = len(audio) / SR
     # (nada más allá del final del audio: Whisper a veces se pasa un poco en la última palabra)
     out = [[min(float(w[0]), dur), min(float(w[1]), dur)] + list(w[2:]) for w in words]
     wins = _windows(words)
+    tramos = [(max(0.0, float(words[i][0]) - PAD), min(dur, float(words[j - 1][1]) + PAD)) for i, j in wins]
+    ems = emissions_many(audio, tramos, progress, cancelled)
     for wi, (i, j) in enumerate(wins):
         if cancelled and cancelled():
             break
-        if progress:
-            progress(wi / max(1, len(wins)), f"🎯 Afinando palabras… {wi + 1}/{len(wins)}")
-        a = max(0.0, float(words[i][0]) - PAD)
-        b = min(dur, float(words[j - 1][1]) + PAD)
-        seg = audio[int(a * SR):int(b * SR)]
-        if len(seg) < SR // 10:
+        a, _b = tramos[wi]
+        em = ems[wi]
+        if em is None:
             continue
-        em = _emissions(seg)
         toks, owner, pos = [], [], []
         for k in range(i, j):
-            tk = _tokens(words[k][2] if len(words[k]) > 2 else "", vocab)
+            tk = _tokens(words[k][2] if len(words[k]) > 2 else "", vocab_)
             if not tk:
                 continue
             if toks:
-                toks.append(vocab["|"])
+                toks.append(vocab_["|"])
                 owner.append(-1)
             pos.append((k, len(toks), len(toks) + len(tk) - 1))
             toks += tk

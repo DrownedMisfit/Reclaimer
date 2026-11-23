@@ -191,7 +191,9 @@ def rename(folder: str, name: str) -> str | None:
     new = Path(folder).with_name(_clean(name))
     if new.exists():
         return None
-    os.rename(folder, new)
+    from .soltar_archivos import soltando
+    with soltando([folder]):           # (🔓 lo de dentro que esté abierto en el visor o en un análisis, suelto antes)
+        os.rename(folder, new)
     return str(new)
 
 
@@ -219,5 +221,7 @@ def trash(path: str) -> bool:
     if not is_managed(path) or Path(path).resolve() == managed_root().resolve():
         return False
     from PySide6.QtCore import QFile
-    ok = QFile.moveToTrash(path)
+    from .soltar_archivos import soltando
+    with soltando([path]):             # (🔓 suelto antes del visor y de los análisis)
+        ok = QFile.moveToTrash(path)
     return bool(ok[0] if isinstance(ok, tuple) else ok)

@@ -90,15 +90,16 @@ def main():
         tl.grab().save(os.path.join(out, "tira.png"))
         print(f"✓ tira de miniaturas: {pix.width() // int(tile_w)} fotogramas; en la línea de tiempo se ve "
               "rojo → verde → azul a lo largo del clip (no solo el primero)")
-        # El indicador de la IA está en la barra de debajo del visor
+        # El indicador de la IA está en la barra de encima del visor, a la derecha (como dice ui/task_window.py)
         chip = win.preview.task_chip
         chip.show()
         pump(app, 0.2)
         cv = win.preview.canvas
-        assert chip.y() >= cv.y() + cv.height() - 2 and chip.x() > win.preview.width() / 2,             ("debajo de la imagen, a la derecha", chip.geometry(), cv.geometry())
+        assert chip.y() + chip.height() <= cv.y() + 2 and chip.x() > win.preview.width() / 2, \
+            ("encima de la imagen, a la derecha", chip.geometry(), cv.geometry())
         win.grab().save(os.path.join(out, "indicador.png"))
         chip.hide()
-        print("✓ el indicador de la IA está en la barra de debajo de la imagen")
+        print("✓ el indicador de la IA está en la barra de encima de la imagen, a la derecha")
         ctrl.undo_stack.setClean()
         ctrl._media_dirty = False
         win.close()

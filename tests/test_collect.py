@@ -116,6 +116,8 @@ def run(app, out):
 
     # 1) «Solo lo que se usa» desde la ventana
     dest = os.path.join(out, "copias")
+    for vieja in (dest, os.path.join(out, "movida")):     # (lo de una pasada anterior: la copia se movía DENTRO)
+        shutil.rmtree(vieja, True)
     dlg = CollectDialog(win)
     dlg.dest.setText(dest)
     dlg.r_trim.setChecked(True)

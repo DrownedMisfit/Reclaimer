@@ -127,16 +127,18 @@ def analyze_clip(path: str, kind: str, duration: float, progress: ProgressFn = N
                  cancelled: CancelFn = None) -> dict:
     """Analiza un clip (o imagen). Devuelve {"times", "vecs", "type", "tags", ...}."""
     cached = load_cached(path)
+    if cached is None and kind == "video":
+        from . import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ai/lectura_unica.py)
+        if lectura_unica.usar(path, duration, "clip"):
+            lectura_unica.asegurar_o_seguir(path, duration, ["clip", "pistas"], cancelled, None)
+            cached = load_cached(path)
     if cached is not None:
         times, vecs, lb = cached
     else:
         times = [0.0] if kind == "image" else sample_times(duration)
         check_cancel(cancelled)
         frames = media_tools.sample_frames(path, times)
-        times = np.array(times[:len(frames)], np.float32)
-        vecs = embeddings.get("clip_image", progress).encode(frames)
-        lb = letterbox_ratio(frames) if len(frames) >= 2 else 0.0
-        np.savez_compressed(_cache_path(path), times=times, vecs=vecs.astype(np.float16), letterbox=lb)
+        times, vecs, lb = save_frames(path, times, frames, embeddings.get("clip_image", progress))
     result = classify(vecs, lb)
     if kind == "video":       # pistas sencillas (HUD fijo, barras negras, arma abajo…): mandan si son claras
         cu = simple_cues(path, duration)
@@ -149,10 +151,31 @@ def analyze_clip(path: str, kind: str, duration: float, progress: ProgressFn = N
     return result
 
 
+def save_frames(path: str, times: list[float], frames: np.ndarray, enc) -> tuple[np.ndarray, np.ndarray, float]:
+    """Huellas y bandas negras de los fotogramas de un clip, guardadas en caché (también desde la lectura única)."""
+    times = np.array(times[:len(frames)], np.float32)
+    vecs = enc.encode(frames)
+    lb = letterbox_ratio(frames) if len(frames) >= 2 else 0.0
+    np.savez_compressed(_cache_path(path), times=times, vecs=vecs.astype(np.float16), letterbox=lb)
+    return times, vecs, lb
+
+
+def _cues_path(path: str):
+    return cache_dir("pistas") / f"{media_tools.cache_key(path)}.json"
+
+
+def save_cues(path: str, cu: dict):
+    import json
+    try:
+        _cues_path(path).write_text(json.dumps(cu, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def simple_cues(path: str, duration: float) -> dict:
     """¿Gameplay o cinemática? ¿Primera o tercera persona? (ver ai/shot_cues.py; se guarda en caché)."""
     import json
-    cp = cache_dir("pistas") / f"{media_tools.cache_key(path)}.json"
+    cp = _cues_path(path)
     try:
         return json.loads(cp.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -162,10 +185,7 @@ def simple_cues(path: str, duration: float) -> dict:
         cu = shot_cues.cues(path, sample_times(duration))
     except Exception:  # noqa: BLE001 - una pista que falla no debe parar el análisis
         return {}
-    try:
-        cp.write_text(json.dumps(cu, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass
+    save_cues(path, cu)
     return cu
 
 

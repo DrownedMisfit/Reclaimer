@@ -140,6 +140,21 @@ class ExportDialog(QDialog):
             self.only_marked.setToolTip("Marca un tramo en la línea de tiempo con I (entrada) y O (salida).")
         form2 = QFormLayout()
         form2.addRow("Subtítulos", self.subs)
+        from ..core import chapters as _CH                  # 📍 capítulos dentro del MP4
+        hay_cap = len(_CH.candidates(p)) >= 1
+        n_cap = _CH.validos(p, p.duration())
+        self.capitulos = QCheckBox("Capítulos dentro del video")
+        self.capitulos.setChecked(n_cap >= 3 and str(QSettings("EditorIA", "EditorIA").value(
+            "export/capitulos", "true")).lower() == "true")      # (YouTube pide 3 o más: si no, viene apagada)
+        self.capitulos.setEnabled(hay_cap)
+        self.capitulos.setToolTip(
+            "Mete en el MP4 los capítulos de tus marcadores con nombre (o, si no hay, los temas de la narración), con "
+            "las reglas de YouTube: el primero en 0:00 y cada uno de 10 s o más. Los reproductores los enseñan en la "
+            "barra de tiempo." if hay_cap else
+            "No hay capítulos: pon marcadores con nombre (M en la línea de tiempo) o analiza los temas de la narración.")
+        self.capitulos.toggled.connect(lambda on: QSettings("EditorIA", "EditorIA").setValue(
+            "export/capitulos", "true" if on else "false"))
+        form2.addRow("Capítulos", self.capitulos)
         form2.addRow("Tramo", self.only_marked)
         self.max_q = QCheckBox("Máxima calidad (tarda casi el doble; a esta calidad casi no se nota)")
         self.max_q.setToolTip("La tarjeta gráfica analiza cada fotograma antes de comprimirlo. Para YouTube y TikTok "
@@ -156,6 +171,18 @@ class ExportDialog(QDialog):
         self.low_prio.toggled.connect(lambda on: QSettings("EditorIA", "EditorIA").setValue(
             "exportar/prioridad_baja", "true" if on else "false"))
         form2.addRow("Mientras exporta", self.low_prio)
+        # 📝 La descripción para YouTube junto al video, SOLO si se pide (el usuario: «al terminar un video sí o sí me
+        # crea un documento y no quiero que haga eso»): apagada de entrada y recordada
+        self.desc_txt = QCheckBox("📝 Crear también la descripción (.txt)")
+        self.desc_txt.setToolTip("Al terminar, guarda junto al video «<nombre>.descripcion.txt» con la descripción "
+                                 "para YouTube: párrafo inicial, capítulos, créditos de los clips bajados, tu pie fijo "
+                                 "y hashtags (se prepara en Archivo → «📝 Descripción para YouTube»). Apagada: solo se "
+                                 "crea el video.")
+        self.desc_txt.setChecked(str(QSettings("EditorIA", "EditorIA").value("exportar/crear_descripcion", "false"))
+                                 .lower() == "true")
+        self.desc_txt.toggled.connect(lambda on: QSettings("EditorIA", "EditorIA").setValue(
+            "exportar/crear_descripcion", "true" if on else "false"))
+        form2.addRow("Descripción", self.desc_txt)
         form2.addRow("Guardar en", out_row)
 
         self.progress = QProgressBar()
@@ -365,7 +392,8 @@ class ExportDialog(QDialog):
                              codec=self.codec.currentData(), encoder=self.encoder.currentData(),
                              bitrate_mbps=self.bitrate.value(), subtitles=self.subs.isChecked(),
                              target=self.target, max_quality=self.max_q.isChecked(),
-                             low_priority=self.low_prio.isChecked())
+                             low_priority=self.low_prio.isChecked(),
+                             chapters=self.capitulos.isChecked() and self.capitulos.isEnabled())
 
     def _enqueue(self):
         win = self.parent()
@@ -489,8 +517,8 @@ class ExportDialog(QDialog):
                 from ..core import description as DS
                 from .description_dialog import prefs
                 pr = getattr(self, "_proyecto", None) or self.ctrl.project     # (el que se exportó)
-                par, pie = prefs(pr, self.ctrl.path)
-                texto = DS.default_text(pr, par, pie)
+                # (solo con «📝 Crear también la descripción (.txt)»: si no, al exportar solo sale el video)
+                texto = DS.default_text(pr, *prefs(pr, self.ctrl.path)) if self.desc_txt.isChecked() else ""
                 if texto.strip():
                     ruta = os.path.splitext(self._opts.path)[0] + ".descripcion.txt"
                     with open(ruta, "w", encoding="utf-8") as f:

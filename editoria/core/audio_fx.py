@@ -19,6 +19,19 @@ VOICE_FX = {
                                                    "release=150:makeup=3"),
 }
 FX_ORDER = ["denoise", "eq", "deess", "compress"]
+# (22/11) los proyectos nuevos empiezan SIN ecualizador ni compresor (como Resolve: nada procesa sin pedirlo; el volumen
+# final ya lo iguala el loudnorm de la exportación): una voz que ya viene procesada (OBS con EQ y compresor) se
+# procesaba dos veces. Para qué sirve cada uno, en el tooltip de su casilla:
+AYUDA_FX = {
+    "denoise": "Para una voz grabada con ruido de fondo (ventilador, zumbido). Si ya la limpiaste al grabar, déjalo "
+               "apagado.",
+    "eq": "Para una voz grabada SIN procesar: quita graves sucios y la hace más clara. Si tu voz ya viene ecualizada "
+          "(p. ej. de OBS con ReaEQ), déjalo apagado: se procesaría dos veces.",
+    "deess": "Para una voz grabada sin procesar con «s» muy fuertes: las suaviza.",
+    "compress": "Para una voz grabada SIN procesar: iguala lo fuerte y lo flojo. Si tu voz ya viene comprimida (p. ej. "
+                "de OBS), déjalo apagado: quedaría aplastada y más alta. El volumen final ya lo iguala la "
+                "exportación.",
+}
 
 LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
 

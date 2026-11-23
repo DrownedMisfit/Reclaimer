@@ -140,6 +140,11 @@ def main():
     print("✓ Montaje guiado oculto: su temporizador está parado")
     # con Clips oculto y un cambio pendiente, al mostrar la guía se recalcula (lo que pide su paso 4)
     ocultar("clips")
+    # (🔑 en su página, la búsqueda va en su propio panel; desde el 22/11 «Dijiste…» vive en el panel propio
+    #  «Palabras clave» de la derecha, que en YouTube está abierto: se oculta también)
+    for k in ("kw_buscar", "kw_folders", "palabras"):
+        ocultar(k)
+    assert not clips.isVisible(), "Clips (Dijiste…) debería quedar oculto"
     clips._firma_ultima = None        # firma desconocida: así se prueba la búsqueda pendiente (sin cambios reales)
     ctrl.project_changed.emit()
     pump(app, 0.1)

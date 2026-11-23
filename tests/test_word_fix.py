@@ -115,6 +115,8 @@ def test_panel():
     p.media["voz"] = MediaItem("voz", NARRATION, "audio", "narracion_prueba.wav", duration=28.7, probed=True)
     p.transcripts["voz"] = tr
     tp = win.transcript
+    win.go_page("transcripcion")                      # (20–22/11: «Voz y texto» → 2 · Transcripción; oculto no se dibuja)
+    pump(app, 0.3)
     tp._set_view(0)                                   # la vista «Transcripción»
     tp.set_media("voz")
     pump(app, 0.3)
@@ -139,6 +141,7 @@ def test_panel():
         print("✓ clic derecho en «combate»: volver a escuchar, escribir, en todo el texto (2), tener en cuenta")
         # elegir una alternativa (conserva los signos y se recuerda)
         tp._replace_word(i, "embate")
+        words = p.transcripts["voz"]["words"]
         assert words[i][2] == "embate" and WF.learned("combate") == ["embate"]
         tp._context_menu(pos)
         assert any(a.startswith("embate") for a in shown[-1]) is False   # (ya no pone «combate»: la palabra es otra)
@@ -153,6 +156,7 @@ def test_panel():
             tp._edit_all(i)
         finally:
             QInputDialog.getText = orig_get
+        words = p.transcripts["voz"]["words"]         # (cada corrección deja una lista nueva: Ctrl+Z la devuelve)
         assert sum(1 for w in words if WF.core(w[2]) == "pelea") == 2 and not any(w[2] == "combate" for w in words)
         print("✓ «Cambiar en todo el texto»: las 2 «combate» → «pelea»")
         # lo que llega al volver a escuchar: un menú con lo que se oye

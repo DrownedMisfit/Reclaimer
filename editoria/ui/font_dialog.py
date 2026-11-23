@@ -24,9 +24,7 @@ class FontSizeDialog(QDialog):
         self.st = QSettings("EditorIA", "EditorIA")
         self._orig = {k: int(self.st.value(v, 100)) for k, v in KEYS.items()}
         lay = QVBoxLayout(self)
-        info = QLabel("Haz las letras más grandes (o más pequeñas). Los cambios se ven al momento.")
-        info.setWordWrap(True)
-        lay.addWidget(info)
+        self.setToolTip("Haz las letras más grandes (o más pequeñas). Los cambios se ven al momento.")   # (20/11)
         self.setMinimumWidth(460)
         form = QVBoxLayout()
         self.sliders: dict[str, QSlider] = {}

@@ -59,8 +59,8 @@ def main():
     assert win.workspaces.switch("edit")
     pump(app, 0.2)
     assert abierto("edit_opts") and abierto("edit_clips"), "en Edits, el edit musical a la vista"
-    assert abierto("clips"), "en Edits también 🔑 Palabras clave"
-    assert not abierto("transcript") and not abierto("subtitles") and not abierto("voice")
+    assert not abierto("clips"), "🔑 Palabras clave vive dentro de «Voz y texto»: nunca suelto"
+    assert not abierto("voz_texto") and not abierto("audio"), "en Edits, sin «Voz y texto» ni «Audio»"
     from PySide6.QtWidgets import QDialog
     abiertos = []
     orig = QDialog.exec
@@ -77,22 +77,22 @@ def main():
 
     assert win.workspaces.switch("youtube")
     pump(app, 0.2)
-    assert abierto("material") and abierto("clips")
-    assert not abierto("transcript") and not abierto("subtitles") and not abierto("edit_opts")
-    print("✓ YouTube: 🔑 Palabras clave y 🎞 Material del clip; sin Texto ni Subtítulos")
+    assert abierto("audio") and not abierto("voz_texto") and not abierto("edit_opts")   # (agrupación 20/11)
+    assert not abierto("material") and not abierto("clips"), "Material y Palabras clave nunca sueltos"
+    print("✓ YouTube: «Audio» a la vista; «Voz y texto» a un clic; sin el edit musical")
 
     assert win.workspaces.switch("short")
     pump(app, 0.2)
-    assert abierto("transcript") and abierto("subtitles") and not abierto("edit_opts")
-    print("✓ Shorts: Texto y Subtítulos a la vista")
+    assert abierto("voz_texto") and abierto("audio") and not abierto("edit_opts")
+    print("✓ Shorts: «Voz y texto» (transcripción y subtítulos) y «Audio» a la vista")
 
     assert win.workspaces.switch("youtube")
-    win.docks["subtitles"].toggleViewAction().trigger()      # tú lo enciendes en YouTube
-    assert abierto("subtitles")
+    win.docks["voz_texto"].toggleViewAction().trigger()      # tú lo enciendes en YouTube
+    assert abierto("voz_texto")
     win.workspaces.switch("short")
     win.workspaces.switch("youtube")
     pump(app, 0.2)
-    assert abierto("subtitles"), "lo que enciendes tú en una pestaña se recuerda"
+    assert abierto("voz_texto"), "lo que enciendes tú en una pestaña se recuerda"
     print("✓ lo que enciendas tú en una pestaña (Ventana) se recuerda en esa pestaña")
 
     # 🎞 Material del clip: enseña el clip elegido
@@ -106,7 +106,7 @@ def main():
     win.timeline.set_selection(["c"])
     pump(app, 0.2)
     txt = win.material.info.text()
-    assert "Gameplay.mp4" in win.material.title.text() and "La IA ve: Gameplay · combate" in txt and "00:10" in txt, txt
+    assert "Gameplay.mp4" in win.material.title.text() and "La IA ve" in txt and "Gameplay · combate" in txt and "00:10" in txt, txt
     mt = win.material
     assert not mt.b_similar.isHidden() and not mt.b_tags.isHidden()
     win.engine.seek(0.0)
@@ -139,7 +139,7 @@ def main():
     assert mt.title.text().startswith("▶ En el cabezal"), "una selección sin clic no cambia el panel"
     lib.tree.itemClicked.emit(found, 0)                   # (tu clic)
     pump(app, 0.2)
-    assert mt.title.text().startswith("📂 En Medios: Gameplay.mp4"), mt.title.text()
+    assert mt.title.text().startswith("En Medios: Gameplay.mp4"), mt.title.text()
     assert mt.b_media.isHidden() and mt.b_similar.isHidden() and not mt.b_tags.isHidden()
     print("✓ lo que seleccionas en Medios sale aquí (solo con los botones que sirven)")
 

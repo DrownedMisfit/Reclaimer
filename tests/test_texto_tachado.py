@@ -11,6 +11,24 @@ import os
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -173,7 +191,7 @@ def test_controller_and_ui():
     s0 = struck_words()
     assert "bastante" in s0 and "Eh," in s0, s0
     assert "demasiado" not in s0 and "este," not in s0, s0     # «este» es solo una posible muletilla
-    assert "✂ Cortar (" in panel.btn_cut.text(), panel.btn_cut.text()
+    assert "Cortar (" in panel.btn_cut.text(), panel.btn_cut.text()
     print("✓ texto: lo que se quitará sale tachado en rojo:", " ".join(s0), "·", panel.btn_cut.text())
 
     words = tr["words"]

@@ -69,7 +69,7 @@ def prueba_nucleo():
     m = A.plan_fase("salida", "muere", caja, 1.0)
     assert m["op_kf"][-1]["v"] == 0.0 and m["fx"]["shake"] > 0
     esc = S.nueva(15, 19)
-    assert esc["fondo"] == "blur" and S.largo(esc) == 4.0
+    assert esc["fondo"] == S.FONDO_POR_DEFECTO == "nada" and S.largo(esc) == 4.0     # («Sin fondo» por defecto)
     a1 = S.nuevo_actor(esc, "mc")
     a2 = S.nuevo_actor(esc, "elite")
     assert a1["caja"]["x"] < 0.5 < a2["caja"]["x"] + a2["caja"]["w"], "uno a la izquierda y otro a la derecha"
@@ -139,6 +139,7 @@ def prueba_controlador(app):
     ctrl, fid, mc, el, snd = proyecto(app)
     p = ctrl.project
     esc = S.nueva(2.0, 6.0, "Tiroteo")
+    esc["fondo"] = "blur"                              # (lo nuevo sale «Sin fondo»: aquí se prueba el desenfocado)
     montar(esc, mc, el, snd)
     ids = ctrl.apply_scene(esc)
     assert ids, "no se aplicó"
@@ -239,7 +240,7 @@ def prueba_pagina(app):
     p.mark_in, p.mark_out = 1.0, 5.0                    # el tramo marcado con I/O
     win = _Ventana(ctrl)
     pg = ScenesPage(win, None)
-    assert (pg.escena["a"], pg.escena["b"]) == (1.0, 5.0) and pg.escena["fondo"] == "blur"
+    assert (pg.escena["a"], pg.escena["b"]) == (1.0, 5.0) and pg.escena["fondo"] == "nada"
     assert pg.lista_img.count() == 2 and pg.lista_img.item(0).text().startswith("✓"), "recortes marcados con ✓"
     t0 = time.time()                                  # el fondo: el fotograma del tramo, renderizado aparte
     while getattr(pg, "_fondo_pix", None) is None and time.time() - t0 < 30:

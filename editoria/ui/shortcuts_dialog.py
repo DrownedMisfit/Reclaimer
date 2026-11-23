@@ -50,12 +50,12 @@ class ShortcutsDialog(QDialog):
         self.resize(640, 680)
         help_ui.set_help(self, "atajos")
         lay = QVBoxLayout(self)
-        tip = QLabel("Clic en el atajo de una orden y pulsa la combinación nueva (p. ej. Ctrl+X). Se guarda al "
-                     "momento y se mantiene cada vez que abres Reclaimer.")
-        tip.setWordWrap(True)
-        lay.addWidget(tip)
+        # (20/11, auditoría: la explicación, al tooltip del buscador y de la lista; sin párrafo a la vista)
+        _ayuda_atajos = ("Clic en el atajo de una orden y pulsa la combinación nueva (p. ej. Ctrl+X). Se guarda al "
+                         "momento y se mantiene cada vez que abres Reclaimer.")
         self.search = QLineEdit()
         self.search.setPlaceholderText("Buscar orden o atajo…")
+        self.search.setToolTip(_ayuda_atajos)
         self.search.textChanged.connect(self._filter)
         lay.addWidget(self.search)
         self.tree = QTreeWidget()
@@ -82,9 +82,8 @@ class ShortcutsDialog(QDialog):
             ed.setMaximumSequenceLength(1) if hasattr(ed, "setMaximumSequenceLength") else None
             ed.editingFinished.connect(lambda k=key: self._changed(k))
             self.tree.setItemWidget(it, 1, ed)
-            b = QPushButton("↺")
-            b.setToolTip("Volver al atajo de fábrica")
-            b.setFixedWidth(30)
+            from . import diseno as D              # (🎨 botón de icono del diseño: nunca cortado)
+            b = D.BotonIcono("rotate-ccw", "Volver al atajo de fábrica")
             b.clicked.connect(lambda _=False, k=key: self._reset(k))
             self.tree.setItemWidget(it, 2, b)
             self.editors[key] = ed

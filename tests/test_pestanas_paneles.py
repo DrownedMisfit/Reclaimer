@@ -44,11 +44,17 @@ def main():
     win.reset_layout()
     pump(app, 0.3)
     from PySide6.QtCore import Qt
+    # (22/11: «Voz y texto» pasó a la izquierda y a la derecha quedan pocas pestañas, que ya caben con su nombre: para
+    #  probar el caso «no caben» se juntan más paneles con el Inspector, como si los arrastraras ahí)
+    for k in ("history", "voz_texto", "descargas_web", "memes", "sounds", "effects"):
+        win.tabifyDockWidget(win.docks["inspector"], win.docks[k])
+        win.docks[k].show()
+    win.docks["inspector"].raise_()
     win.resizeDocks([win.docks["inspector"]], [440], Qt.Horizontal)   # (el ancho del panel derecho en pantalla)
     pump(app, 2.0)                                   # (incluye el repaso periódico de las pestañas)
     try:
-        # (sin ventana la pantalla virtual es pequeña: el panel derecho mide ~120 px, así que deben quedar los iconos)
-        for k in ("inspector", "voice", "history"):
+        # (sin ventana la pantalla virtual es pequeña y con tantas pestañas no caben los nombres: quedan los iconos)
+        for k in ("inspector", "voz_texto", "history"):
             d = win.docks[k]
             assert d.windowTitle() == win.ICONO_PANEL[k], (k, d.windowTitle())
             assert d.toggleViewAction().text() == d.nombre, "el menú «Ventana» sigue con el nombre completo"
@@ -68,7 +74,9 @@ def main():
         win.addDockWidget(_Qt.TopDockWidgetArea, win.docks["scopes"])
         win.docks["scopes"].show()
         pump(app, 1.8)
-        assert win.docks["scopes"].windowTitle() == win.docks["scopes"].nombre, win.docks["scopes"].windowTitle()
+        # (su nombre sin el emoji de color, como en las pestañas e interruptores: «📊 Gráficas» → «Gráficas»)
+        assert win.docks["scopes"].windowTitle() == win._nombre_limpio(win.docks["scopes"]) == "Gráficas", \
+            win.docks["scopes"].windowTitle()
         print("✓ un panel suelto o solo en su zona recupera su nombre")
         win.grab().save(os.path.join(out, "pestanas.png"))
         win._llenar_menu_paneles()

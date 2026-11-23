@@ -103,8 +103,9 @@ def main():
     auds = [t for t in p.tracks if t.kind == TRACK_AUDIO]
     assert [t.name for t in vids] == ["V1"] and [t.name for t in auds] == ["A1"], [t.name for t in p.tracks]
     assert len(p.tracks) == 2
-    assert auds[0].fx.get("eq") and auds[0].fx.get("compress"), auds[0].fx
-    print("✓ ctrl.new_project(): exactamente 1 pista de video («V1») y 1 de audio («A1», con mejora de voz)")
+    # (22/11: nada procesa sin pedirlo: «A1» nace SIN ecualizador ni compresor; se ponen a mano en Mezcla y música)
+    assert not (auds[0].fx or {}).get("eq") and not (auds[0].fx or {}).get("compress"), auds[0].fx
+    print("✓ ctrl.new_project(): exactamente 1 pista de video («V1») y 1 de audio («A1», sin procesar)")
 
     vid_path = video_prueba()
     img_path = imagen_prueba()

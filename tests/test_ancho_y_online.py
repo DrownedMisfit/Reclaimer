@@ -56,16 +56,42 @@ def main():
     assert minimo <= max(pant - 16, 1200), (minimo, pant)
     print(f"✓ con paneles en columnas la ventana pide {minimo} px (pantalla {pant} px): no se corta la derecha")
     pv = win.preview
-    largo = pv.quick["silence"].property("texto_completo") or pv.quick["silence"].text()
     pv._ajustar_cabecera(420)
-    assert pv.quick["silence"].text() == "✂" and largo in pv.quick["silence"].toolTip(), pv.quick["silence"].text()
     assert not pv.lbl_calidad.isVisibleTo(pv.header)
     pv._ajustando_cab = True                     # (sin que la cabecera se recalcule con su ancho real, estrecho aquí)
     pv._ajustar_cabecera(1900)
-    assert pv.quick["silence"].text() == largo and pv.lbl_calidad.isVisibleTo(pv.header)
+    assert pv.lbl_calidad.isVisibleTo(pv.header)
     pv._ajustando_cab = False
     assert pv.header.minimumSizeHint().width() < 700, pv.header.minimumSizeHint().width()
-    print("✓ cabecera del visor: solo iconos cuando no cabe (el nombre en el tooltip) y vuelve al ensancharse")
+    print("✓ cabecera del visor: lo que no cabe se esconde y vuelve al ensancharse")
+    # (21/11: «Silencios» y «Huecos» viven en la barra del transporte —preview._ajustar_rapidos—: con nombre si caben;
+    #  si no, solo su icono con el nombre en el tooltip; y si ni así, bajan a una segunda fila con su nombre. Nunca
+    #  se esconden ni se cortan)
+    sil = pv.quick["silence"]
+    largo = sil.property("nombre_corto") or "Silencios"
+    vistos = set()
+    # (sin pantalla el visor mide de verdad ~400 px: al pasar de dos filas a una, la barra cambia de alto y su Resize
+    #  volvía a decidir con ese ancho real; mientras se prueba cada ancho, ese aviso no se escucha)
+    pv.transport.removeEventFilter(pv)
+    for ancho in (1900, 700, 420, 1900):
+        pv._rapidos_cortos = None                # (decide otra vez, sin el margen que evita el vaivén)
+        pv._ajustar_rapidos(ancho)
+        app.processEvents()
+        assert sil.isVisibleTo(pv.transport), ("Silencios se esconde", ancho)
+        if sil.text() == "":
+            assert largo in sil.toolTip() and not sil.icon().isNull(), ("solo icono sin su nombre en el tooltip",
+                                                                         ancho, sil.toolTip())
+            vistos.add("icono")
+        else:
+            assert sil.text() == largo, (ancho, sil.text())
+            vistos.add("dos filas" if pv._dos_filas else "nombre")
+    assert sil.text() == largo and not pv._dos_filas, (
+        "a 1900 px, en una fila y con su nombre", sil.text(), pv._dos_filas, vistos,
+        pv.transport_row.sizeHint().width(), pv.btn_mode.sizeHint().width(), pv.duration_label.sizeHint().width(),
+        pv.task_chip.isVisibleTo(pv.transport) and pv.task_chip.sizeHint().width())
+    assert vistos - {"nombre"}, ("a 420 px o 700 px se compacta (icono o segunda fila)", vistos)
+    pv.transport.installEventFilter(pv)
+    print(f"✓ «Silencios» en el transporte: {', '.join(sorted(vistos))}; nunca escondido ni cortado")
 
     # 2) material de internet a la vista en IA
     from editoria.ui import clips_panel
@@ -80,7 +106,7 @@ def main():
         assert ai.buscar_online("perro corriendo en la playa")
         app.processEvents()
         assert win.clips.pestanas.currentIndex() == 1 and buscado == ["perro corriendo en la playa"]
-        assert win.docks["clips"].isVisible()
+        assert win.clips.isVisible(), "🔑 (Dijiste… · 🌐 Internet) a la vista, en su panel «Palabras clave»"
         print("✓ 🌐 IA → Inicio: busca videos en internet y abre 🔑 → 🌐 Internet con los resultados")
     win.ctrl.undo_stack.setClean()
     win.ctrl._media_dirty = False

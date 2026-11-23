@@ -153,14 +153,17 @@ def main():
     d._reset(clave)
     print("✓ ⌨ los atajos se exportan a un archivo y se importan (las órdenes que no existen se saltan)")
 
-    acts = [a.text() for a in win.btn_scenes.menu().actions() if a.text()]
+    # (20/11: «Escenas» de la barra vive en «⋯ Más → ✂ Cambios de plano»; el botón queda oculto y sin menú)
+    cambios = win.menu_cambios_plano
+    assert cambios in [a.menu() for a in win.btn_more.menu().actions() if a.menu()], "en «⋯ Más»"
+    acts = [a.text() for a in cambios.actions() if a.text()]
     assert len(acts) == 3 and any("marcador" in a for a in acts), acts
     pedidos = []
     win.cut_scenes = lambda ids, sens="normal", markers=False: pedidos.append((ids, sens, markers))
     win.timeline.set_selection(["c"])
-    next(a for a in win.btn_scenes.menu().actions() if "marcador" in a.text()).trigger()
+    next(a for a in cambios.actions() if "marcador" in a.text()).trigger()
     assert pedidos == [(["c"], "normal", True)], pedidos
-    print("✓ 🎬 Escenas en la barra: cortar, cortar también lo suave o solo un marcador en cada cambio")
+    print("✓ ✂ Cambios de plano (⋯ Más): cortar, cortar también lo suave o solo un marcador en cada cambio")
     win.ctrl.undo_stack.setClean()
     win.close()
     print("TODO BIEN")

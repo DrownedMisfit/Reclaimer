@@ -97,8 +97,9 @@ def run(app, out):
     v1 = [t for t in p.tracks if t.kind == TRACK_VIDEO][-1]
     ctrl.add_media([mid], v1.id, 0.0)
     ctrl.save(os.path.join(out, "Mi critica.eia"))             # tomas y fotogramas, junto al proyecto (carpeta de prueba)
-    for t, name in ((0.0, "Intro"), (15.0, "Marcador 2"), (30.0, "Veredicto")):
+    for t, name in ((0.0, "Intro"), (15.0, "Parte 2"), (30.0, "Veredicto")):
         ctrl.add_marker(t, name)
+    ctrl.add_marker(25.0, "Marcador 4")                      # (sin nombre propio: no es un capítulo, 22/11)
     ctrl.add_markers([20.0], "Corte de escena")               # los que pone Reclaimer solo no cuentan
     from editoria.ui.chapters_dialog import ChaptersDialog
     dlg = ChaptersDialog(win)

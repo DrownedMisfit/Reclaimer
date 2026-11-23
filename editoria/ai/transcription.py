@@ -32,6 +32,8 @@ FILLER_PROMPT = "Eh... mmm, bueno, este, o sea, pues eso."
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 _loaded: dict[str, object] = {}
+import threading as _threading
+_load_lock = _threading.Lock()
 
 
 def is_available() -> tuple[bool, str]:
@@ -57,15 +59,41 @@ def is_downloaded(model_key: str) -> bool:
 
 
 def _load(name: str):
-    if name not in _loaded:
-        from faster_whisper import WhisperModel
-        threads = max(1, (os.cpu_count() or 4) // 2)
-        _loaded.clear()  # solo un modelo en memoria a la vez
-        from ..core.hw import whisper_device
-        device, ctype = whisper_device()        # NVIDIA lista → la tarjeta; si no, procesador (int8)
-        _loaded[name] = WhisperModel(name, device=device, compute_type=ctype,
-                                     cpu_threads=threads, download_root=str(models_dir()))
-    return _loaded[name]
+    with _load_lock:                            # (la precarga y la transcripción nunca lo cargan dos veces a la vez)
+        if name not in _loaded:
+            from faster_whisper import WhisperModel
+            threads = max(1, (os.cpu_count() or 4) // 2)   # (= núcleos físicos con hyperthreading)
+            _loaded.clear()  # solo un modelo en memoria a la vez
+            from ..core.hw import whisper_device
+            device, ctype = whisper_device()        # NVIDIA lista → la tarjeta; si no, procesador (int8)
+            _loaded[name] = WhisperModel(name, device=device, compute_type=ctype,
+                                         cpu_threads=threads, download_root=str(models_dir()))
+        return _loaded[name]
+
+
+def precargar(model_key: str) -> None:
+    """⚡ Al abrir el panel de transcribir (o cambiar de modelo): el modelo se va cargando en segundo plano, así al
+    pulsar «Transcribir» ya está listo (en la tarjeta: ~10–17 s menos de espera). No hace nada si no está descargado
+    (eso lo pide el usuario al transcribir) o si ya está cargado. Nunca lanza errores."""
+    if model_key not in MODELS:
+        return
+    name = MODELS[model_key][0]
+
+    def trabajo():
+        try:
+            if _usar_tarjeta_motor(name):
+                from ..core import motor_ia
+                destino = motor_ia.MODELS / "whisper"
+                fichero = "large-v3-turbo.pt" if name == "large-v3-turbo" else f"{name}.pt"
+                if (destino / fichero).exists():
+                    motor_ia.servidor_voz().cargar(_MOTOR_NAMES[name])
+            elif is_downloaded(model_key):
+                from ..core.hw import equipo
+                if not equipo()["modesto"]:          # (PC modesto: la memoria no se ocupa hasta que se use)
+                    _load(name)
+        except Exception:  # noqa: BLE001 - precargar es un extra: si falla, se carga al transcribir
+            pass
+    _threading.Thread(target=trabajo, daemon=True, name="precargar_voz").start()
 
 
 BLOCK = 180.0           # 📝 cada 3 min de audio transcrito se entrega lo hecho (se puede usar sin esperar al final)
@@ -200,22 +228,16 @@ def _usar_tarjeta_motor(name: str) -> bool:
     return whisper_device()[0] == "cpu" and motor_ia.whisper_ok()
 
 
-def _transcribe_motor(samples, name, language, progress, cancelled, fillers, partial, block, start_at, prev) -> dict:
-    import json as _json
+def _wav_temporal(samples: np.ndarray) -> str:
+    """El audio (16 kHz mono) en un wav temporal para el motor de IA (por trozos de 60 s: poca memoria)."""
     import os as _os
     import tempfile as _tmp
     import wave
-    from ..core import media as media_tools
-    from ..core import motor_ia
     from ..core.paths import temp_dir
-    from .word_fix import hotwords
-    total = max(len(samples) / SAMPLE_RATE, 0.001)
-    start_at = min(max(0.0, float(start_at or 0.0)), total)
     fd, wav = _tmp.mkstemp(prefix="voz_", suffix=".wav", dir=str(temp_dir()))
     _os.close(fd)
-    salida = wav[:-4] + ".json"
     try:
-        with wave.open(wav, "wb") as w:              # (el audio ya está a 16 kHz: se pasa tal cual, por trozos de 60 s)
+        with wave.open(wav, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(SAMPLE_RATE)
@@ -225,6 +247,52 @@ def _transcribe_motor(samples, name, language, progress, cancelled, fillers, par
     except BaseException:
         _borrar(wav)
         raise
+    return wav
+
+
+def oir_tramos_tarjeta(samples: np.ndarray, tramos: list, model_key: str, language: str = "es",
+                       prompt: str | None = None, beam: int | None = None, cancelled: CancelFn = None) -> list | None:
+    """⚡ Volver a escuchar trozos sueltos [[inicio, fin], …] en la tarjeta (servidor de voz, modelo ya cargado).
+    Devuelve, por trozo, sus palabras [[inicio, fin, texto, confianza], …] con tiempos del audio entero, o None si
+    la tarjeta no se puede usar (quien llama lo hace con el procesador). Cancelar lanza Cancelled."""
+    name = MODELS[model_key][0] if model_key in MODELS else model_key
+    if not tramos or not _usar_tarjeta_motor(name):
+        return None
+    import json as _json
+    from ..core import media as media_tools
+    from ..core import motor_ia
+    wav = _wav_temporal(samples)
+    salida = wav[:-4] + ".json"
+    try:
+        orden = {"cmd": "rellenar", "ffmpeg": media_tools.ffmpeg(), "entrada": wav, "salida": salida,
+                 "tramos": [[round(float(a), 3), round(float(b), 3)] for a, b in tramos], "idioma": language or "",
+                 "modelo": _MOTOR_NAMES[name]}
+        if prompt:
+            orden["prompt"] = prompt
+        if beam:
+            orden["beam"] = int(beam)
+        ruta = motor_ia.servidor_voz().pedir(orden, None, cancelled)
+        with open(ruta, encoding="utf-8") as f:
+            por_tramo = _json.load(f).get("por_tramo") or []
+        return por_tramo if len(por_tramo) == len(tramos) else None
+    except Exception as exc:  # noqa: BLE001
+        if cancelled is not None and cancelled():
+            raise Cancelled() from exc
+        return None
+    finally:
+        for x in (wav, salida):
+            _borrar(x)
+
+
+def _transcribe_motor(samples, name, language, progress, cancelled, fillers, partial, block, start_at, prev) -> dict:
+    import json as _json
+    from ..core import media as media_tools
+    from ..core import motor_ia
+    from .word_fix import hotwords
+    total = max(len(samples) / SAMPLE_RATE, 0.001)
+    start_at = min(max(0.0, float(start_at or 0.0)), total)
+    wav = _wav_temporal(samples)
+    salida = wav[:-4] + ".json"
     keep = [list(w) for w in (prev or {}).get("words", []) if start_at and float(w[1]) <= start_at + 1e-3]
     keep_segs = [list(sg) for sg in (prev or {}).get("segments", []) if start_at and sg[3] <= len(keep)]
 
@@ -249,29 +317,43 @@ def _transcribe_motor(samples, name, language, progress, cancelled, fillers, par
     job = {"ffmpeg": media_tools.ffmpeg(), "entrada": wav, "salida": salida, "idioma": language or "",
            "palabras": hw_, "prompt": FILLER_PROMPT if fillers else "",
            "previo": " ".join(w[2] for w in keep[-30:]),
-           "desde": start_at, "bloque": float(block or BLOCK), "modelo": _MOTOR_NAMES[name]}
+           "desde": start_at, "bloque": float(block or BLOCK), "modelo": _MOTOR_NAMES[name], "nombre": name}
 
     def prog(f, txt=""):
         report(progress, f, txt)
+    voz = motor_ia.servidor_voz()            # ⚡ el modelo se queda cargado entre transcripciones
     try:
-        ruta = motor_ia.run("transcribir.py", job, prog, cancelled, partial=al_parcial)
-        with open(ruta, encoding="utf-8") as f:
-            tr = unir(_json.load(f))
-    except RuntimeError as exc:
-        if "Cancelado" in str(exc) or (cancelled is not None and cancelled()):
-            raise Cancelled() from exc
-        raise
+        try:
+            ruta = voz.pedir(dict(job, cmd="transcribir"), prog, cancelled, partial=al_parcial)
+            with open(ruta, encoding="utf-8") as f:
+                tr = unir(_json.load(f))
+        except RuntimeError as exc:
+            if "Cancelado" in str(exc) or (cancelled is not None and cancelled()):
+                raise Cancelled() from exc
+            raise
+        found = holes(samples, tr["words"])
+        if found:                             # red de seguridad: los huecos con voz, en la tarjeta (modelo ya cargado)
+            report(progress, 0.98, "Repasando los tramos con voz que se quedaron sin texto…")
+            tramos = _hole_clips(samples, found)
+            try:
+                ruta = voz.pedir({"cmd": "rellenar", "ffmpeg": job["ffmpeg"], "entrada": wav, "salida": salida,
+                                  "tramos": tramos, "idioma": language or "", "modelo": job["modelo"]},
+                                 None, cancelled)
+                with open(ruta, encoding="utf-8") as f:
+                    por_tramo = _json.load(f).get("por_tramo") or []
+                tr = _merge_holes(tr, found, por_tramo)
+            except RuntimeError as exc:
+                if "Cancelado" in str(exc) or (cancelled is not None and cancelled()):
+                    raise Cancelled() from exc
+                try:                          # (la tarjeta no pudo: con el procesador, como antes)
+                    tr = fill_holes(samples, tr, _load(name), language, cancelled)
+                except Cancelled:
+                    raise
+                except Exception:  # noqa: BLE001 - lo de la tarjeta ya vale: la red de seguridad es un extra
+                    pass
     finally:                                         # (también al cancelar o fallar: nada se queda en «temporal»)
         for x in (wav, salida, salida + ".parcial.json"):
             _borrar(x)
-    if holes(samples, tr["words"]):            # red de seguridad: los huecos con voz, con el modelo de siempre
-        report(progress, 0.98, "Repasando los tramos con voz que se quedaron sin texto…")
-        try:
-            tr = fill_holes(samples, tr, _load(name), language, cancelled)
-        except Cancelled:
-            raise
-        except Exception:  # noqa: BLE001 - lo de la tarjeta ya vale: la red de seguridad es un extra
-            pass
     report(progress, 1.0, f"Transcripción lista (tarjeta gráfica): {len(tr['words'])} palabras.")
     return tr
 
@@ -315,17 +397,30 @@ def fill_holes(samples: np.ndarray, tr: dict, model, language: str = "es", cance
     found = holes(samples, words)
     if not found:
         return tr
-    new_all, filled = [], []
-    for a, b in found:
+    por_tramo = []
+    for a0, b0 in _hole_clips(samples, found):
         check_cancel(cancelled)
-        a0, b0 = max(0.0, a - 0.3), min(len(samples) / SAMPLE_RATE, b + 0.3)
         clip = samples[int(a0 * SAMPLE_RATE):int(b0 * SAMPLE_RATE)]
         segs, _info = model.transcribe(clip, language=language or None, word_timestamps=True, beam_size=5,
                                        vad_filter=True, condition_on_previous_text=False)
-        got = [[round(a0 + float(w.start), 3), round(a0 + float(w.end), 3), w.word.strip(),
-                round(float(w.probability), 3)] for s in segs for w in (s.words or [])
-               if w.word.strip().strip(".…·- ")]
-        got = [w for w in got if a - 0.05 <= (w[0] + w[1]) / 2 <= b + 0.05]
+        por_tramo.append([[round(a0 + float(w.start), 3), round(a0 + float(w.end), 3), w.word.strip(),
+                           round(float(w.probability), 3)] for s in segs for w in (s.words or [])
+                          if w.word.strip().strip(".…·- ")])
+    return _merge_holes(tr, found, por_tramo)
+
+
+def _hole_clips(samples: np.ndarray, found: list) -> list[list[float]]:
+    """Lo que se vuelve a escuchar de cada hueco: el hueco con 0,3 s de margen a cada lado."""
+    total = len(samples) / SAMPLE_RATE
+    return [[round(max(0.0, a - 0.3), 3), round(min(total, b + 0.3), 3)] for a, b in found]
+
+
+def _merge_holes(tr: dict, found: list, por_tramo: list) -> dict:
+    """Mete en su sitio lo oído en cada hueco (solo las palabras cuyo centro cae dentro del hueco)."""
+    words = [list(w) for w in tr.get("words", [])]
+    new_all, filled = [], []
+    for (a, b), got in zip(found, por_tramo):
+        got = [list(w) for w in got if a - 0.05 <= (float(w[0]) + float(w[1])) / 2 <= b + 0.05]
         if got:
             new_all += got
             filled.append([round(a, 3), round(b, 3)])

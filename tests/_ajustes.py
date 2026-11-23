@@ -12,7 +12,18 @@ import os
 # 🎙 Las pruebas transcriben con el procesador (y sus modelos falsos); solo test_transcribir_tarjeta usa la tarjeta
 os.environ.setdefault("EDITORIA_TARJETA_MOTOR", "0")
 
-from PySide6.QtCore import QSettings
+# 🔒 Las pruebas NUNCA escriben en tus ajustes de verdad (el registro de Windows): trabajan con una COPIA en un .ini
+# temporal (ver editoria/_ajustes_prueba.py). El lanzador de pruebas ya pone RECLAIMER_AJUSTES_PRUEBA; si no, aquí.
+_DIR_INI = os.environ.setdefault("RECLAIMER_AJUSTES_PRUEBA", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_pruebas_tmp", f"ajustes_{os.getpid()}"))
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from editoria import _ajustes_prueba  # noqa: E402
+_ajustes_prueba.activar(_DIR_INI)
+from PySide6.QtCore import QSettings  # noqa: E402  (ya la de prueba)
+# 👋 la guía de primer uso NUNCA sale en las pruebas (además de no salir sin ventana: ui/guia_primer_uso)
+QSettings("EditorIA", "EditorIA").setValue("guia_primer_uso/no_mostrar", True)
+atexit.register(__import__("shutil").rmtree, _DIR_INI, True)
 
 KEYS = ("ventana/paneles", "geometry", "reproduccion/proxy", "reproduccion/copias_auto")
 _st = QSettings("EditorIA", "EditorIA")

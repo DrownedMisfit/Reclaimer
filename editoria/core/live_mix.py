@@ -310,6 +310,9 @@ class Mixer:
         self.plan = Plan()
         self._fx: dict[str, tuple[str, _Convolver | None]] = {}     # clip → (firma del EQ, convolución)
         self._fir_memo: dict[str, np.ndarray | None] = {}
+        # 🔊 volumen de ESCUCHA (barra del visor, ui/transport_extra.py): solo lo que oyes, no el proyecto
+        self.monitor = 1.0
+        self._monitor_antes = 1.0
 
     def reset(self):
         """Salto o nueva reproducción: las colas de los filtros no se arrastran."""
@@ -380,6 +383,10 @@ class Mixer:
             out += buf * env
         for k in [k for k in self._fx if k not in vivos]:    # clips que ya no suenan: sus filtros fuera
             del self._fx[k]
+        g0, g1 = self._monitor_antes, max(0.0, float(self.monitor))
+        self._monitor_antes = g1
+        if g0 != 1.0 or g1 != 1.0:                         # 🔊 volumen de escucha (sin saltos dentro del bloque)
+            out *= np.linspace(g0, g1, n, dtype=np.float32)[:, None] if g0 != g1 else np.float32(g1)
         np.clip(out, -1.0, 1.0, out=out)
         return out
 

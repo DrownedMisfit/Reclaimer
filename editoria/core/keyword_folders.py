@@ -10,7 +10,12 @@ Sin Qt.
   list_folders(root)      una entrada por palabra: name, label, path, own_path (None si no hay subcarpeta),
                           links (carpetas enlazadas del PC), keys, files (propios + enlazados, recientes primero),
                           linked_files (los que vienen de un enlace), count
-  match(term, folders)    la carpeta cuyo alias coincide con el término (tolera plural simple) o None
+  match(term, folders)    la carpeta cuyo alias coincide con el término (tolera plural simple y variantes: «GTA V»,
+                          «gta5», «GTA cinco» y «GTA 5» son la misma) o None
+  canon(text)             forma canónica para agrupar variantes de una palabra clave («GTA-V» → «gta 5»; números
+                          hasta 9999 en palabras, español e inglés; «&»/«and» → «y»; ordinal final como entrega)
+  compacta(text)          canon sin espacios ni artículo inicial («Spider-Man» = «spiderman», «The Witcher» = «Witcher»)
+  leer_numero(ws, i)      (valor, palabras) del número escrito que empieza en ws[i] («dos mil setenta y siete» → 2077)
   safe_name(term)         nombre válido para Windows
   create_folder(root, t)  crea (o reutiliza) la carpeta del término y devuelve su ruta
   add_files(folder, paths) copia videos/imágenes (archivos o carpetas) a la carpeta y devuelve las rutas finales
@@ -19,6 +24,7 @@ Sin Qt.
   link_file / unlink_file / linked_files ARCHIVOS ENLAZADOS del PC (no se copian): clave «_archivos» del mismo JSON
   delete_keyword(root, t, trash_fn)      manda a la Papelera solo la subcarpeta propia; los enlaces no se tocan
   create_from_mentions(root, terms)      crea las subcarpetas de varias palabras de una vez (sin duplicar)
+  move_files(paths, folder)              MUEVE archivos (con su «.creditos.json») a otra carpeta, nombre único
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ import os
 import re
 import shutil
 import unicodedata
+from functools import lru_cache
 
 from .model import IMAGE_EXT, KIND_IMAGE, KIND_VIDEO, VIDEO_EXT, kind_for_path
 
@@ -45,6 +52,186 @@ def norm(text: str) -> str:
     s = s.replace("'", "").replace("’", "")
     s = "".join(ch if (ch.isalnum() or ch.isspace()) else " " for ch in s)
     return " ".join(s.split())
+
+
+# Números escritos y romanos → cifras (para canon). Los romanos solo cuentan tras otra palabra («GTA V»), nunca solos.
+# 20/11: números hasta 9999 en palabras, en español e inglés («veintitrés», «treinta y uno», «dos mil setenta y siete»,
+# «twenty twenty», «two thousand seventy seven»). «un»/«una» no son números (son artículos).
+_UNID = {"uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9}
+_UNID_EN = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
+_DIEZ_29 = {"diez": 10, "once": 11, "doce": 12, "trece": 13, "catorce": 14, "quince": 15, "dieciseis": 16,
+            "diecisiete": 17, "dieciocho": 18, "diecinueve": 19, "veinte": 20, "veintiuno": 21, "veintiun": 21,
+            "veintidos": 22, "veintitres": 23, "veinticuatro": 24, "veinticinco": 25, "veintiseis": 26,
+            "veintisiete": 27, "veintiocho": 28, "veintinueve": 29}
+_TEENS_EN = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+             "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_DECENAS = {"treinta": 30, "cuarenta": 40, "cincuenta": 50, "sesenta": 60, "setenta": 70, "ochenta": 80,
+            "noventa": 90}
+_DECENAS_EN = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+               "ninety": 90}
+_CIENTOS = {"ciento": 100, "doscientos": 200, "doscientas": 200, "trescientos": 300, "trescientas": 300,
+            "cuatrocientos": 400, "cuatrocientas": 400, "quinientos": 500, "quinientas": 500, "seiscientos": 600,
+            "seiscientas": 600, "setecientos": 700, "setecientas": 700, "ochocientos": 800, "ochocientas": 800,
+            "novecientos": 900, "novecientas": 900}
+# Números de UNA palabra (para mentions: «GTA seis», «Halo veintitrés»): 1–99 y «cien».
+NUM_UNA = {k: str(v) for d in (_UNID, _UNID_EN, _DIEZ_29, _TEENS_EN, _DECENAS, _DECENAS_EN) for k, v in d.items()}
+NUM_UNA["cien"] = "100"
+_EMPIEZA_NUM = set(NUM_UNA) | set(_CIENTOS) | {"mil"}
+_NUM_PAL = NUM_UNA          # (nombre antiguo, por compatibilidad)
+# Ordinales: solo como número de entrega, al final del nombre y tras otra palabra que no sea artículo
+# («Halo segundo» → «halo 2»; «el segundo» y «un segundo» no).
+ORDINALES = {"segundo": 2, "segunda": 2, "tercero": 3, "tercera": 3, "tercer": 3, "cuarto": 4, "cuarta": 4,
+             "quinto": 5, "quinta": 5, "sexto": 6, "sexta": 6, "septimo": 7, "septima": 7, "octavo": 8,
+             "octava": 8, "noveno": 9, "novena": 9, "decimo": 10, "decima": 10,
+             "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8}
+ARTICULOS = {"the", "el", "la", "los", "las", "lo", "un", "una", "unos", "unas", "a", "an", "mi", "su", "este",
+             "esta", "ese", "esa", "cada", "otro", "otra"}
+_ROMANOS = {r.lower(): str(i) for i, r in enumerate(
+    ["II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"], start=2)}
+_LETRAS_NUM = re.compile(r"^([a-z]{2,})(\d{1,3})$")
+
+
+def _menor_mil(ws, i: int):
+    """(valor 1–999, palabras que ocupa) del número escrito que empieza en ws[i], o None."""
+    n = len(ws)
+    j, val, ok = i, 0, False
+    w = ws[j] if j < n else None
+    if w == "cien":
+        return 100, 1
+    if w in _CIENTOS:
+        val, j, ok = _CIENTOS[w], j + 1, True
+    elif w in _UNID_EN and j + 1 < n and ws[j + 1] == "hundred":
+        val, j, ok = _UNID_EN[w] * 100, j + 2, True
+        if j + 1 < n and ws[j] == "and" and (ws[j + 1] in _UNID_EN or ws[j + 1] in _TEENS_EN
+                                            or ws[j + 1] in _DECENAS_EN):
+            j += 1
+    w = ws[j] if j < n else None
+    if w in _DECENAS or w in _DECENAS_EN:
+        val, j, ok = val + (_DECENAS.get(w) or _DECENAS_EN[w]), j + 1, True
+        if w in _DECENAS and j + 1 < n and ws[j] == "y" and ws[j + 1] in _UNID:
+            val, j = val + _UNID[ws[j + 1]], j + 2
+        elif w in _DECENAS_EN and j < n and ws[j] in _UNID_EN:
+            val, j = val + _UNID_EN[ws[j]], j + 1
+    elif w in _DIEZ_29 or w in _TEENS_EN:
+        val, j, ok = val + (_DIEZ_29.get(w) or _TEENS_EN[w]), j + 1, True
+    elif w in _UNID or w in _UNID_EN:
+        val, j, ok = val + (_UNID.get(w) or _UNID_EN[w]), j + 1, True
+    return (val, j - i) if ok else None
+
+
+def leer_numero(ws, i: int = 0):
+    """(valor, palabras que ocupa) del número escrito en palabras que empieza en ws[i] (claves sin tildes), o None.
+    Hasta 9999: «dos mil setenta y siete» → 2077, «mil novecientos noventa y ocho» → 1998, «twenty twenty» → 2020,
+    «nineteen eighty four» → 1984. Un número de cifras («2077») también vale (una palabra)."""
+    n = len(ws)
+    if i >= n:
+        return None
+    w = ws[i]
+    if w.isdigit() and len(w) <= 4:
+        return int(w), 1
+    if w not in _EMPIEZA_NUM and w not in _TEENS_EN and w not in _DECENAS_EN:
+        return None
+    r = _menor_mil(ws, i)
+    j = i
+    if w == "mil":
+        val, j = 1000, i + 1
+    elif r and i + r[1] < n and ws[i + r[1]] in ("mil", "thousand") and r[0] < 10:
+        val, j = r[0] * 1000, i + r[1] + 1
+    else:
+        if r and r[1] <= 2 and 10 <= r[0] <= 99 and (w in _TEENS_EN or w in _DECENAS_EN):   # año en inglés
+            r2 = _menor_mil(ws, i + r[1])
+            if r2 and 10 <= r2[0] <= 99 and r2[1] <= 2 and ws[i + r[1]] not in _UNID_EN:
+                return r[0] * 100 + r2[0], r[1] + r2[1]
+        return r
+    if j + 1 < n and ws[j] == "and" and _menor_mil(ws, j + 1):
+        j += 1
+    r2 = _menor_mil(ws, j)
+    if r2:
+        val, j = val + r2[0], j + r2[1]
+    return val, j - i
+
+
+def _cifras(ws: list) -> list:
+    """Las palabras con los números escritos ya en cifras («dos mil setenta y siete» → «2077»)."""
+    out: list = []
+    i, n = 0, len(ws)
+    while i < n:
+        w = ws[i]
+        if w in _EMPIEZA_NUM or w in _TEENS_EN or w in _DECENAS_EN:
+            r = leer_numero(ws, i)
+            if r:
+                out.append(str(r[0]))
+                i += r[1]
+                continue
+        out.append(w)
+        i += 1
+    return out
+
+
+@lru_cache(maxsize=65536)
+def canon(text: str) -> str:
+    """Forma canónica de una palabra clave para agrupar sus variantes: sin tildes ni mayúsculas, guiones como
+    espacios, letras pegadas a su número separadas («gta5» → «gta 5»), números escritos (hasta 9999, español e inglés)
+    y romanos en cifras («GTA cinco», «GTA V», «GTA-V» → «gta 5»; «Cyberpunk dos mil setenta y siete» → «cyberpunk
+    2077»), apóstrofos fuera («Assassin's» = «Assassins»), «&» / «and» → «y», y un ordinal al final del nombre como
+    número de entrega («Halo segundo» → «halo 2»). «X» tras «series» no es 10 («Xbox Series X»)."""
+    s = norm(str(text or "").replace("-", " ").replace("_", " ").replace("&", " y "))
+    ws: list[str] = []
+    for w in s.split():
+        m = _LETRAS_NUM.match(w)
+        ws += [m.group(1), m.group(2)] if m else [w]
+    ws = _cifras(ws)
+    if len(ws) >= 3 and ws[-2] in ("parte", "part") and (ws[-1].isdigit() or ws[-1] in _ROMANOS):
+        del ws[-2]
+    out: list[str] = []
+    ult = len(ws) - 1
+    for i, x in enumerate(ws):
+        if out and x in _ROMANOS and out[-1] not in ARTICULOS and not (x == "x" and out[-1] == "series"):
+            x = _ROMANOS[x]
+        elif x == "and":
+            x = "y"
+        elif i == ult and out and x in ORDINALES and out[-1] not in ARTICULOS and not out[-1].isdigit():
+            x = str(ORDINALES[x])
+        out.append(x)
+    return " ".join(out)
+
+
+_ARTICULO_INICIAL = {"the", "el", "la", "los", "las"}
+
+
+def compactar(palabras) -> str:
+    """Palabras canónicas → clave sin espacios («spider man» → «spiderman»), sin el artículo inicial si no deja algo
+    corto o ambiguo («the witcher 3» → «witcher3»; «la x» y «el 2» se quedan). Dos números seguidos no se pegan."""
+    ws = list(palabras)
+    if len(ws) >= 2 and ws[0] in _ARTICULO_INICIAL:
+        resto = "".join(ws[1:])
+        if len(resto) >= 3 and not resto.isdigit() and len(ws[1]) >= 3:
+            ws = ws[1:]
+    out = ""
+    for w in ws:
+        if out and out[-1].isdigit() and w[:1].isdigit():
+            out += " "
+        out += w
+    return out
+
+
+@lru_cache(maxsize=65536)
+def junta(text: str) -> str:
+    """Como compacta() pero SIN quitar el artículo: «Los Ángeles» → «losangeles» (≠ «Ángeles»)."""
+    out = ""
+    for w in canon(text).split():
+        if out and out[-1].isdigit() and w[:1].isdigit():
+            out += " "
+        out += w
+    return out
+
+
+@lru_cache(maxsize=65536)
+def compacta(text: str) -> str:
+    """Clave para comparar variantes de una palabra clave: canon() sin espacios ni artículo inicial. «Spider-Man»,
+    «spiderman» y «Spider Man» → «spiderman»; «The Witcher» y «Witcher» → «witcher»; «Assassin's Creed» y «Assassins
+    Creed» → «assassinscreed»; «Ratchet & Clank» y «Ratchet and Clank» → «ratchetyclank»; «GTA cinco» → «gta5»."""
+    return compactar(canon(text).split())
 
 
 def _aliases_raw(name: str) -> list[str]:
@@ -374,6 +561,18 @@ def match(term: str, folders: list[dict]) -> dict | None:
         for k in f.get("keys", []):
             if t == k + "s" or t == k + "es" or k == t + "s" or k == t + "es":
                 return f
+    c = canon(term)                         # variantes: «GTA V», «gta5», «GTA cinco» ↔ la carpeta «GTA 5»
+    if c:
+        for f in folders:
+            for alias in _aliases_raw(f.get("name") or f.get("label") or ""):
+                if canon(alias) == c:
+                    return f
+    k = compacta(term)                      # sin espacios ni artículo: «spiderman» ↔ «Spider-Man», «Witcher» ↔ «The…»
+    if k and len(k) >= 3:
+        for f in folders:
+            for alias in _aliases_raw(f.get("name") or f.get("label") or ""):
+                if compacta(alias) == k:
+                    return f
     return None
 
 
@@ -436,3 +635,44 @@ def add_files(folder: str, paths: list[str]) -> list[str]:
 
 def terms(folders: list[dict]) -> list[str]:
     return [f["label"] for f in folders]
+
+
+def move_files(paths: list[str], folder: str, sidecars: tuple[str, ...] = (".creditos.json",)) -> tuple[list, list]:
+    """MUEVE archivos a «folder» (p. ej. de lo bajado de internet a una carpeta del usuario). Cada uno se lleva sus
+    archivos acompañantes (mismo nombre + «.creditos.json») con el nombre nuevo; si ya existe uno igual, se usa
+    «nombre (2).ext». Devuelve (movidos [(origen, destino)], fallos [(origen, motivo)]). Si un archivo no se puede
+    mover (abierto en otro programa…), se queda donde estaba y no deja copias a medias en el destino."""
+    os.makedirs(folder, exist_ok=True)
+    movidos: list = []
+    fallos: list = []
+    from .soltar_archivos import soltando
+    # (🔓 el visor, el motor propio y los análisis los sueltan antes: abiertos, Windows no deja moverlos; al acabar,
+    #  bien o mal, el visor puede volver a abrirlos)
+    with soltando([x for x in paths or [] if x and not _same(os.path.dirname(os.path.abspath(x)), folder)]):
+        for p in dict.fromkeys(os.path.abspath(x) for x in paths or []):
+            if not os.path.isfile(p):
+                fallos.append((p, "ya no existe"))
+                continue
+            if _same(os.path.dirname(p), folder):        # ya está ahí
+                movidos.append((p, p))
+                continue
+            dest = _unique_dest(folder, os.path.basename(p))
+            try:
+                shutil.move(p, dest)
+            except OSError as exc:
+                if os.path.isfile(p) and os.path.exists(dest):   # (otra unidad: copió pero no pudo borrar el original)
+                    try:
+                        os.remove(dest)
+                    except OSError:
+                        pass
+                fallos.append((p, str(exc)))
+                continue
+            base_src, base_dst = os.path.splitext(p)[0], os.path.splitext(dest)[0]
+            for suf in sidecars:
+                if os.path.isfile(base_src + suf):
+                    try:
+                        shutil.move(base_src + suf, base_dst + suf)
+                    except OSError:
+                        pass
+            movidos.append((p, os.path.abspath(dest)))
+    return movidos, fallos

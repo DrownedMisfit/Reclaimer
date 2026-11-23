@@ -234,6 +234,13 @@ class Autocompletar(QGroupBox):
     def refresh_summary(self):
         mid = self.media_id()
         m = self.ctrl.project.media.get(mid) if mid else None
+        if m is not None and mid != getattr(self, "_huella_pedida", None):
+            self._huella_pedida = mid        # 🧬 su huella (BAJA): no repetir un momento que ya sale desde otro archivo
+            try:
+                from . import repetidos_ui as _RU
+                _RU.pedir_huellas_de(self.ctrl, [mid], "elegido en Autocompletar")
+            except Exception:  # noqa: BLE001
+                pass
         if m is None:
             self.summary.setText("Importa un video en Medios para autocompletar." if not self._videos() else "")
             self.summary.setToolTip("")
@@ -345,7 +352,9 @@ class Autocompletar(QGroupBox):
             self.info.setText("No hay huecos: ahí ya se ve algo en todo momento.")
             return None
         need = sum(b - a for a, b in holes)
-        usados = SP.used_by_media(p).get(mid, [])
+        # lo usado de ese video y, con la huella por plano, lo que repite un momento que ya sale desde otro archivo
+        from ..core import repetidos
+        usados = repetidos.usados_con_huella(p, mid, missing=getattr(self.ctrl, "missing", set()))
         mat = AC.material(self.scenes.get(mid, []), usados, float(m.duration))
         if not mat:
             self.info.setText(f"⚠ De «{m.name}» ya está todo usado: no queda material libre "

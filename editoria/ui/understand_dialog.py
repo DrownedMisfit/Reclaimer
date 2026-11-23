@@ -1,6 +1,6 @@
 """
 Ventana «🔬 Entender mi biblioteca a fondo»: la IA revisa cada imagen y cada segundo de tus
-videos, aprende quién y qué aparece (Jefe Maestro, Cortana, Locust…) y lo usa para elegir
+videos, aprende quién y qué aparece (personas, objetos, lugares…) y lo usa para elegir
 el B-roll cuando lo nombras. Aquí ves lo que entendió y editas los apodos.
 """
 from __future__ import annotations
@@ -97,7 +97,7 @@ class UnderstandDialog(QDialog):
         intro = QLabel("La IA revisa cada imagen y cada segundo de tus videos y aprende <b>quién y qué aparece</b>. "
                        "Luego, cuando nombras a alguien en tu narración, el B-roll muestra un plano donde sale. "
                        "Truco: añade a la biblioteca imágenes con el nombre de lo que muestran "
-                       "(«jefe maestro.png», «cortana.jpg»): le enseñan cómo es y lo encuentra en tus videos.")
+                       "(«objeto.png», «persona.jpg»): le enseñan cómo es y lo encuentra en tus videos.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         split = QSplitter(Qt.Horizontal)

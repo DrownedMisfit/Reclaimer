@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBo
                                QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.subtitles import PRESETS
+from . import diseno as D
 from .help import set_help
 
 POSITIONS = [("bottom", "Abajo"), ("middle", "Centro"), ("top", "Arriba")]
@@ -41,6 +42,41 @@ class ColorButton(QPushButton):
             self.color_changed.emit(self._color)
 
 
+class _Filas(QVBoxLayout):
+    """Como un QFormLayout, pero con las filas del Inspector (diseno.FilaInspector): la etiqueta gris en su columna y,
+    si no cabe, encima del control; una fila sin etiqueta va a lo ancho."""
+
+    def __init__(self, parent=None):
+        if parent is None:
+            super().__init__()
+        else:
+            super().__init__(parent)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(D.px(D.M1))
+
+    def addRow(self, a, b=None):               # noqa: N802
+        from PySide6.QtWidgets import QLayout
+        if b is None:
+            if isinstance(a, QLayout):
+                self.addLayout(a)
+            else:
+                self.addWidget(a)
+            return
+        if isinstance(b, QLayout):
+            caja = QWidget()
+            b.setContentsMargins(0, 0, 0, 0)
+            caja.setLayout(b)
+            b = caja
+        elif b.maximumWidth() < 16777215:      # (un control de ancho fijo —un color—: pegado a su etiqueta)
+            caja = QWidget()
+            h = QHBoxLayout(caja)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(b)
+            h.addStretch(1)
+            b = caja
+        self.addWidget(D.FilaInspector(a, b))
+
+
 def _dim(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("dim")
@@ -50,7 +86,7 @@ def _dim(text: str) -> QLabel:
 
 
 class SubtitlesPanel(QWidget):
-    transcribe_requested = Signal()      # ⚡ «Subtítulos para Short»: transcribir antes (lo hace la pestaña Limpieza)
+    transcribe_requested = Signal()      # ⚡ «Subtítulos»: transcribir antes (lo hace la pestaña Limpieza)
 
     def __init__(self, ctrl, preferred_media=None, parent=None):
         super().__init__(parent)
@@ -61,35 +97,33 @@ class SubtitlesPanel(QWidget):
         content = QWidget()
         set_help(content, "subtitulos")
         lay = QVBoxLayout(content)
-        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setContentsMargins(D.px(D.M2), D.px(D.M2), D.px(D.M2), D.px(D.M2))
+        lay.setSpacing(D.px(D.M1))
 
         # ⚡ Lo de siempre en un clic: transcribe (si hace falta), activa los subtítulos y les pone el estilo Short
-        self.btn_quick = QPushButton("⚡ Subtítulos para Short")
-        self.btn_quick.setObjectName("primary")
+        self.btn_quick = D.BotonPrincipal("Subtítulos en un clic", "wand-sparkles")
         self.btn_quick.setToolTip("En un clic: transcribe tu narración (si aún no lo está), activa los subtítulos "
                                   "y les pone el estilo «Mis Shorts». Luego puedes retocarlos en las pestañas.")
         self.btn_quick.clicked.connect(self.quick_short)
         lay.addWidget(self.btn_quick)
         self._pending = None
 
-        self.enabled = QCheckBox("Mostrar subtítulos dentro del video")
-        f = QFont(self.font())
-        f.setBold(True)
-        self.enabled.setFont(f)
+        self.enabled = D.CasillaTexto("Mostrar subtítulos dentro del video", D.LETRA_M)
         self.enabled.toggled.connect(self._on_enabled)
         lay.addWidget(self.enabled)
         self.info = _dim("")
         self.info.setObjectName("hint")
         lay.addWidget(self.info)
 
-        form0 = QFormLayout()
+        form0 = _Filas()
         self.source = QComboBox()
         self.source.currentIndexChanged.connect(self._on_source)
         form0.addRow("Texto de", self.source)
         prow = QHBoxLayout()
         self.preset = QComboBox()
         self.preset.addItems(list(PRESETS))
-        apply_preset = QPushButton("Aplicar estilo")
+        apply_preset = D.BotonIcono("palette", "Aplicar estilo: pone a los subtítulos el estilo elegido a la "
+                                               "izquierda (letra, colores, posición y animación)")
         apply_preset.clicked.connect(self._apply_preset)
         prow.addWidget(self.preset, 1)
         prow.addWidget(apply_preset)
@@ -98,7 +132,7 @@ class SubtitlesPanel(QWidget):
 
         # --- Letra ---
         g1 = QGroupBox("Letra")
-        f1 = QFormLayout(g1)
+        f1 = _Filas(g1)
         self.font_box = QFontComboBox()
         self.font_box.currentFontChanged.connect(lambda fnt: self._set(font=fnt.family()))
         self.size = QDoubleSpinBox()
@@ -107,11 +141,11 @@ class SubtitlesPanel(QWidget):
         self.size.setSuffix(" %")                       # (la explicación, en la ayuda: así cabe en un panel estrecho)
         self.size.setToolTip("Tamaño de la letra, en % del alto del video.")
         self.size.valueChanged.connect(lambda v: self._set(size=v))
-        self.bold = QCheckBox("Negrita")
+        self.bold = D.CasillaTexto("Negrita")
         self.bold.toggled.connect(lambda v: self._set(bold=v))
-        self.upper = QCheckBox("MAYÚSCULAS")
+        self.upper = D.CasillaTexto("MAYÚSCULAS")
         self.upper.toggled.connect(lambda v: self._set(uppercase=v))
-        self.strip = QCheckBox("Sin comas ni puntos")
+        self.strip = D.CasillaTexto("Sin comas ni puntos")
         self.strip.toggled.connect(lambda v: self._set(strip_punct=v))
         row = QHBoxLayout()
         row.addWidget(self.bold)
@@ -124,7 +158,7 @@ class SubtitlesPanel(QWidget):
 
         # --- Colores ---
         g2 = QGroupBox("Colores")
-        f2 = QFormLayout(g2)
+        f2 = _Filas(g2)
         self.c_text = ColorButton("Color del texto")
         self.c_text.color_changed.connect(lambda c: self._set(color=c))
         self.c_hl = ColorButton("Color de resaltado")
@@ -140,7 +174,7 @@ class SubtitlesPanel(QWidget):
         orow.addWidget(self.c_out)
         orow.addWidget(QLabel("grosor"))
         orow.addWidget(self.outline, 1)
-        self.box = QCheckBox("Caja de fondo")
+        self.box = D.CasillaTexto("Caja de fondo")
         self.box.toggled.connect(lambda v: self._set(box=v))
         self.c_box = ColorButton("Color de la caja")
         self.c_box.color_changed.connect(lambda c: self._set(box_color=c))
@@ -186,7 +220,7 @@ class SubtitlesPanel(QWidget):
 
         # --- Posición y líneas ---
         g3 = QGroupBox("Posición y líneas")
-        f3 = QFormLayout(g3)
+        f3 = _Filas(g3)
         self.position = QComboBox()
         for key, label in POSITIONS:
             self.position.addItem(label, key)
@@ -222,7 +256,7 @@ class SubtitlesPanel(QWidget):
 
         # --- Animación ---
         g4 = QGroupBox("Animación")
-        f4 = QFormLayout(g4)
+        f4 = _Filas(g4)
         self.anim = QComboBox()
         for key, label in ANIMATIONS:
             self.anim.addItem(label, key)
@@ -230,16 +264,16 @@ class SubtitlesPanel(QWidget):
         self.anim.setToolTip("Palabra a palabra: cada palabra aparece justo cuando la dices y se queda («HOLA» → "
                              "«HOLA A» → «HOLA A TODOS»); con la frase siguiente empieza de nuevo.")
         f4.addRow(self.anim)
-        self.fx_color = QCheckBox("🌈 Brillo que cambia de color")
+        self.fx_color = D.CasillaTexto("Brillo que cambia de color")
         self.fx_color.setToolTip("En las frases con «¿?» o «¡!» y en las palabras resaltadas, el resplandor pasa "
                                  "de blanco a lila y al color de resaltado (magenta neón) en 0,3 s, y vuelve a "
                                  "blanco con la frase siguiente. Necesita «Resplandor» (pestaña Colores).")
         self.fx_color.toggled.connect(lambda v: self._set(fx_color=v))
-        self.fx_stretch = QCheckBox("↔ Estirón al cambiar de frase")
+        self.fx_stretch = D.CasillaTexto("Estirón al cambiar de frase")
         self.fx_stretch.setToolTip("Los primeros 2–3 fotogramas de cada frase nueva el texto sale estirado a lo "
                                    "ancho (160 % → 100 %), como un tirón.")
         self.fx_stretch.toggled.connect(lambda v: self._set(fx_stretch=v))
-        self.fx_punch = QCheckBox("💥 Golpe final antes de un corte")
+        self.fx_punch = D.CasillaTexto("Golpe final antes de un corte")
         self.fx_punch.setToolTip("En la frase que acaba justo antes de un corte de plano (o del final del video), "
                                  "los últimos 0,25 s el texto crece de golpe (100 % → 125 %).")
         self.fx_punch.toggled.connect(lambda v: self._set(fx_punch=v))
@@ -254,6 +288,7 @@ class SubtitlesPanel(QWidget):
         self.emph_list.setStyleSheet("color: #e6e8ec;")
         v5.addWidget(self.emph_list)
         clear = QPushButton("Quitar todos los resaltados")
+        clear.setIcon(D.icono("eraser"))
         clear.clicked.connect(lambda: self.ctrl.set_emphasis(list(self.ctrl.project.subtitles.emphasis), False))
         v5.addWidget(clear)
         self.style_widgets = [self.source, g1, g2, g3, g4, g5, self.preset, apply_preset]
@@ -319,9 +354,16 @@ class SubtitlesPanel(QWidget):
 
     def _finish_quick(self, mid: str):
         self._pending = None
+        p = self.ctrl.project
+        palabras = len((p.transcripts.get(mid) or {}).get("words") or [])
+        if not palabras:                               # (p. ej. se transcribió un efecto de sonido: no hay voz)
+            nombre = p.media[mid].name if mid in p.media else "ese audio"
+            self.info.setText(f"⚠ En «{nombre}» no se oye ninguna palabra, así que no hay subtítulos que poner. "
+                              "Elige tu narración (la voz) en «Limpieza → Narración» y vuelve a pulsar «⚡ Subtítulos».")
+            return
         from ..core.subtitles import SHORTS
         name = SHORTS if SHORTS in PRESETS else next(iter(PRESETS))
-        self.ctrl.set_subtitle_style("⚡ Subtítulos para Short", enabled=True, media_id=mid, preset=name,
+        self.ctrl.set_subtitle_style("⚡ Subtítulos", enabled=True, media_id=mid, preset=name,
                                      **PRESETS[name])
         self.info.setText(f"✓ Subtítulos puestos con el estilo «{name}» (a lo mucho 3 palabras a la vez). Míralos y "
                           "corrígelos en «Texto → 📺 En pantalla».")
@@ -338,9 +380,12 @@ class SubtitlesPanel(QWidget):
             st = p.subtitles
             self.enabled.setChecked(st.enabled)
             self.source.clear()
-            for mid in p.transcripts:
-                if mid in p.media:
+            for mid in p.transcripts:                  # (las que tienen palabras primero; las vacías, avisadas)
+                if mid in p.media and (p.transcripts[mid] or {}).get("words"):
                     self.source.addItem(p.media[mid].name, mid)
+            for mid in p.transcripts:
+                if mid in p.media and not (p.transcripts[mid] or {}).get("words"):
+                    self.source.addItem(f"{p.media[mid].name}  (sin palabras)", mid)
             self.source.setCurrentIndex(max(0, self.source.findData(st.media_id)))
             if not p.transcripts:
                 if self._pending is None:

@@ -29,9 +29,25 @@ def _scores(path: str, a: float, b: float, progress=None, cancelled=None) -> lis
             return [tuple(x) for x in json.load(f)]
     except (OSError, ValueError):
         pass
+    # ⚡ El video entero ya mirado (lectura única, ai/lectura_unica.py): sus cambios entre a y b, sin leer nada. Es lo
+    # mismo que leer solo ese trozo salvo los dos primeros fotogramas (sin anterior con el que comparar), que de todos
+    # modos no cuentan como corte (MIN_GAP)
+    whole = whole_scores(path)
+    if whole is None:
+        from ..ai import lectura_unica
+        try:
+            file_dur = float(media_tools.probe(path).get("duration") or 0)
+        except Exception:  # noqa: BLE001
+            file_dur = 0.0
+        if file_dur > 0 and b - a >= 0.6 * file_dur and lectura_unica.usar(path, file_dur, "escenas"):
+            lectura_unica.asegurar_o_seguir(path, file_dur, ["escenas"], cancelled,
+                                            (lambda f, _t: progress(f)) if progress else None)
+            whole = whole_scores(path)
+    if whole is not None:
+        return [(t, s) for t, s in whole if a <= t <= b + 1e-3]
     meta = cf + ".txt"
     dur = max(0.05, b - a)
-    vf = f"scale=320:-2,select='gt(scene\\,0.10)',metadata=print:file='{meta.replace(chr(92), '/').replace(':', chr(92) + ':')}'"
+    vf = scene_filter(meta)
     p = subprocess.Popen([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-ss", f"{a:.3f}", "-t", f"{dur:.3f}",
                           "-skip_loop_filter", "all",   # ⚡ sin filtro de desbloqueo: ~25 % más rápido; en imágenes pequeñas para analizar no cambia nada
                           "-i", path, "-an", "-vf", vf, "-f", "null", "-progress", "pipe:1", "-"],
@@ -50,6 +66,21 @@ def _scores(path: str, a: float, b: float, progress=None, cancelled=None) -> lis
     err = p.stderr.read()
     if p.wait() != 0:
         raise RuntimeError("No se pudo leer el video: " + err.strip()[-200:])
+    out = read_meta(meta, a)
+    try:
+        with open(cf, "w", encoding="utf-8") as f:
+            json.dump(out, f)
+    except OSError:
+        pass
+    return out
+
+
+def scene_filter(meta: str) -> str:
+    """El filtro que puntúa los cambios (a 320 px) y los escribe en meta (también lo usa la lectura única)."""
+    return f"scale=320:-2,select='gt(scene\\,0.10)',metadata=print:file='{meta.replace(chr(92), '/').replace(':', chr(92) + ':')}'"
+
+
+def read_meta(meta: str, a: float = 0.0) -> list[tuple[float, float]]:
     out = []
     t = None
     try:
@@ -64,12 +95,28 @@ def _scores(path: str, a: float, b: float, progress=None, cancelled=None) -> lis
         os.remove(meta)
     except OSError:
         pass
+    return out
+
+
+def _whole_file(path: str) -> str:
+    return os.path.join(str(cache_dir("escenas")), f"{media_tools.cache_key(path)}_entero.json")
+
+
+def whole_scores(path: str) -> list[tuple[float, float]] | None:
+    """Los cambios del video ENTERO, si ya se miró (lectura única)."""
     try:
-        with open(cf, "w", encoding="utf-8") as f:
-            json.dump(out, f)
+        with open(_whole_file(path), encoding="utf-8") as f:
+            return [tuple(x) for x in json.load(f)]
+    except (OSError, ValueError):
+        return None
+
+
+def save_whole(path: str, scores: list[tuple[float, float]]):
+    try:
+        with open(_whole_file(path), "w", encoding="utf-8") as f:
+            json.dump(scores, f)
     except OSError:
         pass
-    return out
 
 
 def detect(path: str, a: float, b: float, sensitivity: str = "normal", progress=None, cancelled=None) -> list[float]:

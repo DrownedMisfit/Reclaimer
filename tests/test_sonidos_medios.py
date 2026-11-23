@@ -40,7 +40,7 @@ def main():
     win.show()
     pump(app, 0.3)
     lib = win.library
-    assert [lib.pestanas.tabText(i) for i in range(lib.pestanas.count())] == ["🎞 Medios", "🔊 Sonidos"]
+    assert [lib.pestanas.tabText(i) for i in range(lib.pestanas.count())] == ["Medios", "Sonidos"]   # (20/11: sin emojis de color; su icono Lucide al lado)
     assert lib.sonidos is None, "se monta al abrirla (no gasta nada al arrancar)"
     lib.ver_sonidos()
     pump(app, 0.1)

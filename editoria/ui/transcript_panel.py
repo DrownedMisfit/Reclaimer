@@ -85,6 +85,7 @@ class _WordView(QTextBrowser):
 class TranscriptPanel(QWidget):
     moments_requested = Signal(str, float)   # frase y dónde va en la línea de tiempo
     search_marks_changed = Signal(list)      # 🔎 [(segundo, texto)] de cada aparición de la búsqueda (o [])
+    transcribir_pedido = Signal()            # «Transcribir» del estado vacío (la ventana abre 1 · Transcribir)
 
     def __init__(self, ctrl, engine, parent=None):
         super().__init__(parent)
@@ -103,9 +104,11 @@ class TranscriptPanel(QWidget):
         self._anc: list[_An] = []                          # apariciones en el texto, en orden de la línea de tiempo
         self._key_k: dict = {}                             # (palabra, segundo de la timeline) -> aparición
 
+        from . import diseno as D
         title = QLabel("Transcripción")
         title.setObjectName("title")
         self.btn_srt = QPushButton("Exportar .srt")
+        self.btn_srt.setIcon(D.icono("download"))
         self.btn_srt.setToolTip("Exportar los subtítulos (.srt) ajustados a la línea de tiempo: YouTube los acepta "
                                 "directamente.")
         self.btn_srt.clicked.connect(self.export_srt)
@@ -115,20 +118,21 @@ class TranscriptPanel(QWidget):
         top.addWidget(self.btn_srt)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("🔎 Buscar en lo que dices…")
+        self.search.setPlaceholderText("Buscar en lo que dices…")
+        self.search.addAction(D.icono("search"), QLineEdit.LeadingPosition)
         self.search.setToolTip("Enter = siguiente · Mayús+Enter = anterior · sin distinguir mayúsculas ni tildes")
         self.search.setClearButtonEnabled(True)
         self.search.installEventFilter(self)              # Enter / Mayús+Enter (ver eventFilter)
         self.search.textChanged.connect(lambda _t="": self._refresh_hits(reset=True))
         self.search_count = QLabel("")
         self.search_count.setToolTip("Qué aparición estás viendo y cuántas hay en la línea de tiempo")
-        self.btn_prev = QPushButton("◀")
-        self.btn_prev.setToolTip("Aparición anterior (Mayús+Enter)")
+        self.btn_prev = D.BotonIcono("chevron-left", "Aparición anterior (Mayús+Enter)")
         self.btn_prev.clicked.connect(lambda: self._find_step(-1))
-        self.btn_next = QPushButton("▶")
-        self.btn_next.setToolTip("Aparición siguiente (Enter)")
+        self.btn_next = D.BotonIcono("chevron-right", "Aparición siguiente (Enter)")
         self.btn_next.clicked.connect(lambda: self._find_step(1))
-        search_row = QHBoxLayout()
+        self._fila_buscar = QWidget()          # (sin transcripción va junto al aviso: Ctrl+Alt+F siempre lo encuentra)
+        search_row = QHBoxLayout(self._fila_buscar)
+        search_row.setContentsMargins(0, 0, 0, 0)
         search_row.setSpacing(4)
         search_row.addWidget(self.search, 1)
         search_row.addWidget(self.search_count)
@@ -169,8 +173,9 @@ class TranscriptPanel(QWidget):
         pl = QVBoxLayout(page_tr)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.setSpacing(6)
-        pl.addLayout(search_row)
+        pl.addWidget(self._fila_buscar)
         pl.addWidget(self.view, 1)
+        self._pl = pl
         self.pages = QStackedWidget()
         self.pages.addWidget(page_tr)
         self.pages.addWidget(self.captions)
@@ -193,18 +198,44 @@ class TranscriptPanel(QWidget):
             vrow.addWidget(b)
         self.view_btns.idClicked.connect(self._set_view)
         vrow.addStretch()
-        self.btn_cut = QPushButton("✂ Cortar")
+        self.btn_cut = QPushButton("Cortar")
         self.btn_cut.setObjectName("primary")
+        self.btn_cut.setIcon(D.icono("scissors"))
         self.btn_cut.setToolTip("Cortar lo tachado: quita del video todo lo tachado en rojo (en todas las pistas, "
                                 "cerrando los huecos). Un Ctrl+Z lo deshace; en «Limpieza → Sugerencias → Aplicadas» "
                                 "puedes devolver cualquier corte.")
         self.btn_cut.clicked.connect(self.cut_marked)
         vrow.addWidget(self.btn_cut)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setContentsMargins(D.px(D.M2), D.px(D.M2), D.px(D.M2), D.px(D.M2))
         lay.addLayout(top)
         lay.addLayout(vrow)
         lay.addWidget(self.pages, 1)
+        # (20/11, sin huecos: sin transcripción, UNA línea —la explicación en el tooltip— y «Transcribir», en vez de un
+        #  recuadro oscuro enorme; así el panel cede su alto al de al lado)
+        self.vacio = QWidget()
+        self._vacio_lay = QVBoxLayout(self.vacio)
+        self._vacio_lay.setContentsMargins(0, 0, 0, 0)
+        self._vacio_lay.setSpacing(4)
+        linea = QWidget()
+        hv = QHBoxLayout(linea)
+        hv.setContentsMargins(0, 2, 0, 2)
+        hv.setSpacing(6)
+        self._vacio_lay.addWidget(linea)
+        self.lbl_vacio = QLabel("Sin transcripción")
+        self.lbl_vacio.setObjectName("dim")
+        self.lbl_vacio.setToolTip("Aún no hay texto de lo que dices. Transcribe la narración en «1 · Transcribir» "
+                                  "(elige qué archivo es tu voz y el modelo) y aquí saldrá, sincronizado con el video.")
+        self.btn_transcribir = QPushButton("Transcribir")
+        self.btn_transcribir.setObjectName("flat")
+        self.btn_transcribir.setToolTip("Abre «1 · Transcribir»: la narración, el modelo y el botón para transcribirla")
+        self.btn_transcribir.clicked.connect(self.transcribir_pedido.emit)
+        hv.addWidget(self.lbl_vacio)
+        hv.addWidget(self.btn_transcribir)
+        hv.addStretch(1)
+        lay.addWidget(self.vacio)
+        self._vacio_on = None
+        self._poner_vacio(True)
         from .common import lazy_refresh
         self._cap_lazy = lazy_refresh(self.captions, self.captions.rebuild)
         self._sum_lazy = lazy_refresh(self.summary, self.summary.rebuild)
@@ -225,9 +256,32 @@ class TranscriptPanel(QWidget):
         ctrl.project_changed.connect(lambda: self.search.text().strip() and self._refresh_hits(reset=False))
         engine.time_changed.connect(self._highlight)
 
+    def _poner_vacio(self, on: bool):
+        """Sin transcripción: solo la línea «Sin transcripción · Transcribir» (ni buscador, ni vistas, ni recuadro)."""
+        if on == self._vacio_on:
+            return
+        self._vacio_on = on
+        if on:
+            self._vacio_lay.insertWidget(0, self._fila_buscar)
+        else:
+            self._pl.insertWidget(0, self._fila_buscar)
+        self._fila_buscar.show()
+        for w in (self.search_count, self.btn_prev, self.btn_next):   # (sin texto, solo el buscador)
+            w.setVisible(not on)
+        self.vacio.setVisible(on)
+        self.pages.setVisible(not on)
+        for b in self.view_btns.buttons():
+            b.setVisible(not on)
+        self.btn_cut.setVisible(not on)
+
+    def _act_vacio(self):
+        tr = self.ctrl.project.transcripts.get(self.media_id) if self.media_id else None
+        self._poner_vacio(not tr)
+
     def _on_transcript_changed(self, mid: str):
         """La transcripción cambió: se vuelve a dibujar aunque la firma sea la misma (las listas pueden cambiar en sitio)."""
         if mid == self.media_id:
+            self._act_vacio()
             self._dirty = True
             self._timer.start()
 
@@ -269,6 +323,7 @@ class TranscriptPanel(QWidget):
         self.media_id = media_id or None
         self._clip = None                                  # lo recortado era de otra narración
         self._dirty = True
+        self._act_vacio()
         if self.isVisible():
             self._rebuild()
         self._cap_lazy()
@@ -306,9 +361,10 @@ class TranscriptPanel(QWidget):
         self._key_k = {}
         self.view.setExtraSelections([])
         self.btn_srt.setEnabled(bool(tr))
+        self._poner_vacio(not tr)
         if not tr:
             self.btn_cut.setEnabled(False)
-            self.btn_cut.setText("✂ Cortar")
+            self.btn_cut.setText("Cortar")
             self.view.setHtml("<p style='color:#71747d; margin-top:18px' align='center'>Sin transcripción<br>"
                               "<span style='font-size:9pt'>Transcríbela en «IA ✨» → «🎙 Transcribir»</span></p>")
             return
@@ -335,7 +391,7 @@ class TranscriptPanel(QWidget):
                         marks.setdefault(i, s.kind)
                         if cut and (a, b) == (ca, cb):
                             struck.add(i)
-        self.btn_cut.setText(f"✂ Cortar ({n_cut} · ~{secs:.0f} s)" if n_cut else "✂ Cortar")
+        self.btn_cut.setText(f"Cortar ({n_cut} · ~{secs:.0f} s)" if n_cut else "Cortar")
         self.btn_cut.setEnabled(bool(n_cut))
 
         st = p.subtitles
@@ -594,7 +650,7 @@ class TranscriptPanel(QWidget):
         self.view.moveCursor(QTextCursor.Start)
 
     def cut_marked(self):
-        """✂ Quita del video todo lo tachado (lo mismo que «⚡ Limpiar automáticamente», con tus cambios)."""
+        """✂ Quita del video todo lo tachado (lo mismo que «Limpiar» en Limpieza, con tus cambios)."""
         on = cut_kinds()
         sugs = [s for s in self.ctrl.project.suggestions if s.media_id == self.media_id and
                 voice_cleanup.will_cut(s, on)]
@@ -609,7 +665,7 @@ class TranscriptPanel(QWidget):
             return
         n = self.ctrl.apply_suggestions([s.id for s in sugs]) or 0
         if n:
-            self.ctrl.message.emit(f"✂ {n} fragmentos quitados del video (~{secs:.0f} s).")
+            self.ctrl.message.emit(f"{n} fragmentos quitados del video (~{secs:.0f} s).")
 
     def _edit_word(self, idx: int):
         words = self.ctrl.project.transcripts.get(self.media_id, {}).get("words", [])

@@ -225,11 +225,10 @@ class QueueDialog(QDialog):
         self.setWindowTitle("🚀 Cola de exportación")
         self.resize(760, 380)
         lay = QVBoxLayout(self)
-        info = QLabel("Añade exportaciones desde «Exportar → ➕ Añadir a la cola» o con los botones de abajo. "
-                      "Cada una guarda cómo estaba el proyecto al añadirla.")
-        info.setWordWrap(True)
-        lay.addWidget(info)
+        _ayuda_cola = ("Añade exportaciones desde «Exportar → ➕ Añadir a la cola» o con los botones de abajo. "
+                       "Cada una guarda cómo estaba el proyecto al añadirla.")   # (20/11: al tooltip de la tabla)
         self.table = QTableWidget(0, 4)
+        self.table.setToolTip(_ayuda_cola)
         self.table.setHorizontalHeaderLabels(["Exportación", "Archivo", "Estado", "Progreso"])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)

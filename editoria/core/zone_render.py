@@ -113,6 +113,8 @@ def light_copy(p: Project, a: float, b: float) -> Project:
     """⚡ Copia independiente con SOLO lo que se ve en [a, b] (clips de video que tocan el tramo, sus medios y las
     pistas): sin transcripciones ni el resto de clips. Sirve para la clave y para renderizar en otro hilo."""
     import copy as _copy
+    from . import escena_clip                         # 🎬 (con cada clip de escena desplegado: sus personajes y medios)
+    p = escena_clip.expandir(p)
     r = _copy.copy(p)
     r.__dict__.pop("_lect", None)
     r.__dict__.pop("_lect_rev", None)

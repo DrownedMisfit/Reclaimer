@@ -121,9 +121,11 @@ def main():
     ctrl.add_media([ids[3]], a2.id, 0.0)
     ctrl.rhythm[ids[3]] = {"beats": [round(k * P, 4) for k in range(int(60 / P))], "tempo": BPM}
     names = [win.findChildren(type(win.btn_burst))]
-    lay = win.btn_burst.parentWidget().layout()
-    order = [lay.itemAt(k).widget() for k in range(lay.count()) if lay.itemAt(k).widget() is not None]
-    texts = [getattr(w, "text", lambda: "")() for w in order]
+    from editoria.ui.responsive import widgets_en            # (sin itemAt desde Python)
+    order = widgets_en(win.btn_burst.parentWidget().layout())
+    # (compacta, la barra deja «Dividir»/«Eliminar» solo con su icono: se compara el nombre completo del botón)
+    comp = getattr(win, "_tl_compact", {})
+    texts = [comp[w][0] if w in comp else getattr(w, "text", lambda: "")() for w in order]
     assert texts.index("Dividir") < texts.index("Eliminar"), texts      # (⚡ Ráfaga vive en «⋯ Más» desde el 13/11)
     mas = [a.text() for a in win.btn_more.menu().actions()]
     assert "⚡ Ráfaga de cortes al ritmo" in mas, mas

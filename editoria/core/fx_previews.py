@@ -117,6 +117,11 @@ def _specs() -> list[tuple[str, str, list[dict], float]]:
         else:
             plan, at = [dict(shot="a", dur=3.0, src=0.5, fx={key: val})], 1.5
         out.append(("look", key, plan, at))
+    # 📝 Nota de texto: primero con el borroso ajustado al texto y luego más grande (la barrita hacia la derecha)
+    from .nota_texto import NOTE_STYLE
+    nota = dict(NOTE_STYLE, content="Nota", size=12.0, zone_strength=0.7)
+    out.append(("look", "nota", [dict(shot="a", dur=1.5, src=0.3, text=dict(nota, zone_size=0.0)),
+                                 dict(shot="a", dur=1.5, src=2.0, text=dict(nota, zone_size=0.45))], 0.75))
     for key, _name, _d in TR.CATALOG:
         plan = [dict(shot="a", dur=1.5, src=0.5), dict(shot="b", dur=1.5, src=1.5, trans={"type": key, "dur": 0.9})]
         at = {"zoomin": 1.15, "fadeblack": 1.09, "fadewhite": 1.09, "circleopen": 1.42, "radial": 1.5}.get(key, 1.3)
@@ -174,6 +179,14 @@ def _project(plan: list[dict], base: dict[str, str]):
             fx["trans"] = it["trans"]
         c.fx = fx or None
         p.clips[c.id] = c
+        if it.get("text"):            # 📝 un texto encima de ese plano (la nota de texto)
+            from .model import TRACK_TEXT
+            ttr = next((x for x in p.tracks if x.kind == TRACK_TEXT), None)
+            if ttr is None:
+                ttr = Track(new_id(), TRACK_TEXT, "T")
+                p.tracks.insert(0, ttr)
+            tid = new_id()
+            p.clips[tid] = Clip(tid, "", ttr.id, round(t, 4), 0.0, it["dur"], text=dict(it["text"]))
         t += it["dur"]
     return p
 
@@ -206,6 +219,7 @@ def render(group: str, key: str, plan: list[dict], at: float, base: dict[str, st
                 os.remove(f)
             except OSError:
                 pass
+        __import__("shutil").rmtree(os.path.join(out_dir, "_filtro_textos"), True)   # (imágenes de los textos)
 
 
 SIN = "__sin"          # la misma toma SIN el efecto (para comparar: el usuario no veía bien qué hacía cada uno)

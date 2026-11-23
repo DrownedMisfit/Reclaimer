@@ -698,7 +698,9 @@ def _effects(rgba: np.ndarray, lay: dict, scale: float, groups: list | None = No
     k = max(scale, 1e-3)
     ol = lay["outline"]
     anillos = []                                    # contornos tipo «pegatina» (imágenes): el del panel y los de más
-    if lay["kind"] == "image":
+    if lay["kind"] == "image" and not float(lay.get("feather", 0) or 0) > 0:
+        # (🌗 con bordes suaves, el contorno no se pinta —una línea dura alrededor de un borde suave se ve mal—; no se
+        #  borra: vuelve al quitar el desvanecido)
         if ol.get("on") and float(ol.get("width", 0)) > 0:
             anillos.append((ol["color"], float(ol["width"])))
         anillos += extra_outlines(lay)

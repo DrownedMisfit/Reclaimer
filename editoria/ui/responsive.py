@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractScro
                                QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLayout,
                                QListView, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QStyle,
                                QStyleOptionButton, QStyleOptionComboBox, QStyleOptionToolButton, QStylePainter,
-                               QTabBar, QToolBar, QToolButton, QToolTip, QWidget)
+                               QLayoutItem, QTabBar, QToolBar, QToolButton, QToolTip, QWidget)
 
 try:
     from shiboken6 import createdByPython as _de_python, isValid as _vivo
@@ -228,6 +228,196 @@ def es_desplegable_que_acorta(w) -> bool:
     return isinstance(w, _ComboAcorta)
 
 
+# ------------------------------------------------------------------------------------------------ lo que hay en un layout
+# ⚠ NUNCA layout.itemAt() desde Python (causa de los cierres del 17/11 al vaciar «Dijiste…» y la lista de Edits).
+#   PySide cuelga del layout, para siempre, el envoltorio de Python de cada QLayoutItem que devuelve itemAt(); pero Qt
+#   borra ese QLayoutItem por su cuenta (al borrar su widget, al rehacer una página…) sin avisar a PySide: el envoltorio
+#   sigue «vivo» apuntando a memoria libre. Cuando Qt pone otra cosa en esa misma dirección (un QListWidgetItem al
+#   rehacer una lista, una ayuda emergente…), PySide le devuelve el envoltorio viejo → «'QWidgetItem' object has no
+#   attribute 'isWidgetType'» o «access violation». Aquí se mira lo que hay en cada posición sin pedir su QLayoutItem:
+#   los widgets (hijos del widget del layout) y los layouts hijos (QObject: PySide sí sabe cuándo se borran), con
+#   layout.indexOf(). Los espaciadores no se ven (no hacen falta: se dejan fuera al colocar).
+_MAXQ = 16777215
+
+
+def _oculto(w) -> bool:
+    return w.isWindow() or (w.isHidden() and not w.sizePolicy().retainSizeWhenHidden())
+
+
+def _crece(pol) -> bool:
+    return bool(pol.value & QSizePolicy.GrowFlag.value)
+
+
+class _Pieza:
+    """Lo que hay en una posición de un layout (un widget o un layout hijo), con lo que haría su QLayoutItem de Qt
+    (QWidgetItem: sizeHint, mínimo «inteligente», alto según ancho, máximo) pero sin pedírselo a Qt."""
+    __slots__ = ("obj", "indice", "es_lay")
+
+    def __init__(self, obj, indice: int):
+        self.obj = obj
+        self.indice = indice
+        self.es_lay = isinstance(obj, QLayout)
+
+    def widget(self):
+        return None if self.es_lay else self.obj
+
+    def isEmpty(self) -> bool:
+        return self.obj.isEmpty() if self.es_lay else _oculto(self.obj)
+
+    def sizeHint(self) -> QSize:
+        if self.es_lay:
+            return self.obj.sizeHint()
+        w = self.obj
+        if _oculto(w):
+            return QSize(0, 0)
+        s = w.sizeHint().expandedTo(w.minimumSizeHint()).boundedTo(w.maximumSize()).expandedTo(w.minimumSize())
+        sp = w.sizePolicy()
+        if sp.horizontalPolicy() == QSizePolicy.Ignored:
+            s.setWidth(0)
+        if sp.verticalPolicy() == QSizePolicy.Ignored:
+            s.setHeight(0)
+        return s
+
+    def minimumSize(self) -> QSize:
+        if self.es_lay:
+            return self.obj.minimumSize()
+        w = self.obj
+        if _oculto(w):
+            return QSize(0, 0)
+        sh, msh, sp = w.sizeHint(), w.minimumSizeHint(), w.sizePolicy()
+
+        def eje(pol, a, b):                              # (qSmartMinSize de Qt)
+            if pol == QSizePolicy.Ignored:
+                return 0
+            return b if pol.value & QSizePolicy.ShrinkFlag.value else max(a, b)
+        s = QSize(eje(sp.horizontalPolicy(), sh.width(), msh.width()),
+                  eje(sp.verticalPolicy(), sh.height(), msh.height())).boundedTo(w.maximumSize())
+        mn = w.minimumSize()
+        if mn.width() > 0:
+            s.setWidth(mn.width())
+        if mn.height() > 0:
+            s.setHeight(mn.height())
+        return s.expandedTo(QSize(0, 0))
+
+    def crece_a_lo_ancho(self) -> bool:
+        if self.es_lay:
+            return bool(self.obj.expandingDirections() & Qt.Horizontal)
+        w = self.obj
+        if _oculto(w):
+            return False
+        sp = w.sizePolicy()
+        if sp.expandingDirections() & Qt.Horizontal:
+            return True
+        lay = w.layout()
+        return lay is not None and _crece(sp.horizontalPolicy()) and bool(lay.expandingDirections() & Qt.Horizontal)
+
+    def hasHeightForWidth(self) -> bool:
+        if self.es_lay:
+            return self.obj.hasHeightForWidth()
+        return not _oculto(self.obj) and self.obj.hasHeightForWidth()
+
+    def heightForWidth(self, ancho: int) -> int:
+        if self.es_lay:
+            return self.obj.heightForWidth(ancho)
+        w = self.obj
+        lay = w.layout()
+        h = lay.totalHeightForWidth(ancho) if lay is not None else w.heightForWidth(ancho)
+        return max(0, min(max(h, w.minimumHeight()), w.maximumHeight()))
+
+    def setGeometry(self, r: QRect):
+        if self.es_lay:
+            self.obj.setGeometry(r)
+            return
+        w = self.obj
+        if _oculto(w):
+            return
+        sp = w.sizePolicy()
+        mx = w.maximumSize()
+        pista = w.sizeHint().expandedTo(w.minimumSize())
+        mw = pista.width() if mx.width() == _MAXQ and not _crece(sp.horizontalPolicy()) else mx.width()
+        mh = pista.height() if mx.height() == _MAXQ and not _crece(sp.verticalPolicy()) else mx.height()
+        w.setGeometry(r.x(), r.y(), max(0, min(r.width(), mw)), max(0, min(r.height(), mh)))
+
+
+def piezas(lay, con_ocultas: bool = False) -> list:
+    """Lo que hay en el layout, en su orden (widgets y layouts hijos; sin espaciadores), SIN itemAt (ver arriba)."""
+    try:
+        if lay is None or not _vivo(lay) or lay.count() == 0:
+            return []
+        cand = []
+        pw = lay.parentWidget()
+        if pw is not None:
+            cand.extend(c for c in pw.children() if c.isWidgetType())
+        cand.extend(c for c in lay.children() if isinstance(c, QLayout))
+        out = []
+        faltan = lay.count()                             # (encontrado todo lo del layout: no se mira el resto de
+        for c in cand:                                   #  hijos; contenedores con cientos de hijos y filas cortas)
+            i = lay.indexOf(c)
+            if i >= 0:
+                p = _Pieza(c, i)
+                if con_ocultas or not p.isEmpty():
+                    out.append(p)
+                faltan -= 1
+                if faltan <= 0:
+                    break
+        out.sort(key=lambda p: p.indice)
+        return out
+    except RuntimeError:                                 # (algo ya borrado por Qt)
+        return []
+
+
+def widgets_en(lay) -> list:
+    """Los widgets que hay directamente en el layout, en su orden (sin itemAt: ver arriba)."""
+    return [p.obj for p in piezas(lay, con_ocultas=True) if not p.es_lay]
+
+
+def layouts_hijos(lay) -> list:
+    """Los layouts que hay dentro de lay (sin itemAt)."""
+    try:
+        return [c for c in lay.children() if isinstance(c, QLayout)]
+    except RuntimeError:
+        return []
+
+
+def soltar_envoltorios_de_items() -> int:
+    """(red de seguridad) Suelta los envoltorios de QLayoutItem que PySide crea y guarda POR SU CUENTA (p. ej.
+    layout.addLayout(fila) con la fila ya llena crea uno para cada cosa de la fila). Nadie los usa y, si Qt borra ese
+    QLayoutItem, se quedarían apuntando a memoria libre (ver arriba). Solo los que nadie más tiene; el objeto de Qt no se
+    toca (shiboken6.invalidate: PySide lo olvida). Devuelve cuántos soltó."""
+    try:
+        from shiboken6 import getAllValidWrappers, invalidate, ownedByPython
+    except ImportError:  # pragma: no cover
+        return 0
+    import sys
+    n = 0
+    for o in getAllValidWrappers():
+        # (solo los de C++ que nadie tiene: la lista, el bucle, getrefcount y el layout que lo cuelga = 4; uno que es
+        #  de Python, p. ej. lo que devuelve takeAt() guardado en un atributo, no se toca)
+        if isinstance(o, QLayoutItem) and not isinstance(o, QObject) and not _de_python(o) and \
+                not ownedByPython(o) and sys.getrefcount(o) <= 4:
+            invalidate(o)
+            n += 1
+    return n
+
+
+_T_SOLTAR = None
+
+
+def _vigilar_envoltorios():
+    """Cada pocos segundos (y al adaptar algo), soltar esos envoltorios (barato: solo recorre una lista)."""
+    global _T_SOLTAR
+    if _T_SOLTAR is not None:
+        return
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return
+    _T_SOLTAR = QTimer(app)
+    _T_SOLTAR.setInterval(2000)
+    _T_SOLTAR.timeout.connect(soltar_envoltorios_de_items)
+    _T_SOLTAR.start()
+
+
 # ------------------------------------------------------------------------------------------------ filas que bajan
 class _FilaQueBaja:
     """(fila horizontal) Si cabe, exactamente como antes; si no, lo que no cabe baja a la línea siguiente."""
@@ -241,13 +431,7 @@ class _FilaQueBaja:
         return max(self._base().minimumSize(self).width(), self._base().sizeHint(self).width())
 
     def _piezas(self):
-        out = []
-        for i in range(self.count()):
-            it = self.itemAt(i)
-            if it is None or it.isEmpty() or it.spacerItem() is not None:
-                continue
-            out.append(it)
-        return out
+        return piezas(self)
 
     def _colocar(self, r: QRect, solo_medir: bool) -> int:
         m = self.contentsMargins()
@@ -267,8 +451,7 @@ class _FilaQueBaja:
         for linea in lineas:
             usado = sum(w for _it, w in linea) + esp * (len(linea) - 1)
             sobra = disp - usado
-            crecen = [p for p in linea if p[0].expandingDirections() & Qt.Horizontal or
-                      (p[0].widget() is not None and self.stretch(self.indexOf(p[0].widget())) > 0)]
+            crecen = [p for p in linea if p[0].crece_a_lo_ancho() or self.stretch(p[0].indice) > 0]
             if not crecen and len(linea) == 1:
                 crecen = linea
             for p in crecen:
@@ -332,11 +515,8 @@ class _RejillaQueBaja:
 
     def _celdas(self):
         out = []
-        for i in range(self.count()):
-            it = self.itemAt(i)
-            if it is None or it.isEmpty() or it.spacerItem() is not None:
-                continue
-            r, c, rs, cs = self.getItemPosition(i)
+        for it in piezas(self):
+            r, c, rs, cs = self.getItemPosition(it.indice)
             out.append((r, c, rs, cs, it))
         out.sort(key=lambda x: (x[0], x[1]))
         return out
@@ -512,25 +692,70 @@ class _VistaSinBarra(QObject):
         vis = [i for i in range(h.count()) if not h.isSectionHidden(i)]
         if not vis:
             return
-        total = sum(h.sectionSize(i) for i in vis)
-        if total <= disp:
+        # Cómo era la tabla antes de tocarla (para devolverla tal cual cuando vuelva a caber: antes una columna
+        # estrechada en un momento estrecho se quedaba así para siempre: «Vi…», miniaturas recortadas)
+        orig = getattr(self, "_orig", None)
+        if orig is None or len(orig) != h.count():
+            orig = self._orig = {i: (h.sectionResizeMode(i), h.sectionSize(i)) for i in range(h.count())}
+            self._estira_ultima = h.stretchLastSection()
+            self._min_seccion = h.minimumSectionSize()
+            self._cambiado = False
+        estiran = [i for i in vis if orig[i][0] == QHeaderView.Stretch]
+        fijas = [i for i in vis if orig[i][0] == QHeaderView.Fixed]
+        ajust = [i for i in vis if i not in estiran and i not in fijas]
+        if not ajust:
             return
-        fijas = [i for i in vis if h.sectionResizeMode(i) == QHeaderView.Fixed]
-        libres = [i for i in vis if i not in fijas]
-        if not libres:
+        quiero = {}
+        for i in ajust:
+            q = orig[i][1]
+            if orig[i][0] == QHeaderView.ResizeToContents:
+                try:                                # (lo de dentro o la cabecera, lo que pida más: nada cortado)
+                    q = max(v.sizeHintForColumn(i), h.sectionSizeHint(i), 24)
+                except Exception:  # noqa: BLE001
+                    pass
+            quiero[i] = q
+        minimo = {i: self._minimo(v, h, i) for i in ajust}
+        hace_falta = sum(h.sectionSize(i) for i in fijas) + sum(quiero.values()) + 56 * len(estiran)
+        if hace_falta <= disp:                      # ✓ cabe: como era
+            if self._cambiado:
+                for i in ajust:
+                    h.setSectionResizeMode(i, QHeaderView.Interactive)
+                    h.resizeSection(i, quiero[i])
+                    h.setSectionResizeMode(i, orig[i][0])
+                h.setStretchLastSection(self._estira_ultima)
+                h.setMinimumSectionSize(self._min_seccion)
+                self._cambiado = False
+            else:                                   # (el ancho que le pones tú a mano a una columna pasa a ser el
+                for i in ajust:                     #  «de siempre»: no se pisa al estrecharla y volver a ensancharla)
+                    if orig[i][0] == QHeaderView.Interactive and not (self._estira_ultima and i == vis[-1]) \
+                            and h.sectionSize(i) != orig[i][1]:
+                        orig[i] = (orig[i][0], h.sectionSize(i))
             return
-        for i in libres:
-            if h.sectionResizeMode(i) in (QHeaderView.ResizeToContents, QHeaderView.Stretch):
-                h.setSectionResizeMode(i, QHeaderView.Interactive)
-        h.setMinimumSectionSize(min(h.minimumSectionSize(), 24))
-        h.setStretchLastSection(True)
-        sobra = total - disp                        # (se estrecha primero la columna más ancha, hasta 56 px)
-        for i in sorted(libres[:-1], key=h.sectionSize, reverse=True):
+        self._cambiado = True                       # ✗ no cabe: se estrecha primero la columna más ancha
+        h.setMinimumSectionSize(min(self._min_seccion, 24))
+        tam = dict(quiero)
+        sobra = hace_falta - disp
+        for i in sorted(ajust, key=tam.get, reverse=True):
             if sobra <= 0:
                 break
-            quita = min(sobra, max(0, h.sectionSize(i) - 56))
-            h.resizeSection(i, h.sectionSize(i) - quita)
+            quita = min(sobra, max(0, tam[i] - minimo[i]))
+            tam[i] -= quita
             sobra -= quita
+        for i in ajust:
+            if h.sectionResizeMode(i) != QHeaderView.Interactive:
+                h.setSectionResizeMode(i, QHeaderView.Interactive)
+            h.resizeSection(i, tam[i])
+        if not estiran and orig[vis[-1]][0] != QHeaderView.Fixed:
+            h.setStretchLastSection(True)
+
+    @staticmethod
+    def _minimo(v, h, i: int) -> int:
+        """Lo mínimo de una columna: la primera de un árbol, su sangría + el icono entero + algo de texto."""
+        from PySide6.QtWidgets import QTreeView
+        if isinstance(v, QTreeView) and h.visualIndex(i) == 0:
+            sangria = v.indentation() * (2 if v.rootIsDecorated() else 1)
+            return sangria + max(0, v.iconSize().width()) + 56
+        return 56
 
     def eventFilter(self, obj, ev):
         t = ev.type()
@@ -834,7 +1059,7 @@ def _fila(lay: QHBoxLayout):
     if isinstance(lay, _FilaQueBaja) or not _de_python(lay) or \
             _propia(type(lay), QHBoxLayout, "setGeometry", "minimumSize", "sizeHint", "heightForWidth"):
         return
-    if sum(1 for i in range(lay.count()) if lay.itemAt(i).spacerItem() is None) < 2:
+    if len(piezas(lay, con_ocultas=True)) < 2:
         return
     if lay.property("responsive_no_baja"):     # (el código pide que esta fila no se parta: se estrecha entera)
         return
@@ -889,10 +1114,7 @@ def _layouts(w: QWidget):
             _rejilla(lo)
         elif isinstance(lo, QHBoxLayout):
             _fila(lo)
-        for i in range(lo.count()):
-            it = lo.itemAt(i)
-            if it is not None and it.layout() is not None:
-                pila.append(it.layout())
+        pila.extend(layouts_hijos(lo))                  # (sin itemAt: ver «lo que hay en un layout»)
 
 
 def _horizontal(w) -> bool:
@@ -974,6 +1196,8 @@ def adaptar_una_vez(raiz: QWidget, sub: QWidget | None = None):
             w.updateGeometry()
         except RuntimeError:
             pass
+    soltar_envoltorios_de_items()
+    _vigilar_envoltorios()
 
 
 class _Vigia(QObject):
@@ -996,9 +1220,10 @@ class _Vigia(QObject):
             adaptar_una_vez(self.raiz, w)
 
     def eventFilter(self, obj, ev):
+        # (sin mirar ev.child(): en ChildAdded el hijo aún se está construyendo y pedir su envoltorio de Python a
+        #  medio hacer es arriesgado; basta con saber qué contenedor recibió algo)
         if ev.type() == QEvent.ChildAdded:
-            c = ev.child()
-            if c is not None and (c.isWidgetType() or isinstance(c, QLayout)) and obj.isWidgetType():
+            if obj.isWidgetType():
                 if not any(o is obj for o in self.pendientes):
                     self.pendientes.append(obj)
                 if not self.t.isActive():

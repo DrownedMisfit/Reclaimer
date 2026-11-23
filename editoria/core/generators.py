@@ -5,6 +5,9 @@
 
   · Color sólido / degradado: una imagen PNG del tamaño del proyecto. Se usa como cualquier imagen (posición,
     deformar, opacidad, efectos, modos de fusión…).
+  · ▭ ◯ Figuras geométricas (página ✦ Efectos → «Figuras geométricas»): un rectángulo o un círculo de color encima
+    del video. Es una imagen PNG del tamaño del proyecto con la figura (el círculo, transparente fuera); el clip
+    lleva su caja (Transformar: mover y cambiar de tamaño en el visor) y sale igual al exportar (imagen con alfa).
   · Capa de ajuste: una imagen TRANSPARENTE en una pista de video; su color y sus efectos se aplican a TODO lo que
     hay debajo mientras dura (en el visor y al exportar). Su opacidad y sus fundidos suavizan el efecto.
 
@@ -23,6 +26,12 @@ import numpy as np
 KINDS = {"solid": "Color sólido", "linear": "Degradado", "radial": "Degradado circular", "adjust": "Capa de ajuste"}
 ICONS = {"solid": "🟦", "linear": "🌈", "radial": "🔵", "adjust": "🎨"}
 DEFAULT = {"kind": "solid", "c1": "#1e1e24", "c2": "#3a6df0", "angle": 90}
+SHAPES = {"rect": "Rectángulo", "ellipse": "Círculo"}     # ▭ ◯ figuras (no salen en «🟦 Color sólido o degradado…»)
+ICONS.update({"rect": "▭", "ellipse": "◯"})
+
+
+def is_shape(m) -> bool:
+    return gen_of(m).get("kind") in SHAPES
 
 
 def gen_of(m) -> dict:
@@ -39,12 +48,12 @@ def is_generated(m) -> bool:
 
 def clean(gen: dict) -> dict:
     g = dict(DEFAULT, **{k: v for k, v in (gen or {}).items() if v is not None})
-    if g["kind"] not in KINDS:
+    if g["kind"] not in KINDS and g["kind"] not in SHAPES:
         g["kind"] = "solid"
     out = {"kind": g["kind"]}
     if g["kind"] != "adjust":
         out["c1"] = _hex(g["c1"])
-        if g["kind"] != "solid":
+        if g["kind"] not in ("solid",) and g["kind"] not in SHAPES:
             out["c2"] = _hex(g["c2"])
         if g["kind"] == "linear":
             out["angle"] = int(round(float(g.get("angle", 90)))) % 360
@@ -57,6 +66,8 @@ def name_of(gen: dict) -> str:
         return f"{ICONS['adjust']} Capa de ajuste"
     if g["kind"] == "solid":
         return f"{ICONS['solid']} Color sólido {g['c1']}"
+    if g["kind"] in SHAPES:
+        return f"{ICONS[g['kind']]} {SHAPES[g['kind']]} {g['c1']}"
     return f"{ICONS[g['kind']]} {KINDS[g['kind']]} {g['c1']} → {g['c2']}"
 
 
@@ -100,7 +111,15 @@ def render(gen: dict, W: int, H: int) -> np.ndarray:
     if g["kind"] == "adjust":
         return np.zeros((H, W, 4), np.uint8)
     c1 = _rgb(g["c1"])
-    if g["kind"] == "solid":
+    if g["kind"] == "ellipse":       # ◯ el círculo llena su caja; fuera, transparente (borde suavizado 1,5 px)
+        out = np.empty((H, W, 4), np.uint8)
+        out[..., :3] = np.clip(c1[::-1], 0, 255).astype(np.uint8)
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        d = np.hypot((xx + 0.5 - W / 2) / (W / 2), (yy + 0.5 - H / 2) / (H / 2))
+        edge = 1.5 / max(1.0, min(W, H) / 2)
+        out[..., 3] = (np.clip((1 - d) / edge, 0, 1) * 255).astype(np.uint8)
+        return out
+    if g["kind"] in ("solid", "rect"):
         rgb = np.broadcast_to(c1, (H, W, 3))
     else:
         c2 = _rgb(g["c2"])

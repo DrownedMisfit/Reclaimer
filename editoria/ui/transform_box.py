@@ -6,60 +6,69 @@ momento. Varios cambios seguidos = un solo Ctrl+Z.
 """
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
-                               QToolButton, QWidget)
+from PySide6.QtWidgets import QCheckBox, QGroupBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ..core import fill as FILL
 from ..core import transform
+from . import diseno as D
 
 
-def _spin(lo, hi, step, suffix, dec=1) -> QDoubleSpinBox:
-    s = QDoubleSpinBox()
-    s.setRange(lo, hi)
-    s.setSingleStep(step)
-    s.setDecimals(dec)
-    s.setSuffix(suffix)
-    s.setKeyboardTracking(False)
-    return s
+def _spin(lo, hi, step, suffix, dec=1, deslizador=True) -> D.ValorDeslizable:
+    """Un número del diseño (deslizador fino + número que se escribe o se arrastra)."""
+    return D.ValorDeslizable(lo, hi, step, dec, suffix.strip(), deslizador=deslizador)
 
 
-def _reset_btn(tip: str, slot) -> QToolButton:
-    b = QToolButton()
-    b.setText("↺")
-    b.setToolTip(tip)
-    b.clicked.connect(slot)
+def _reset_btn(tip: str, slot) -> D.BotonIcono:
+    b = D.BotonIcono("rotate-ccw", tip, D.ALTO_CONTROL, plano=True)
+    b.clicked.connect(lambda: slot())
     return b
 
 
 class TransformBox(QGroupBox):
+    """(diseño de ui/diseno.py, 20/11: filas etiqueta/control, números deslizables, ↺ e iconos monocromos)"""
+
     def __init__(self, inspector):
-        super().__init__("⤧ Transformar")
+        super().__init__("Transformar")
         self.ins, self.ctrl = inspector, inspector.ctrl
         self._loading = False
-        f = QFormLayout(self)
+        f = QVBoxLayout(self)
+        f.setSpacing(D.px(D.M1))
 
-        def row(label, widgets, reset_tip, reset_slot):
+        def row(label, widgets, reset_tip=None, reset_slot=None, tip="", fija=True):
             w = QWidget()
             h = QHBoxLayout(w)
+            if fija:                              # (número + ↺: siempre juntos; los botones sí pueden bajar de fila)
+                D.fila_fija(h)
             h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(D.px(D.M1))
             for x in widgets:
-                h.addWidget(x)
-            h.addWidget(_reset_btn(reset_tip, reset_slot))
-            f.addRow(label, w)
+                h.addWidget(x, 1 if isinstance(x, D.ValorDeslizable) else 0)
+            if reset_slot is not None:
+                h.addWidget(_reset_btn(reset_tip, reset_slot))
+            fila = D.FilaInspector(label, w, tip)
+            f.addWidget(fila)
+            return fila
         self.w = _spin(1, 400, 1, " %", 1)
         self.h = _spin(1, 400, 1, " %", 1)
-        self.link = QCheckBox("🔗")
+        self.link = D.BotonIcono("link", "", D.ALTO_CONTROL, plano=True)
+        self.link.setCheckable(True)
         self.link.setChecked(True)
-        self.link.setToolTip("Enlazado: ancho y alto juntos (sin deformar). Suéltalo para estirar o aplastar.")
+        self.link.toggled.connect(lambda on: self._pintar_enlace(on))
+        self._pintar_enlace(True)
         self.w.valueChanged.connect(lambda v: self._size("w", v))
         self.h.valueChanged.connect(lambda v: self._size("h", v))
-        row("Tamaño", [QLabel("X"), self.w, self.link, QLabel("Y"), self.h], "Tamaño normal (pantalla completa, "
-            "sin deformar)", self._reset_size)
-        self.px = _spin(-8000, 8000, 10, " px", 0)
-        self.py = _spin(-8000, 8000, 10, " px", 0)
+        row("Ancho", [self.w, self.link], "Tamaño normal (pantalla completa, sin deformar)", self._reset_size,
+            "Ancho de la capa, en % de la pantalla")
+        row("Alto", [self.h], "Tamaño normal (pantalla completa, sin deformar)", self._reset_size,
+            "Alto de la capa, en % de la pantalla")
+        self.px = _spin(-8000, 8000, 10, " px", 0, deslizador=False)
+        self.py = _spin(-8000, 8000, 10, " px", 0, deslizador=False)
         self.px.valueChanged.connect(lambda _v: self._pos())
         self.py.valueChanged.connect(lambda _v: self._pos())
-        row("Posición", [QLabel("X"), self.px, QLabel("Y"), self.py], "Centrar", self._reset_pos)
+        row("Posición X", [self.px], "Centrar", self._reset_pos, "Distancia del centro de la capa al centro de la "
+            "pantalla, de izquierda a derecha (arrastra el número a los lados o escríbelo)")
+        row("Posición Y", [self.py], "Centrar", self._reset_pos, "Distancia del centro de la capa al centro de la "
+            "pantalla, de arriba abajo")
         # ⊕ Centrar (un clic = un solo Ctrl+Z); al moverla en el visor, además, se pega al centro y a los bordes
         cw = QWidget()
         ch = QHBoxLayout(cw)
@@ -76,35 +85,50 @@ class TransformBox(QGroupBox):
             b.setToolTip(tip)
             b.clicked.connect(lambda _=False, a=axes: self.center(a))
             ch.addWidget(b)
-        f.addRow("Centrar", cw)
+        f.addWidget(D.FilaInspector("Centrar", cw))
         self.rot = _spin(-360, 360, 1, " °", 1)
         self.rot.valueChanged.connect(lambda v: self._set(rot=round(v, 2)))
-        row("Rotación", [self.rot], "Sin girar", lambda: self.rot.setValue(0.0))
-        self.fh = QPushButton("↔ Horizontal")
-        self.fv = QPushButton("↕ Vertical")
+        row("Rotación", [self.rot], "Sin girar", lambda: self.rot.setValue(0.0), "Ángulo de la capa, en grados")
+        self.fh = QPushButton("Horizontal")
+        self.fv = QPushButton("Vertical")
+        self.fh.setIcon(D.icono("flip-horizontal-2"))
+        self.fv.setIcon(D.icono("flip-vertical-2"))
+        self.fh.setToolTip("Voltear de izquierda a derecha (como en un espejo)")
+        self.fv.setToolTip("Voltear de arriba abajo")
         for b, key in ((self.fh, "flip_h"), (self.fv, "flip_v")):
             b.setCheckable(True)
             b.toggled.connect(lambda on, k=key: self._set(**{k: bool(on)}))
         row("Voltear", [self.fh, self.fv], "Sin voltear", lambda: (self.fh.setChecked(False),
-                                                                   self.fv.setChecked(False)))
+                                                                   self.fv.setChecked(False)), fija=False)
         # ▦ Relleno (el efecto de Resolve): la propia imagen, ampliada y desenfocada, en lo que queda vacío
-        self.fill_on = QCheckBox("▦ Relleno con la propia imagen")
+        self.fill_on = QCheckBox("Relleno con la propia imagen")
         self.fill_on.setToolTip("Lo que queda vacío alrededor (al aplastarla, hacerla pequeña o de otra forma que la "
                                 "pantalla) se llena con la misma imagen ampliada y desenfocada.")
         self.fill_on.toggled.connect(self._fill_toggled)
-        f.addRow(self.fill_on)
+        f.addWidget(D.TituloSeccion("Relleno"))
+        f.addWidget(self.fill_on)
         self.fill_blur = _spin(0, 100, 5, " %", 0)
         self.fill_dark = _spin(0, 90, 5, " %", 0)
         self.fill_zoom = _spin(100, 300, 5, " %", 0)
         for s in (self.fill_blur, self.fill_dark, self.fill_zoom):
             s.valueChanged.connect(lambda _v: self._fill_params())
         self.fill_row = QWidget()
-        h = QHBoxLayout(self.fill_row)
+        h = QVBoxLayout(self.fill_row)
         h.setContentsMargins(0, 0, 0, 0)
-        for lab, s in (("Desenfoque", self.fill_blur), ("Oscurecer", self.fill_dark), ("Zoom", self.fill_zoom)):
-            h.addWidget(QLabel(lab))
-            h.addWidget(s)
-        f.addRow(self.fill_row)
+        h.setSpacing(D.px(D.M1))
+        for lab, s, tip in (("Desenfoque", self.fill_blur, "Cuánto se desenfoca el relleno"),
+                            ("Oscurecer", self.fill_dark, "Cuánto se oscurece el relleno"),
+                            ("Zoom", self.fill_zoom, "Cuánto se amplía la imagen del relleno")):
+            h.addWidget(D.FilaInspector(lab, s, tip))
+        f.addWidget(self.fill_row)
+
+    def _pintar_enlace(self, on: bool):
+        if on:
+            self.link.poner_icono("link", "Enlazado: ancho y alto juntos (sin deformar)\nClic: soltarlos para estirar "
+                                  "o aplastar")
+        else:
+            self.link.poner_icono("unlink", "Ancho y alto por separado (se puede estirar o aplastar)\nClic: enlazarlos "
+                                  "otra vez")
 
     # ---- datos
     def _clip(self):

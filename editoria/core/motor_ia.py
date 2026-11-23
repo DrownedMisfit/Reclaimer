@@ -125,18 +125,26 @@ def whisper_ok() -> bool:
     return PYTHON.exists() and (DATOS_MOTOR / ".venv" / "Lib" / "site-packages" / "whisper" / "__init__.py").exists()
 
 
+def _env() -> dict:
+    return dict(os.environ, PYTHONIOENCODING="utf-8", TORCH_HOME=str(MODELS), HF_HOME=str(MODELS / "hf"),
+                TQDM_DISABLE="1",
+                TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="1",   # atención rápida en AMD: ~3 veces más rápido
+                MIOPEN_USER_DB_PATH=str(DATOS_MOTOR / "miopen"), MIOPEN_CUSTOM_CACHE_DIR=str(DATOS_MOTOR / "miopen"),
+                NUMBA_CACHE_DIR=str(DATOS_MOTOR / "numba"))   # (la DTW de Whisper compilada una sola vez)
+
+
 def run(script: str, job: dict, progress=None, cancelled=None, partial=None) -> str:
     ok, why = available("sam" if script == "recortar.py" else "")
     if not ok:
         raise RuntimeError(why)
+    if script != "transcribir.py" and _voz is not None:
+        _voz.cerrar(solo_si_libre=True)              # (SAM/Demucs: la memoria de la tarjeta, para ellos)
     DATOS_MOTOR.mkdir(parents=True, exist_ok=True)
     fd, jp = tempfile.mkstemp(prefix="trabajo_", suffix=".json", dir=str(DATOS_MOTOR))
     os.close(fd)
     with open(jp, "w", encoding="utf-8") as f:
         json.dump(job, f)
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", TORCH_HOME=str(MODELS), HF_HOME=str(MODELS / "hf"), TQDM_DISABLE="1",
-               TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL="1",   # atención rápida en AMD: ~3 veces más rápido
-               MIOPEN_USER_DB_PATH=str(DATOS_MOTOR / "miopen"), MIOPEN_CUSTOM_CACHE_DIR=str(DATOS_MOTOR / "miopen"))
+    env = _env()
     proc = subprocess.Popen([str(PYTHON), str(JOBS / script), jp], cwd=str(DATOS_MOTOR), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
                             errors="replace", env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -211,3 +219,154 @@ def run(script: str, job: dict, progress=None, cancelled=None, partial=None) -> 
     if proc.returncode != 0 or not result:
         raise RuntimeError("El motor de IA falló:\n" + "\n".join(tail[-8:]))
     return result
+
+
+# ------------------------------------------------------------------ 🎙 servidor de voz (modelo siempre cargado)
+class _ServidorVoz:
+    """⚡ Un Python del motor que se queda abierto con Whisper ya cargado en la tarjeta (trabajos/servidor_voz.py).
+    Antes, cada transcripción arrancaba PyTorch (~3 s) y cargaba el modelo (large-v3: ~12 s; turbo: ~7 s) y la
+    primera pasada iba más lenta (~5 s). Ahora eso se paga una vez (o nunca, si se precarga al abrir el panel).
+    Una orden a la vez. Cancelar = cerrar el proceso (como antes); la siguiente vez se vuelve a abrir. Si nadie lo
+    usa en 10 min se cierra solo, y también al cerrar Reclaimer."""
+
+    def __init__(self):
+        import threading
+        self._lock = threading.Lock()
+        self._proc = None
+        self._lines = None
+        self.modelo = ""                             # (el que tiene cargado, si se sabe)
+
+    def activo(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def ocupado(self) -> bool:
+        return self._lock.locked()
+
+    def _arrancar(self):
+        import queue
+        import threading
+        if self.activo():
+            return
+        self.modelo = ""
+        proc = subprocess.Popen([str(PYTHON), str(JOBS / "servidor_voz.py")], cwd=str(DATOS_MOTOR),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace",
+                                # (AMD: sin «afinar» cada tamaño de audio nuevo; el alineador tardaba ~50 s la 1.ª vez)
+                                env=dict(_env(), MIOPEN_FIND_MODE="FAST"),
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        lines: queue.Queue = queue.Queue()
+
+        def leer():
+            buf = ""
+            try:
+                while True:
+                    ch = proc.stdout.read(1)
+                    if not ch:
+                        break
+                    if ch not in "\r\n":
+                        buf += ch
+                        continue
+                    lines.put(buf.strip())
+                    buf = ""
+            except (OSError, ValueError):
+                pass
+            if buf.strip():
+                lines.put(buf.strip())
+            lines.put(None)
+        threading.Thread(target=leer, daemon=True, name="motor_voz_salida").start()
+        self._proc, self._lines = proc, lines
+
+    def cerrar(self, solo_si_libre: bool = False):
+        if solo_si_libre and self.ocupado():
+            return
+        proc, self._proc = self._proc, None
+        self.modelo = ""
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def pedir(self, orden: dict, progress=None, cancelled=None, partial=None) -> str:
+        """Manda una orden y espera su «LISTO resultado». Lanza SinTarjeta, RuntimeError («Cancelado.» al cancelar)."""
+        import queue
+        import time
+        ok, why = available("")
+        if not ok:
+            raise RuntimeError(why)
+        while not self._lock.acquire(timeout=0.2):   # (p. ej. aún precargando: se espera, pero se puede cancelar)
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Cancelado.")
+        try:
+            DATOS_MOTOR.mkdir(parents=True, exist_ok=True)
+            self._arrancar()
+            proc, lines = self._proc, self._lines
+            try:
+                proc.stdin.write(json.dumps(orden, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
+            except (OSError, ValueError) as exc:
+                self.cerrar()
+                raise RuntimeError(f"El motor de IA no responde ({exc}).") from exc
+            tail: list = []
+            while True:
+                if cancelled is not None and cancelled():
+                    self.cerrar()
+                    raise RuntimeError("Cancelado.")
+                try:
+                    line = lines.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if line is None:                     # (el proceso se cerró)
+                    t0 = time.monotonic()
+                    while proc.poll() is None and time.monotonic() - t0 < 5:
+                        time.sleep(0.05)
+                    self._proc = None
+                    self.modelo = ""
+                    if "SIN_TARJETA" in tail:
+                        raise SinTarjeta("El motor de IA no encuentra una tarjeta gráfica usable.")
+                    raise RuntimeError("El motor de IA falló:\n" + "\n".join(tail[-8:]))
+                if line.startswith("PROGRESO ") and progress:
+                    parts = line.split(" ", 2)
+                    try:
+                        progress(float(parts[1]), parts[2] if len(parts) > 2 else "")
+                    except ValueError:
+                        pass
+                elif line.startswith("LISTO "):
+                    if orden.get("cmd") in ("cargar", "transcribir", "rellenar") and orden.get("modelo"):
+                        self.modelo = str(orden["modelo"])
+                    return line[6:].strip()
+                elif line.startswith("FALLO "):
+                    raise RuntimeError("El motor de IA falló:\n" + "\n".join((tail + [line[6:]])[-8:]))
+                elif line.startswith("PARCIAL ") and partial is not None:
+                    try:
+                        partial(line[8:].strip())
+                    except Exception:  # noqa: BLE001 - un parcial que falla no corta el trabajo
+                        pass
+                elif line == "SIN_TARJETA":
+                    tail.append(line)
+                elif line and line != "PREPARADO" and "it/s]" not in line and "s/it]" not in line \
+                        and "Triton kernels" not in line and "slower DTW" not in line and "warnings.warn" not in line:
+                    tail = (tail + [line])[-15:]
+        finally:
+            self._lock.release()
+
+    def cargar(self, modelo: str) -> None:
+        """Precargar (en segundo plano: tarda unos segundos). Si ya está ese modelo, no hace nada."""
+        if self.activo() and self.modelo == modelo:
+            return
+        self.pedir({"cmd": "cargar", "modelo": modelo})
+
+
+_voz: _ServidorVoz | None = None
+
+
+def servidor_voz() -> _ServidorVoz:
+    global _voz
+    if _voz is None:
+        import atexit
+        _voz = _ServidorVoz()
+        atexit.register(_voz.cerrar)
+    return _voz

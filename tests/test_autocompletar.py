@@ -133,6 +133,8 @@ def test_panel(out):
     from editoria.ui.theme import apply_dark_theme
     apply_dark_theme(app)
     vid, song = make_media(out)
+    from PySide6.QtCore import QSettings as _QS        # 📱 relleno vertical encendido: el ajuste de la prueba (el
+    _QS("EditorIA", "EditorIA").setValue("shorts/encuadre_auto", True)   # tuyo, copiado, puede venir apagado)
     win = MainWindow()
     win.resize(1500, 900)
     win.show()

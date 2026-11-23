@@ -1,13 +1,31 @@
 """
 Prueba de la interfaz sin mostrarla en pantalla: crea la ventana, importa medios,
 monta una timeline, simula acciones y guarda una captura.
-Ejecutar:  .venv\\Scripts\\python.exe tests\\test_ui.py <carpeta_de_medios> <captura.png>
+Ejecutar:  .venv\\Scripts\\python.exe tests\\test_ui.py <carpeta_de_medios> [captura.png]
 """
 from __future__ import annotations
 
 import os
 import sys
 import time
+
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,7 +47,9 @@ def pump(app, secs):
 
 
 def main():
-    folder, shot = sys.argv[1], sys.argv[2]
+    # (por el turno llega solo la carpeta: la captura va dentro de ella)
+    folder = sys.argv[1] if len(sys.argv) > 1 else os.path.join("_pruebas_tmp", "test_ui")
+    shot = sys.argv[2] if len(sys.argv) > 2 else os.path.join(folder, "captura_ui.png")
     if not os.path.isdir(folder) or not any(os.scandir(folder)):    # sin videos de prueba: se crean
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from test_core import make_media

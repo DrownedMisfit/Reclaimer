@@ -100,9 +100,19 @@ def main():
     # 3b) Ctrl+X: quita lo elegido; Ctrl+V lo pone otra vez en el mismo sitio
     from PySide6.QtTest import QTest
     ed.canvas.sel = lay["id"]
-    ed.window().activateWindow()                  # (sin ventana activa, Qt no da el foco y no hay atajos)
-    pump(app, 0.1)
+    # (sin ventana activa, Qt no da el foco y no hay atajos; sin pantalla, la activación puede tardar o perderse: se
+    #  espera a que llegue y, si no, se fija a mano)
+    t0 = time.time()
+    while QApplication.activeWindow() is not ed.window() and time.time() - t0 < 3:
+        ed.window().activateWindow()
+        pump(app, 0.1)
+    if QApplication.activeWindow() is not ed.window():
+        QApplication.setActiveWindow(ed.window())
+        pump(app, 0.1)
     ed.canvas.setFocus()
+    pump(app, 0.05)
+    assert QApplication.focusWidget() is ed.canvas, ("el lienzo debe tener el foco", QApplication.focusWidget(),
+                                                     QApplication.activeWindow())
     n0, x0, y0 = len(ed.doc["layers"]), ed.cur()["x"], ed.cur()["y"]
     QTest.keyClick(ed.canvas, Qt.Key_X, Qt.ControlModifier)
     pump(app, 0.1)

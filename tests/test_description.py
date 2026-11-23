@@ -4,7 +4,8 @@ Prueba de la DESCRIPCIÓN para YouTube (📝 Descripción para YouTube). Sin ven
   · las secciones se quitan con su casilla y los hashtags se activan uno a uno;
   · renombrar un capítulo lo cambia en su marcador; el párrafo se recuerda por proyecto;
   · guardar .txt escribe la misma descripción;
-  · al terminar una exportación (ExportDialog._finished con código 0) aparece «<video>.descripcion.txt».
+  · al terminar una exportación (ExportDialog._finished con código 0) aparece «<video>.descripcion.txt» SOLO con la
+    casilla «📝 Crear también la descripción (.txt)» (apagada de entrada).
 Ejecutar:  PYTHONUTF8=1 .venv/Scripts/python.exe tests/test_description.py _pruebas_tmp/test_description
 """
 from __future__ import annotations
@@ -139,6 +140,14 @@ def prueba_contenido(carpeta: str):
     return dlg, ctrl
 
 
+def _parcial(carpeta: str) -> str:
+    """El «<nombre>.parcial.mp4» que deja FFmpeg (exportación robusta: solo al terminar bien pasa al nombre final)."""
+    ruta = os.path.join(carpeta, "Video final.parcial.mp4")
+    with open(ruta, "wb") as f:
+        f.write(b"x" * 64)
+    return ruta
+
+
 def prueba_exportacion(carpeta: str, ctrl: _Ctrl):
     from editoria.ui.export_dialog import ExportDialog
     dlg = ExportDialog(ctrl)
@@ -146,9 +155,24 @@ def prueba_exportacion(carpeta: str, ctrl: _Ctrl):
     dlg._opts = ExportOptions(path=video, width=1920, height=1080, fps=30.0, codec="h264", encoder="cpu",
                               bitrate_mbps=10)
     dlg._t0 = time.time()
-    dlg._finished(0, None)                                   # como si ffmpeg hubiera terminado bien
+    dlg._partial = _parcial(carpeta)
     ruta = os.path.join(carpeta, "Video final.descripcion.txt")
-    assert os.path.isfile(ruta), "no se creó <video>.descripcion.txt"
+    if os.path.exists(ruta):
+        os.remove(ruta)                                      # (de una vuelta anterior de la prueba)
+    assert not dlg.desc_txt.isChecked(), "«📝 Crear también la descripción (.txt)» debe venir apagada"
+    dlg._finished(0, None)                                   # como si ffmpeg hubiera terminado bien
+    assert not os.path.exists(ruta), "sin la casilla no debe crearse <video>.descripcion.txt"
+    print("✓ Al exportar sin la casilla: solo el video (ningún .txt)")
+    dlg.desc_txt.setChecked(True)
+    dlg.close()
+    dlg = ExportDialog(ctrl)                                 # (la casilla se recuerda)
+    assert dlg.desc_txt.isChecked(), "«📝 Crear también la descripción (.txt)» no se recuerda"
+    dlg._opts = ExportOptions(path=video, width=1920, height=1080, fps=30.0, codec="h264", encoder="cpu",
+                              bitrate_mbps=10)
+    dlg._t0 = time.time()
+    dlg._partial = _parcial(carpeta)
+    dlg._finished(0, None)
+    assert os.path.isfile(ruta), "no se creó <video>.descripcion.txt: " + dlg.status.text()
     with open(ruta, encoding="utf-8") as f:
         texto = f.read()
     assert "☕ Apóyame en ko-fi.com/prueba" in texto and "🎬 Clips usados" in texto, texto
@@ -168,6 +192,7 @@ def main():
         dlg.close()
     finally:
         st.remove("descripcion")
+        st.remove("exportar/crear_descripcion")
     print("TODO OK")
 
 

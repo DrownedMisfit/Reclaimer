@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ajustes  # noqa: E402,F401
 
-from PySide6.QtCore import QPoint, QSettings, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -62,6 +62,10 @@ def run(app, st):
     start = QPoint(int(g.center().x()), int(min(g.bottom() - 5, g.top() + 150)))
 
     def drag(dy):
+        # (el asa, donde está AHORA: al cambiar el alto de las pistas también cambia la suya)
+        g_ = tl._grip_rect()
+        start = QPoint(int(g_.center().x()), int(min(g_.bottom() - 5, g_.top() + 150)))
+        assert g_.contains(QPointF(start)), (g_, start)
         QTest.mousePress(tl, Qt.LeftButton, Qt.NoModifier, start)
         for k in range(1, 6):
             QTest.mouseMove(tl, QPoint(start.x(), start.y() + dy * k // 5))

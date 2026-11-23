@@ -83,53 +83,115 @@ def _metrics(rgb: np.ndarray) -> dict:
             "letterbox": float(letter), "edges": float((cv2.Canny(g, 80, 160) > 0).mean())}
 
 
+FILTER = f"fps=1/{STEP:g},scale={W_SMALL}:-2"      # (la lectura única usa el mismo filtro)
+VERSION = 1
+
+
+def small_height(path: str) -> int:
+    probe = media_tools.probe(path)
+    return int(round(W_SMALL * probe["height"] / max(1, probe["width"]) / 2) * 2) or 216
+
+
+def score_frame(rgb: np.ndarray) -> tuple[float, list[str]] | None:
+    """Puntuación de un fotograma como miniatura y por qué (None: negro, quemado, borroso o plano)."""
+    from .tracking import detect_faces
+    mt = _metrics(rgb)
+    if mt["bright"] < 0.08 or mt["bright"] > 0.92 or mt["sharp"] < 25 or mt["contrast"] < 0.05:
+        return None       # negro, quemado, borroso o plano: descartado
+    score, why = 0.0, []
+    faces = detect_faces(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    if faces:
+        fx, fy, fw, fh, conf = faces[0]
+        size = fh
+        cx, cy = fx + fw / 2, fy + fh / 2
+        s = min(1.0, size / 0.35)                      # cuanto más grande (hasta ~35 % del alto)
+        thirds = 1 - min(abs(cx - 1 / 3), abs(cx - 2 / 3), abs(cx - 0.5)) * 3
+        score += 2.2 * s * conf + 0.4 * max(0.0, thirds)
+        why.append("rostro grande" if size > 0.25 else "rostro")
+        if len(faces) == 2:
+            score += 0.2
+            why.append("dos personas")
+    sh = min(1.0, np.log1p(mt["sharp"]) / np.log1p(1500))
+    score += 0.9 * sh
+    if sh > 0.85:
+        why.append("muy nítido")
+    score += 0.8 * min(1.0, mt["contrast"] / 0.28)
+    if mt["contrast"] > 0.25:
+        why.append("alto contraste")
+    score += 0.5 * min(1.0, mt["color"] / 0.6) - 0.6 * max(0.0, mt["color"] - 1.1)
+    if 0.4 < mt["color"] < 1.1:
+        why.append("buen color")
+    score -= 0.6 * max(0.0, mt["edges"] - 0.18) * 5      # demasiado detalle = difícil de leer
+    score -= 0.3 * mt["letterbox"]
+    return score, why
+
+
+# ⚡ El video entero ya mirado (lo guarda la lectura única): [[segundo, puntuación, [por qué…]], …] — unos KB por hora
+def _scored_path(path: str) -> str:
+    return os.path.join(str(cache_dir("miniatura_fotogramas")), f"{media_tools.cache_key(path)}_v{VERSION}.json")
+
+
+def load_scored(path: str) -> list | None:
+    import json
+    try:
+        with open(_scored_path(path), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_scored(path: str, items: list):
+    import json
+    try:
+        with open(_scored_path(path), "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def _whole_file(m: dict, ranges: list, cancelled: CancelFn) -> list | None:
+    """Lo mirado del video entero, si ya está (o si conviene mirarlo entero de una vez: lectura única)."""
+    got = load_scored(m["path"])
+    if got is not None:
+        return got
+    from . import lectura_unica
+    dur = float(m.get("duration") or 0)
+    used = sum(b - a for a, b in ranges)
+    if dur > 0 and used >= 0.5 * dur and \
+            lectura_unica.usar(m["path"], dur, "miniatura"):
+        lectura_unica.asegurar_o_seguir(m["path"], dur, ["miniatura"], cancelled, None)
+        return load_scored(m["path"])
+    return None
+
+
 def find(media: list[dict], topic_text: str = "", top: int = 12, progress: ProgressFn = None,
          cancelled: CancelFn = None) -> list[Candidate]:
     """media: [{media_id, path, kind, duration, ranges: [(ini, fin)] (trozos usados; vacío = todo)}]."""
     from . import embeddings
-    from .tracking import detect_faces
     cands: list[Candidate] = []
     total = sum(sum(b - a for a, b in (m.get("ranges") or [(0, m["duration"])])) for m in media) or 1
     done = 0.0
     for m in media:
         if m["kind"] != "video":
             continue
-        for a, b in (m.get("ranges") or [(0.0, m["duration"])]):
-            if b - a < 0.5:
-                continue
+        ranges = [(a, b) for a, b in (m.get("ranges") or [(0.0, m["duration"])]) if b - a >= 0.5]
+        whole = _whole_file(m, ranges, cancelled)
+        if whole is not None:
+            # ⚡ ya mirado entero (lectura única, ai/lectura_unica.py): los fotogramas de esos trozos, sin leer nada
+            for t, score, why in whole:
+                if any(a <= t - STEP / 2 < b for a, b in ranges):
+                    cands.append(Candidate(m["media_id"], round(t, 2), score, list(why)))
+            done += sum(b - a for a, b in ranges)
+            report(progress, min(0.8, 0.8 * done / total), "Mirando los fotogramas de tu video…")
+            continue
+        for a, b in ranges:
             for t, rgb in _frames(m["path"], a, b - a, cancelled):
                 done += STEP
                 if len(cands) % 10 == 0:
                     report(progress, min(0.8, 0.8 * done / total), "Mirando los fotogramas de tu video…")
-                mt = _metrics(rgb)
-                if mt["bright"] < 0.08 or mt["bright"] > 0.92 or mt["sharp"] < 25 or mt["contrast"] < 0.05:
-                    continue      # negro, quemado, borroso o plano: descartado
-                score, why = 0.0, []
-                faces = detect_faces(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-                if faces:
-                    fx, fy, fw, fh, conf = faces[0]
-                    size = fh
-                    cx, cy = fx + fw / 2, fy + fh / 2
-                    s = min(1.0, size / 0.35)                      # cuanto más grande (hasta ~35 % del alto)
-                    thirds = 1 - min(abs(cx - 1 / 3), abs(cx - 2 / 3), abs(cx - 0.5)) * 3
-                    score += 2.2 * s * conf + 0.4 * max(0.0, thirds)
-                    why.append("rostro grande" if size > 0.25 else "rostro")
-                    if len(faces) == 2:
-                        score += 0.2
-                        why.append("dos personas")
-                sh = min(1.0, np.log1p(mt["sharp"]) / np.log1p(1500))
-                score += 0.9 * sh
-                if sh > 0.85:
-                    why.append("muy nítido")
-                score += 0.8 * min(1.0, mt["contrast"] / 0.28)
-                if mt["contrast"] > 0.25:
-                    why.append("alto contraste")
-                score += 0.5 * min(1.0, mt["color"] / 0.6) - 0.6 * max(0.0, mt["color"] - 1.1)
-                if 0.4 < mt["color"] < 1.1:
-                    why.append("buen color")
-                score -= 0.6 * max(0.0, mt["edges"] - 0.18) * 5      # demasiado detalle = difícil de leer
-                score -= 0.3 * mt["letterbox"]
-                cands.append(Candidate(m["media_id"], round(t, 2), score, why))
+                got = score_frame(rgb)
+                if got is not None:
+                    cands.append(Candidate(m["media_id"], round(t, 2), got[0], got[1]))
     if not cands:
         return []
     # Afinar con la IA de imágenes: personajes en primer plano y relación con el tema
@@ -137,14 +199,9 @@ def find(media: list[dict], topic_text: str = "", top: int = 12, progress: Progr
     pre = cands[:max(top * 6, 60)]
     report(progress, 0.85, "Buscando personajes y el tema del video…")
     by_media = {m["media_id"]: m for m in media}
-    small = []
-    for c in pre:
-        img = _grab(by_media[c.media_id]["path"], c.time, 224)
-        small.append(img if img is not None else np.zeros((224, 224, 3), np.uint8))
     try:
-        enc_i = embeddings.get("clip_image")
         enc_t = embeddings.get("clip_text")
-        vecs = enc_i.encode(np.stack(small))
+        vecs = _clip_vectors(pre, by_media, embeddings)
         prompts = ["un primer plano de un personaje", "un retrato de una persona con expresión intensa",
                    "a close-up of a video game character"]
         char = enc_t.encode(prompts).mean(0)
@@ -195,6 +252,33 @@ def find(media: list[dict], topic_text: str = "", top: int = 12, progress: Progr
         if not c.reasons:
             c.reasons.append("buena composición")
     return [c for c in chosen if c.path]
+
+
+def _clip_vectors(pre: list[Candidate], by_media: dict, embeddings) -> np.ndarray:
+    """Huella CLIP del centro de cada propuesta. ⚡ Si ese video ya se entendió a fondo (una huella del centro por
+    segundo: ai/library_understanding.py), se usa esa en vez de volver a leer el fotograma y calcularla."""
+    from .library_understanding import load_deep
+    deep: dict[str, np.ndarray | None] = {}
+    vecs: list[np.ndarray | None] = []
+    for c in pre:
+        path = by_media[c.media_id]["path"]
+        if path not in deep:
+            d = load_deep(path)
+            # (vecs = [plano entero…, centro…]: la segunda mitad es el centro del segundo k, con k = 0, 1, 2…)
+            deep[path] = d["vecs"][len(d["vecs"]) // 2:] if d is not None and len(d["vecs"]) >= 2 else None
+        center = deep[path]
+        k = int(round(c.time))
+        vecs.append(center[k] if center is not None and 0 <= k < len(center) else None)
+    missing = [i for i, v in enumerate(vecs) if v is None]
+    if missing:
+        small = []
+        for i in missing:
+            img = _grab(by_media[pre[i].media_id]["path"], pre[i].time, 224)
+            small.append(img if img is not None else np.zeros((224, 224, 3), np.uint8))
+        got = embeddings.get("clip_image").encode(np.stack(small))
+        for i, v in zip(missing, got):
+            vecs[i] = v
+    return np.stack(vecs).astype(np.float32)
 
 
 def _grab(path: str, t: float, size: int) -> np.ndarray | None:

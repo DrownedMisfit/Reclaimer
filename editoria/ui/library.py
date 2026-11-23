@@ -13,6 +13,7 @@ import subprocess
 
 from PySide6.QtCore import QByteArray, QMimeData, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QDrag, QFont, QIcon, QPixmap
+from PySide6.QtWidgets import QStyledItemDelegate
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QStyle,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -33,6 +34,7 @@ MEDIA_FILTER = "Medios ({});;Todos los archivos (*.*)".format(
     " ".join(f"*{e}" for e in sorted(VIDEO_EXT | AUDIO_EXT | IMAGE_EXT)))
 
 ROLE_MEDIA = Qt.UserRole
+MINI_MEDIOS = QSize(80, 45)     # (🎨 20/11: miniaturas de Medios más legibles que las de 64×36)
 ROLE_CATEGORY = Qt.UserRole + 1
 ROLE_MOMENT = Qt.UserRole + 2   # mejor momento (resultados de la búsqueda IA)
 ROLE_KW_KIND = Qt.UserRole + 3  # sección de palabras clave: "term" (palabra), "link" (carpeta del PC), "file"
@@ -40,6 +42,7 @@ ROLE_KW_TERM = Qt.UserRole + 4  # la palabra clave a la que pertenece el nodo
 ROLE_PATH = Qt.UserRole + 5     # ruta: archivo de una palabra o carpeta enlazada (o la subcarpeta propia)
 ROLE_KW_LINKED = Qt.UserRole + 6  # archivo que viene de una carpeta enlazada del PC
 KW_SECTION = "__palabras__"     # categoría de la sección «🔑 Palabras clave» (no es una carpeta de Medios)
+MEMES_SECTION = "__memes__"     # 😂 la sección «Memes» (tu biblioteca de memes, la misma en todos los proyectos)
 
 
 def _kw_root() -> str:
@@ -80,10 +83,80 @@ def _pick_terms(parent, opciones: list) -> list | None:
 
 
 def _to_trash(path: str) -> bool:
-    """A la Papelera de Windows (recuperable). Según la versión de Qt devuelve bool o (bool, ruta)."""
+    """A la Papelera de Windows (recuperable). Según la versión de Qt devuelve bool o (bool, ruta). Antes, el visor, el
+    motor propio y los análisis lo sueltan (🔓 core/soltar_archivos: si no, «WinError 32» y no se mueve)."""
     from PySide6.QtCore import QFile
-    r = QFile.moveToTrash(path)
+    from ..core.soltar_archivos import soltando
+    with soltando([path]):                    # (al acabar, bien o mal, el visor puede volver a abrirlo)
+        r = QFile.moveToTrash(path)
     return bool(r[0] if isinstance(r, tuple) else r)
+
+
+class _AccionesFila(QStyledItemDelegate):
+    """🎨 (20/11, criterio del usuario: lo que se usa, a la vista) A la derecha del nombre de cada archivo, al pasar el
+    ratón: ⤓ ponerlo en el cabezal y 🗑 quitarlo de Medios, con su tooltip. El clic derecho y «⋮» lo siguen teniendo."""
+    ANCHO = 24
+    ACCIONES = (("arrow-down-to-line", "poner", "Poner en el cabezal (también: doble clic o arrastrarlo)"),
+                ("trash-2", "quitar", "Quitar de Medios (el archivo NO se borra del disco; pregunta antes)"))
+
+    def __init__(self, panel, parent=None):
+        super().__init__(parent)
+        self.panel = panel
+
+    def zonas(self, rect):
+        from PySide6.QtCore import QRect
+        if rect.width() < self.ANCHO * len(self.ACCIONES) + 30:
+            return []                                  # (columna muy estrecha: solo el clic derecho y «⋮»)
+        out, x = [], rect.right() - self.ANCHO * len(self.ACCIONES) + 1
+        for nombre, accion, tip in self.ACCIONES:
+            out.append((QRect(x, rect.top(), self.ANCHO, rect.height()), nombre, accion, tip))
+            x += self.ANCHO
+        return out
+
+    @staticmethod
+    def _es_archivo(index) -> bool:
+        return bool(index.siblingAtColumn(0).data(ROLE_MEDIA))
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if not (option.state & QStyle.State_MouseOver) or not self._es_archivo(index):
+            return
+        zonas = self.zonas(option.rect)
+        if not zonas:
+            return
+        from . import diseno as D
+        from . import theme as T
+        painter.save()
+        fondo = option.palette.highlight().color() if option.state & QStyle.State_Selected else QColor(T.BG)
+        x0 = zonas[0][0].left() - 4
+        painter.fillRect(x0, option.rect.top(), option.rect.right() - x0 + 1, option.rect.height(), fondo)
+        for r, nombre, _a, _t in zonas:
+            pm = D.pixmap_icono(nombre, T.TEXT, 16)
+            painter.drawPixmap(r.center().x() - 8, r.center().y() - 8, pm)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        from PySide6.QtCore import QEvent
+        if self._es_archivo(index) and event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
+                                                        QEvent.MouseButtonDblClick) \
+                and event.button() == Qt.LeftButton:
+            pos = event.position().toPoint()
+            for r, _n, accion, _t in self.zonas(option.rect):
+                if r.contains(pos):
+                    if event.type() == QEvent.MouseButtonRelease:
+                        mid = index.siblingAtColumn(0).data(ROLE_MEDIA)
+                        QTimer.singleShot(0, lambda a=accion, m=mid, i=index: self.panel._accion_fila(a, m, i))
+                    return True                        # (el clic en el icono no cambia la selección)
+        return super().editorEvent(event, model, option, index)
+
+    def helpEvent(self, event, view, option, index):
+        if event is not None and index.isValid() and self._es_archivo(index):
+            for r, _n, _a, tip in self.zonas(option.rect):
+                if r.contains(event.pos()):
+                    from PySide6.QtWidgets import QToolTip
+                    QToolTip.showText(event.globalPos(), tip, view)
+                    return True
+        return super().helpEvent(event, view, option, index)
 
 
 class MediaTree(QTreeWidget):
@@ -102,14 +175,30 @@ class MediaTree(QTreeWidget):
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.setIconSize(QSize(64, 36))
-        self.setColumnWidth(0, 200)
-        self.setColumnWidth(1, 58)
+        self.setIconSize(QSize(MINI_MEDIOS.width(), MINI_MEDIOS.height()))   # (🎨 miniaturas legibles)
+        self.setMouseTracking(True)                     # (las acciones de la fila salen al pasar el ratón)
+        self.viewport().setAttribute(Qt.WA_Hover, True)
+        # (🎨 20/11, auditoría: el NOMBRE se estira y se parte en 2 líneas —la fila mide lo que la miniatura—; la
+        #  duración, a su medida; «Info» con un ancho fijo y escondida con poco ancho)
+        self.setWordWrap(True)
+        self.setUniformRowHeights(False)
+        self.setTextElideMode(Qt.ElideRight)
         self.header().setStretchLastSection(False)
         from PySide6.QtWidgets import QHeaderView
-        self.header().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.header().setSectionResizeMode(2, QHeaderView.Interactive)
+        self.setColumnWidth(2, 110)
         self.header().setSectionResizeMode(3, QHeaderView.Fixed)
         self.setColumnWidth(3, 26)
+
+    ANCHO_SIN_INFO = 320       # (con menos ancho, la columna «Info» se esconde: el nombre y la duración, enteros)
+
+    def resizeEvent(self, e):                  # noqa: N802
+        super().resizeEvent(e)
+        esconder = self.viewport().width() < self.ANCHO_SIN_INFO
+        if self.isColumnHidden(2) != esconder:
+            self.setColumnHidden(2, esconder)
 
     def selected_media_ids(self) -> list[str]:
         out = []
@@ -120,16 +209,21 @@ class MediaTree(QTreeWidget):
         return out
 
     def event(self, e):
-        # Con Medios enfocado, Supr es para Medios (no para borrar clips de la línea de tiempo)
+        # Con Medios enfocado, Supr y ⌫ son para Medios (no borran clips de la línea de tiempo)
         from PySide6.QtCore import QEvent
-        if e.type() == QEvent.ShortcutOverride and e.key() == Qt.Key_Delete and self.selected_media_ids():
-            e.accept()
+        if e.type() == QEvent.ShortcutOverride and e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.selected_media_ids():
+            e.accept()                                 # (Supr aquí no borra clips de la línea de tiempo)
             return True
         return super().event(e)
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Backspace and self.selected_media_ids():   # ⌫ quita de Medios (Supr ya no: se
+            self.delete_pressed.emit()                                     #  pulsaba sin querer)
+            return
         if e.key() == Qt.Key_Delete and self.selected_media_ids():
-            self.delete_pressed.emit()
+            w = self.window()
+            if hasattr(w, "statusBar"):
+                w.statusBar().showMessage("Para quitar de Medios usa ⌫ Retroceso (la tecla de encima de Intro).", 5000)
             return
         super().keyPressEvent(e)
 
@@ -213,7 +307,8 @@ class MediaTree(QTreeWidget):
         ids = self.selected_media_ids()
         # archivos de «🔑 Palabras clave» que aún no están en Medios: se importan al vuelo para arrastrarlos
         sin_id = [it.data(0, ROLE_PATH) for it in self.selectedItems()
-                  if it.data(0, ROLE_KW_KIND) == "file" and not it.data(0, ROLE_MEDIA) and it.data(0, ROLE_PATH)]
+                  if it.data(0, ROLE_KW_KIND) in ("file", "meme") and not it.data(0, ROLE_MEDIA)
+                  and it.data(0, ROLE_PATH)]
         if sin_id and self.resolve_paths is not None:
             ids += [i for i in self.resolve_paths(sin_id) if i and i not in ids]
         if not ids:
@@ -262,16 +357,20 @@ class LibraryPanel(QWidget):
         self._search_job: BackgroundJob | None = None
         self.setAcceptDrops(True)
 
+        from . import diseno as D        # (🎨 20/11: iconos monocromos de Lucide y las medidas del diseño)
         title = QLabel("Panel de medios")
         title.setObjectName("title")
-        self.btn_files = QPushButton("＋ Archivos")
+        self.btn_files = QPushButton("Archivos")
+        self.btn_files.setIcon(D.icono("plus"))
         self.btn_files.setToolTip("Importar uno o varios archivos")
-        self.btn_folder = QPushButton("＋ Carpeta")
+        self.btn_folder = QPushButton("Carpeta")
+        self.btn_folder.setIcon(D.icono("folder-open"))
         self.btn_folder.setToolTip("Importar una carpeta completa (con subcarpetas)")
         self.btn_files.clicked.connect(self.import_files_dialog)
         self.btn_folder.clicked.connect(self.import_folder_dialog)
-        self.btn_analyze = QPushButton("◈")
-        self.btn_analyze.setFixedWidth(36)
+        self.btn_analyze = QPushButton()
+        self.btn_analyze.setIcon(D.icono("wand-sparkles"))
+        D.medida(self.btn_analyze, lambda w: w.setFixedWidth(D.px(36)))   # (crece con «Letra», como los demás)
         self.btn_analyze.setToolTip("Analizar el contenido de los clips con IA (qué se ve en cada uno).\n"
                                     "La primera vez descarga los modelos (~500 MB). Funciona en tu PC.")
         self.btn_analyze.clicked.connect(self._analyze_clicked)
@@ -281,7 +380,8 @@ class LibraryPanel(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._on_search_text)
         self.search.returnPressed.connect(self._on_search_enter)
-        self.btn_ai_search = QPushButton("◈ Buscar")
+        self.btn_ai_search = QPushButton("Buscar")
+        self.btn_ai_search.setIcon(D.icono("search"))
         self.btn_ai_search.setCheckable(True)
         self.btn_ai_search.setToolTip("Buscar por CONTENIDO: describe lo que quieres ver y pulsa Enter.\n"
                                       "Ej.: «una persona corriendo bajo la lluvia», «una escena triste».")
@@ -293,13 +393,13 @@ class LibraryPanel(QWidget):
         srow.addWidget(self.btn_ai_search)
 
         self._kw_collapsed: set = set()     # palabras clave que el usuario plegó (se recuerdan al recargar)
-        self.btn_kw_new = QPushButton("＋ Palabra clave")
+        self.btn_kw_new = QPushButton("Palabra clave")
+        self.btn_kw_new.setIcon(D.icono("plus"))
         self.btn_kw_new.setToolTip("Crea una palabra clave (su carpeta en Reclaimer). Luego añade carpetas de tu PC.")
-        self.btn_kw_auto = QPushButton("✨ Crear de lo que dices")
+        self.btn_kw_auto = QPushButton("Crear de lo que dices")
+        self.btn_kw_auto.setIcon(D.icono("wand-sparkles"))
         self.btn_kw_auto.setToolTip("Crea una carpeta para cada palabra que dices en la narración y aún no tiene.")
-        self.btn_kw_refresh = QPushButton("⟳")
-        self.btn_kw_refresh.setFixedWidth(34)
-        self.btn_kw_refresh.setToolTip("Volver a leer las palabras clave y sus carpetas")
+        self.btn_kw_refresh = D.BotonIcono("refresh-cw", "Volver a leer las palabras clave y sus carpetas")
         self.btn_kw_new.clicked.connect(self._kw_new_dialog)
         self.btn_kw_auto.clicked.connect(self._kw_auto)
         self.btn_kw_refresh.clicked.connect(self._rebuild)
@@ -311,7 +411,15 @@ class LibraryPanel(QWidget):
         kw_row.addWidget(self.btn_kw_refresh)
 
         self.tree = MediaTree()
-        self.tree.resolve_paths = lambda rutas: self._kw_ids(rutas)
+        self.tree.setItemDelegateForColumn(0, _AccionesFila(self, self.tree))   # (⤓ 🗑 al pasar el ratón)
+        self.tree.resolve_paths = lambda rutas: self._importar_rutas(rutas)
+        # 😂 la biblioteca de memes cambia → Medios al día
+        self._t_memes = QTimer(self)
+        self._t_memes.setSingleShot(True)
+        self._t_memes.setInterval(200)
+        self._t_memes.timeout.connect(self._rebuild)
+        from .memes_panel import senal_memes
+        senal_memes().cambio.connect(self._t_memes.start)   # (llega en el hilo de la ventana)
         self.tree.kw_dropped.connect(self._kw_drop)
         self.tree.kw_media_dropped.connect(self._kw_media_drop)
         self.tree.kw_header_dropped.connect(self._kw_header_drop)
@@ -329,13 +437,21 @@ class LibraryPanel(QWidget):
         self.footer = QLabel()
         self.footer.setObjectName("dim")
         self.footer.setWordWrap(True)
+        # (sin nada en Medios: una línea —nada de una lista vacía enorme—; soltar archivos en el panel sigue valiendo)
+        self.vacio = QLabel("Sin medios: arrastra aquí tus videos, imágenes y sonidos")
+        self.vacio.setObjectName("dim")
+        self.vacio.setWordWrap(True)
+        self.vacio.setToolTip("Suelta archivos o carpetas en este panel, o pulsa «Archivos» / «Carpeta» arriba. Lo que "
+                              "importes sale aquí, con su miniatura y su duración, listo para la línea de tiempo")
+        self.vacio.setVisible(False)
 
         top = QHBoxLayout()                       # (sin título: la pestaña y la barra del panel ya dicen «Medios»)
         title.hide()
         top.addWidget(self.btn_files)
         top.addWidget(self.btn_folder)
         top.addStretch()
-        self.btn_reset = QPushButton("⟲ Reiniciar todo")
+        self.btn_reset = QPushButton("Reiniciar todo")
+        self.btn_reset.setIcon(D.icono("rotate-ccw"))
         self.btn_reset.setToolTip("Quita TODOS los medios de la biblioteca (todas las categorías). Los archivos "
                                   "originales no se borran; antes te pregunta si borrar también sus miniaturas.")
         self.btn_reset.clicked.connect(self.reset_all)
@@ -344,6 +460,14 @@ class LibraryPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 6)
         lay.addLayout(top)
+        # (el sitio de «Buscar material conforme a frases y palabras clave», justo debajo de Archivos / Carpeta: lo
+        #  pone su módulo con poner_material_frases(widget); vacío, no ocupa nada)
+        self.zona_material_frases = QWidget()
+        zmf = QVBoxLayout(self.zona_material_frases)
+        zmf.setContentsMargins(0, 0, 0, 0)
+        zmf.setSpacing(4)
+        self.zona_material_frases.setVisible(False)
+        lay.addWidget(self.zona_material_frases)
         # 🎞 Medios / 🔊 Sonidos (los de «Efectos», con 🌐 buscar en internet: a mano en cada pestaña de edición)
         from PySide6.QtWidgets import QTabWidget
         self.pestanas = QTabWidget()
@@ -352,14 +476,39 @@ class LibraryPanel(QWidget):
         pl = QVBoxLayout(pag)
         pl.setContentsMargins(0, 4, 0, 0)
         pl.addLayout(srow)
+        # (las bandejas de material repetido —«No usados» / «Usados 2+ veces»— van aquí, bajo el buscador: las pone
+        #  repetidos_ui con poner_bandejas(widget); vacío, no ocupa nada)
+        self.zona_bandejas = QWidget()
+        zb = QVBoxLayout(self.zona_bandejas)
+        zb.setContentsMargins(0, 0, 0, 0)
+        zb.setSpacing(4)
+        self.zona_bandejas.setVisible(False)
+        pl.addWidget(self.zona_bandejas)
+        # (el filtro por ids puesto —filtrar_por_ids—, a la vista: su nombre y ✕ para quitarlo)
+        self._filtro_ids = None
+        self.fila_filtro = QWidget()
+        ff = QHBoxLayout(self.fila_filtro)
+        ff.setContentsMargins(0, 0, 0, 0)
+        ff.setSpacing(4)
+        self.lbl_filtro = QLabel("")
+        self.lbl_filtro.setObjectName("dim")
+        self.lbl_filtro.setWordWrap(True)
+        self.btn_quitar_filtro = D.BotonIcono("x", "Quitar el filtro: vuelven a verse todos los medios")
+        self.btn_quitar_filtro.clicked.connect(lambda: self.filtrar_por_ids(None, ""))
+        ff.addWidget(self.lbl_filtro, 1)
+        ff.addWidget(self.btn_quitar_filtro)
+        self.fila_filtro.setVisible(False)
+        pl.addWidget(self.fila_filtro)
         pl.addLayout(kw_row)
         pl.addWidget(self.tree, 1)
+        pl.addWidget(self.vacio)
         pl.addWidget(self.footer)
-        self.pestanas.addTab(pag, "🎞 Medios")
+        pl.addStretch(0)                 # (Medios vacío: el alto libre al final; ningún botón se estira)
+        self.pestanas.addTab(pag, D.icono("film"), "Medios")
         self.pestanas.setTabToolTip(0, "Tus videos, imágenes y audios del proyecto, y tus palabras clave.")
         self._pag_sonidos = QWidget()
         QVBoxLayout(self._pag_sonidos).setContentsMargins(0, 0, 0, 0)
-        self.pestanas.addTab(self._pag_sonidos, "🔊 Sonidos")
+        self.pestanas.addTab(self._pag_sonidos, D.icono("audio-waveform"), "Sonidos")
         self.pestanas.setTabToolTip(1, "Efectos de sonido: los de Reclaimer, los que guardaste de internet y tu "
                                        "carpeta. Busca, escucha, arrástralos o 🌐 búscalos en internet.")
         self.sonidos = None
@@ -376,9 +525,30 @@ class LibraryPanel(QWidget):
         if getattr(ctrl, "transcript_changed", None) is not None:       # (las palabras dichas dependen del texto)
             ctrl.transcript_changed.connect(lambda _m=None: self._rebuild_timer.start(1200))
         analyzer.status_changed.connect(lambda _t: self._update_footer())
-        analyzer.busy_changed.connect(lambda busy: self.btn_analyze.setText("⏹" if busy else "◈"))
+        analyzer.busy_changed.connect(lambda busy: self.btn_analyze.setIcon(D.icono("square" if busy else
+                                                                                      "wand-sparkles")))
         self._on_mode(False)
         self._rebuild()
+
+    def poner_bandejas(self, widget: QWidget):
+        """Pone bajo el buscador de Medios el widget de bandejas de material repetido (repetidos_ui)."""
+        self.zona_bandejas.layout().addWidget(widget)
+        self.zona_bandejas.setVisible(True)
+
+    def filtrar_por_ids(self, ids: set | None, nombre: str = ""):
+        """Enseña en Medios solo esos archivos (None = todos). El filtro se ve con su nombre y una ✕ para quitarlo."""
+        self._filtro_ids = set(ids) if ids is not None else None
+        activo = self._filtro_ids is not None
+        self.lbl_filtro.setText(f"Filtro: {nombre or 'algunos medios'} ({len(self._filtro_ids)})" if activo else "")
+        self.lbl_filtro.setToolTip("Solo se ven los medios de este filtro. ✕ = verlos todos otra vez" if activo else "")
+        self.fila_filtro.setVisible(activo)
+        self._apply_filter()
+
+    def poner_material_frases(self, widget: QWidget):
+        """Pone en Medios, debajo de «Archivos / Carpeta», el widget (o botón) de «Buscar material conforme a frases y
+        palabras clave» (ui/material_por_frases_panel.py)."""
+        self.zona_material_frases.layout().addWidget(widget)
+        self.zona_material_frases.setVisible(True)
 
     # ------------------------------------------------------------- importar
     def import_files_dialog(self):
@@ -420,12 +590,19 @@ class LibraryPanel(QWidget):
         self.analyzer.analyze()
 
     # ------------------------------------------------------------ mostrar
+    def _escena_de(self, mid: str):
+        """🎬 La escena de ese medio de «🎬 Escenas» (o None)."""
+        from ..core import escena_clip
+        return escena_clip.escena_de_medio(self.ctrl.project, mid)
+
     def _icon_for(self, m) -> QIcon:
         thumb = self.ctrl.thumbs.get(m.id)
+        if not thumb and self._escena_de(m.id) is not None and os.path.isfile(m.path):
+            thumb = m.path                             # (🎬 su miniatura: los personajes en su sitio)
         if thumb:
             if thumb not in self._icons:
                 pix = QPixmap(thumb)
-                self._icons[thumb] = QIcon(pix.scaled(64, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._icons[thumb] = QIcon(pix.scaled(MINI_MEDIOS, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             return self._icons[thumb]
         style = self.style()
         if m.kind == KIND_AUDIO:
@@ -447,6 +624,9 @@ class LibraryPanel(QWidget):
                 info = "audio" if m.kind == KIND_AUDIO else ""
         if getattr(m, "scene_cut", False) and m.kind == "video":
             info = (info + " · " if info else "") + "✂ por escenas"
+        esc = self._escena_de(m.id)
+        if esc is not None and m.id not in self.ctrl.missing:      # 🎬 una escena creada: lo que dura
+            dur, info = fmt_time(m.duration, frac=False), "🎬 escena"
         it = QTreeWidgetItem([m.name, dur, extra_info if extra_info is not None else info, "⋮"])
         it.setTextAlignment(3, Qt.AlignCenter)
         it.setToolTip(3, "Opciones rápidas: eliminar, mover, separar audio, cortar por escenas")
@@ -458,6 +638,9 @@ class LibraryPanel(QWidget):
             tip += f"\n{m.width}x{m.height} · {m.fps:g} fps"
         if m.ai_analyzed:
             tip += f"\n◈ La IA ve: {m.ai_type or '?'} — {', '.join(m.ai_tags) or '—'}"
+        if esc is not None:
+            tip = (f"🎬 Escena «{esc.get('nombre') or 'Escena'}» ({fmt_time(m.duration, frac=False)})\n"
+                   "Arrástrala a la línea de tiempo para ponerla ahí (un solo clip) · doble clic: editarla")
         for col in range(3):
             it.setToolTip(col, tip)
         if m.id in self.ctrl.missing:
@@ -498,7 +681,12 @@ class LibraryPanel(QWidget):
 
         # «Internet/master chief» = carpeta «master chief» dentro de «Internet»
         groups: dict[str, dict[str, list]] = {}
+        from ..core import memes as _MEMES
+        memes_lista = _MEMES.listar()
+        en_memes = {os.path.normcase(os.path.abspath(mm["ruta"])) for mm in memes_lista}
         for m in media:
+            if m.path and os.path.normcase(os.path.abspath(m.path)) in en_memes:
+                continue                           # (😂 los memes van en su sección, al final: sin repetirlos)
             main, _, subc = (m.category or "").partition("/")
             groups.setdefault(main, {}).setdefault(subc.strip(), []).append(m)
         order = {c: i for i, c in enumerate(CATEGORY_ORDER)}
@@ -525,8 +713,97 @@ class LibraryPanel(QWidget):
                         it.setSelected(True)
             top.setExpanded(cat not in collapsed)
         self._build_keywords(bold, KW_SECTION not in collapsed)
+        self._build_memes(bold, MEMES_SECTION not in collapsed, memes_lista)
         self._update_footer()
         self._apply_filter()
+
+    # ------------------------------------------------------ 😂 memes (siempre al final de Medios)
+    def _build_memes(self, bold: QFont, abierta: bool = True, lista: list | None = None):
+        """«😂 Memes»: tu biblioteca de memes (la de todos los proyectos), al final. Los que ya están en este
+        proyecto salen como cualquier archivo de Medios; los demás se importan al arrastrarlos o con doble clic (el
+        archivo no se copia). Los medios del proyecto que vienen de la carpeta de memes pero ya no están en la
+        biblioteca (archivo borrado o sin entrada) salen aquí también, con su marca de «no encontrado», para
+        volver a enlazarlos o quitarlos."""
+        from ..core import memes as _MEMES
+        if lista is None:
+            lista = _MEMES.listar()
+        en_lista = {os.path.normcase(os.path.abspath(mm["ruta"])) for mm in lista}
+        huerfanos = sorted((m for m in self.ctrl.project.media.values() if m.path and _MEMES.es_meme(m.path)
+                            and os.path.normcase(os.path.abspath(m.path)) not in en_lista),
+                           key=lambda m: m.name.lower())
+        if not lista and not huerfanos:
+            return
+        if not hasattr(self, "_kw_iconos"):
+            self._kw_iconos, self._kw_mini_fallidas = {}, set()
+        by_path = {os.path.normcase(os.path.abspath(m.path)): m for m in self.ctrl.project.media.values()}
+        sec = QTreeWidgetItem([f"😂 Memes  ({len(lista) + len(huerfanos)})"])
+        sec.setToolTip(0, "Tu biblioteca de memes: la misma en todos tus proyectos (panel «Memes»). Arrástralos a la "
+                          "línea de tiempo o doble clic.")
+        sec.setData(0, ROLE_CATEGORY, MEMES_SECTION)
+        sec.setFont(0, bold)
+        sec.setFlags(Qt.ItemIsEnabled)
+        self.tree.addTopLevelItem(sec)
+        pend = []
+        for mm in lista:
+            ruta = mm["ruta"]
+            m = by_path.get(os.path.normcase(os.path.abspath(ruta)))
+            if m is not None:
+                it = self._media_item(m)
+            else:
+                dur = mm.get("duracion") or 0
+                it = QTreeWidgetItem([mm.get("nombre") or os.path.basename(ruta),
+                                      fmt_time(dur, frac=False) if dur else "—",
+                                      "con audio" if mm.get("audio") else "sin audio", ""])
+                ic = self._kw_icono(ruta) if abierta else None
+                if ic is None:
+                    it.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+                    if abierta and mm.get("tipo") != KIND_AUDIO and self._kw_clave(ruta) not in self._kw_mini_fallidas:
+                        pend.append(ruta)
+                else:
+                    it.setIcon(0, ic)
+                tags = ", ".join(mm.get("etiquetas") or [])
+                for col in range(3):
+                    salto = chr(10)
+                    it.setToolTip(col, f"{mm.get('nombre')}{salto}" + (f"Etiquetas: {tags}{salto}" if tags else "")
+                                  + f"{ruta}{salto}De tu biblioteca de memes: arrástralo a la línea de tiempo o "
+                                  "doble clic.")
+            it.setData(0, ROLE_KW_KIND, "meme")
+            it.setData(0, ROLE_PATH, ruta)
+            it.setData(0, ROLE_KW_TERM, " ".join([mm.get("nombre", "")] + list(mm.get("etiquetas") or [])))
+            sec.addChild(it)
+        for m in huerfanos:                        # (perdieron su archivo o su entrada: como cualquier medio)
+            sec.addChild(self._media_item(m))
+        sec.setExpanded(abierta)
+        if pend:
+            self._kw_items_ruta = dict(getattr(self, "_kw_items_ruta", {}) or {})
+            for i in range(sec.childCount()):
+                ch = sec.child(i)
+                if not ch.data(0, ROLE_MEDIA):
+                    self._kw_items_ruta[ch.data(0, ROLE_PATH)] = ch
+            self._kw_miniaturas(pend)
+
+    def _importar_rutas(self, rutas: list) -> list[str]:
+        """Importa al vuelo (palabras clave y memes); los memes, en su categoría."""
+        from ..core import memes as _MEMES
+        ids = self._kw_ids(rutas)
+        memes = [i for i in ids if _MEMES.es_meme(self.ctrl.project.media[i].path)
+                 and self.ctrl.project.media[i].category != _MEMES.CATEGORIA]
+        if memes:
+            self.ctrl.set_media_props(memes, category=_MEMES.CATEGORIA)
+        return ids
+
+    def _meme_menu(self, item: QTreeWidgetItem, pos):
+        path = item.data(0, ROLE_PATH) or ""
+        menu = QMenu(self)
+        menu.addAction("▶ Añadir a la timeline (en el cabezal)",
+                       lambda: (lambda ids: ids and self.add_requested.emit(ids))(self._importar_rutas([path])))
+        menu.addAction("➕ A Medios", lambda: self._importar_rutas([path]))
+        menu.addAction("📁 Mostrar en el Explorador", lambda: self._reveal_path(path))
+        win = self.window()
+        if hasattr(win, "docks") and "memes" in win.docks:
+            menu.addAction("😂 Abrir el panel Memes", lambda: win.show_panel(win.docks["memes"].panel))
+        add_help_action(menu, "biblioteca", self.window())
+        help_ui.exec_menu(menu, self.tree.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------ 🔑 palabras clave (Medios)
     def _al_cambiar_pestana(self, i: int):
@@ -722,7 +999,7 @@ class LibraryPanel(QWidget):
         for f in folders:
             usada = any(os.path.normcase(os.path.abspath(r)) in by_path for r in f["files"])
             reciente = any(KF.match(x.strip(), [f]) for t in recientes_t for x in t.split(",") if x.strip())
-            # (con alias o plural: «Fortnite, fortnait»)
+            # (con alias o plural: «Objeto, objetos»)
             if usada or os.path.normcase(f["path"]) in dichas or reciente:
                 out.append(f)
         return out
@@ -765,6 +1042,10 @@ class LibraryPanel(QWidget):
         if self.analyzer.status and self.analyzer.job is not None:
             text += f"\n{self.analyzer.status}"
         self.footer.setText(text)
+        hay = self.tree.topLevelItemCount() > 0
+        if self.tree.isHidden() == hay:
+            self.tree.setVisible(hay)
+            self.vacio.setVisible(not hay)
 
     def _kw_track(self, it: QTreeWidgetItem, plegado: bool):
         if not plegado and not getattr(self, "_kw_construyendo", False)                 and (it.data(0, ROLE_KW_KIND) == "term" or it.data(0, ROLE_CATEGORY) == KW_SECTION):
@@ -799,12 +1080,23 @@ class LibraryPanel(QWidget):
                 self._filtrar_palabras(top, q)
                 top.setHidden(False)
                 continue
+            if top.data(0, ROLE_CATEGORY) == MEMES_SECTION:      # 😂 por nombre o etiqueta
+                qn = KF.norm(q)
+                vis = 0
+                for j in range(top.childCount()):
+                    it = top.child(j)
+                    ok = not qn or qn in KF.norm(it.data(0, ROLE_KW_TERM) or it.text(0))
+                    it.setHidden(not ok)
+                    vis += ok
+                top.setHidden(bool(qn) and vis == 0)
+                continue
             visible = 0
             for j in range(top.childCount()):
                 it = top.child(j)
                 m = self.ctrl.project.media.get(it.data(0, ROLE_MEDIA))
                 ok = m is not None and matches_query(q, m.name, m.category, " ".join(m.tags),
                                                      m.ai_type, " ".join(m.ai_tags))
+                ok = ok and (getattr(self, "_filtro_ids", None) is None or m.id in self._filtro_ids)
                 it.setHidden(not ok)
                 visible += ok
             top.setHidden(visible == 0)
@@ -904,14 +1196,36 @@ class LibraryPanel(QWidget):
             job.deleteLater()
 
     # ----------------------------------------------------------- acciones
+    def _accion_fila(self, accion: str, mid: str, index=None):
+        """⤓ / 🗑 de una fila (al pasar el ratón): poner ese archivo en el cabezal o quitarlo de Medios."""
+        if not mid or mid not in self.ctrl.project.media:
+            return
+        if accion == "quitar":
+            sel = self.tree.selected_media_ids()
+            self._remove(sel if mid in sel else [mid])
+            return
+        moment = index.siblingAtColumn(0).data(ROLE_MOMENT) if index is not None and index.isValid() else None
+        if moment is not None:
+            self.add_moment_requested.emit(mid, float(moment))
+        else:
+            self.add_requested.emit([mid])
+
     def _on_double_click(self, item, _col):
         mid = item.data(0, ROLE_MEDIA)
+        if not mid and item.data(0, ROLE_KW_KIND) == "meme":      # 😂 un meme: a Medios y en el cabezal
+            ids = self._importar_rutas([item.data(0, ROLE_PATH)])
+            if ids:
+                self.add_requested.emit(ids)
+            return
         if not mid and item.data(0, ROLE_KW_KIND) == "file":      # archivo de una palabra: clip de palabra clave en el cabezal
             ids = self._kw_ids([item.data(0, ROLE_PATH)])
             if ids:
                 self.ctrl.add_media_at_times(ids, [self._playhead()], "Añadir clip de palabra clave", modo="entero")
             return
         if not mid:
+            return
+        if self._escena_de(mid) is not None:           # 🎬 una escena: se abre para editarla
+            self._editar_escena(mid)
             return
         moment = item.data(0, ROLE_MOMENT)
         if moment is not None:
@@ -921,7 +1235,10 @@ class LibraryPanel(QWidget):
 
     def _context_menu(self, pos):
         it_kw = self.tree.itemAt(pos)
-        if it_kw is not None and it_kw.data(0, ROLE_KW_KIND):
+        if it_kw is not None and it_kw.data(0, ROLE_KW_KIND) == "meme" and not it_kw.data(0, ROLE_MEDIA):
+            self._meme_menu(it_kw, pos)
+            return
+        if it_kw is not None and it_kw.data(0, ROLE_KW_KIND) and it_kw.data(0, ROLE_KW_KIND) != "meme":
             self._kw_menu(it_kw, pos)
             return
         ids = self.tree.selected_media_ids()
@@ -933,6 +1250,24 @@ class LibraryPanel(QWidget):
             help_ui.exec_menu(menu, self.tree.viewport().mapToGlobal(pos))
             return
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        from .restaurar import faltan, restaurar
+        perdidos = faltan(self.ctrl, ids)
+        if perdidos:                                   # ♻ borrado por error: lo primero, devolverlo
+            a = menu.addAction("♻ Restaurar este archivo" if len(perdidos) == 1
+                               else f"♻ Restaurar {len(perdidos)} archivos",
+                               lambda m=perdidos: restaurar(self.ctrl, m, self))
+            a.setToolTip("Lo saca de la Papelera de Windows y lo devuelve a su carpeta: sus clips vuelven a verse.")
+            menu.addSeparator()
+        esc = self._escena_de(ids[0]) if len(ids) == 1 else None
+        if esc is not None:                            # 🎬 una escena creada
+            menu.addAction("🎬 Editar la escena", lambda: self._editar_escena(ids[0]))
+            a = menu.addAction("📍 Poner en el cabezal", lambda: self.add_requested.emit(ids))
+            a.setToolTip("La pone en la línea de tiempo como un solo clip, donde está el cabezal (Ctrl+Z la quita).")
+            menu.addAction("Quitar de Medios\t⌫", lambda: self._remove(ids))
+            add_help_action(menu, "biblioteca", self.window())
+            help_ui.exec_menu(menu, self.tree.viewport().mapToGlobal(pos))
+            return
         item = self.tree.itemAt(pos)
         moment = item.data(0, ROLE_MOMENT) if item else None
         if moment is not None and len(ids) == 1:
@@ -969,6 +1304,21 @@ class LibraryPanel(QWidget):
             a = menu.addAction("🔖 Leer marcas de OBS", lambda: self.obs_marks_requested.emit(snd))
             a.setToolTip("Lee los capítulos que pusiste con una tecla mientras grababas en OBS y los pone como "
                          "marcadores rojos en la línea de tiempo. Luego «🔖 Fallos marcados» te ayuda a quitarlos.")
+        from ..core import memes as _MEMES
+        no_memes = [i for i in ids if i in self.ctrl.project.media and not _MEMES.es_meme(self.ctrl.project.media[i].path)
+                    and i not in self.ctrl.missing]
+        if no_memes:
+            from . import memes_panel
+            a = menu.addAction("😂 Agregar a memes…", lambda: memes_panel.agregar_medios(self, self.ctrl, no_memes))
+            a.setToolTip("Lo copia entero a tu biblioteca de memes (la misma en todos tus proyectos)")
+        from . import descargas_generales as DG
+        bajados = [self.ctrl.project.media[i].path for i in ids if i in self.ctrl.project.media
+                   and DG.es_descarga(self.ctrl.project.media[i].path)]
+        if bajados:
+            DG.menu_mover(menu, self.ctrl, lambda b=bajados: [r for r in b if os.path.isfile(r)], self,
+                          self._rebuild).setTitle("🌐 Mover el archivo en el disco a…")
+            menu.actions()[-1].setToolTip("Mueve el ARCHIVO descargado a otra carpeta de tu PC (sus clips siguen "
+                                          "viéndose). «📂 Mover a…» solo cambia su categoría aquí en Medios.")
         mv = menu.addMenu("📂 Mover a…")
         cats = sorted({m.category for m in self.ctrl.project.media.values()} | set(CATEGORY_ORDER),
                       key=lambda c: c.lower())
@@ -979,10 +1329,16 @@ class LibraryPanel(QWidget):
         mv.addSeparator()
         mv.addAction("➕ Carpeta nueva…", lambda: self._move_new_folder(ids))
         menu.addSeparator()
-        menu.addAction("Quitar de la biblioteca\tSupr", lambda: self._remove(ids))
+        menu.addAction("Quitar de la biblioteca\t⌫", lambda: self._remove(ids))
         menu.addAction("🗑 Eliminar el archivo (a la Papelera)…", lambda: self._trash(ids))
         add_help_action(menu, "biblioteca", self.window())
         help_ui.exec_menu(menu, self.tree.viewport().mapToGlobal(pos))
+
+    def _editar_escena(self, mid: str):
+        esc = self._escena_de(mid)
+        win = self.window()
+        if esc is not None and hasattr(win, "open_scenes"):
+            win.open_scenes(escena_id=esc["id"])
 
     def _change_category(self, ids):
         cats = sorted({m.category for m in self.ctrl.project.media.values()} | set(CATEGORY_ORDER))
@@ -1297,7 +1653,7 @@ class LibraryPanel(QWidget):
 
     def _kw_new_dialog(self):
         name, ok = QInputDialog.getText(self, "Nueva palabra clave",
-                                        "Palabra (puedes poner alias separados por coma, p. ej. «Fortnite, fortnait»):")
+                                        "Palabra (puedes poner alias separados por coma, p. ej. «Objeto, objetos»):")
         if ok and name.strip():
             self._kw_create(name.strip())
 
@@ -1387,7 +1743,7 @@ class LibraryPanel(QWidget):
     def _kw_header_drop(self, payload: list, es_medio: bool):
         """Soltar sobre la cabecera «🔑 Palabras clave»: pide el nombre de la palabra y luego enlaza o copia."""
         nombre, ok = QInputDialog.getText(self, "Palabra clave", "¿Qué palabra clave es? (puedes poner alias "
-                                          "separados por coma, p. ej. «Fortnite, fortnait»):")
+                                          "separados por coma, p. ej. «Objeto, objetos»):")
         term = nombre.strip() if ok else ""
         if not term:
             return

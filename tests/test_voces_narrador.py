@@ -278,7 +278,7 @@ def main():
         assert not panel.aviso.isHidden() and "Falta esta voz" in panel.aviso.text()
         assert not panel.b_descargar.isHidden() and not panel.b_crear.isEnabled()
         mb = f"{sum(len(b_) for _r, b_ in falsos.values()) / 1e6:.0f} MB"
-        assert panel.b_descargar.text() == f"⬇ Descargar esta voz ({mb})", panel.b_descargar.text()
+        assert panel.b_descargar.text() == f"Descargar esta voz ({mb})", panel.b_descargar.text()
         assert not panel.acento.isEnabled(), "Piper: acento propio"
         panel.b_descargar.click()
         t0 = time.time()

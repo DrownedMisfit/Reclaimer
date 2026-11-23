@@ -156,9 +156,14 @@ class ClaudeBridge(QObject):
             return
         self.win.statusBar().showMessage(f"🤝 Claude: {tool.replace('_', ' ')}…", 6000)
         try:
-            fn(args, lambda ok, text, image=None, s=sock, t=tool: self._done(s, t, ok, text, image))
+            self.ejecutar(fn, args, lambda ok, text, image=None, s=sock, t=tool: self._done(s, t, ok, text, image))
         except Exception as exc:  # noqa: BLE001 - una orden fallida nunca tumba Reclaimer
             self._done(sock, tool, False, f"No se pudo: {exc}")
+
+    def ejecutar(self, fn, args, reply):
+        """Hace una orden de Claude. 🧭 Lo que crea no abre editores ni te quita el foco (ctrl.sin_abrir_editor)."""
+        with self.ctrl.sin_abrir_editor():
+            fn(args, reply)
 
     def _done(self, sock, tool, ok, text, image=None):
         self.win.statusBar().showMessage(f"🤝 Claude · {tool.replace('_', ' ')}: {text.splitlines()[0][:120]}", 8000)

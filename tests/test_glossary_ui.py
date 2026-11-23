@@ -139,7 +139,13 @@ def _clic_derecho(panel, term: str, texto_accion: str):
     acciones = [a for a in menu.actions() if a.text().startswith(texto_accion)]
     assert acciones, (term, [a.text() for a in menu.actions()])
     acciones[0].trigger()
-    app.processEvents()
+    # («Dijiste…» se rehace FUERA del clic, agrupando clics: _recalcular_luego, ~150 ms)
+    t0 = time.time()
+    while time.time() - t0 < 0.5 or getattr(getattr(panel, "_t_recalc", None), "isActive", lambda: False)():
+        app.processEvents()
+        time.sleep(0.01)
+        if time.time() - t0 > 5:
+            break
 
 
 def prueba_panel_y_verificacion(panel):
@@ -244,8 +250,12 @@ def main():
         win.ctrl.project = _proyecto()
         win.clips._buscar = lambda *_a, **_k: None          # sin búsqueda en internet de clips
         win.show()
+        for _ in range(30):                     # (que la ventana termine de colocar sus paneles al mostrarse: si no,
+            app.processEvents()                 #  la distribución de la pestaña volvía a ocultar «Palabras clave»)
+            time.sleep(0.01)
         win.show_panel(win.clips)
         app.processEvents()
+        assert win.clips.isVisible(), "«Dijiste…» a la vista (su panel «Palabras clave»)"
         panel = win.clips
         panel.recalcular()
         prueba_panel_y_verificacion(panel)

@@ -84,8 +84,19 @@ class ProxyManager(QObject):
         usados = self.ctrl.timeline_media_ids()
         vids = [m for m in p.media.values() if m.kind == KIND_VIDEO and m.probed and m.id not in self.ctrl.missing
                 and m.id in usados]
-        return [(m.id, m.path, m.height, m.duration, lv) for lv in self.levels() for m in vids
-                if not proxies.has_proxy(m.path, lv)]
+        out = [(m.id, m.path, m.height, m.duration, lv) for lv in self.levels() for m in vids
+               if not proxies.has_proxy(m.path, lv)]
+        # 🎞 lo que el reproductor no decodifica (AV1 sin aceleración…): su copia «Media» aunque estés en «Completa»
+        # (sin ella el visor solo enseña fotogramas sueltos)
+        # ⚡ y lo que este equipo no reproduce a tiempo (LENTOS), si las copias automáticas están puestas
+        from .preview import LENTOS, NO_DECODIFICA
+        hechos = {(o[0], o[4]) for o in out}
+        for m in vids:
+            if (m.path in NO_DECODIFICA or (self.auto and m.path in LENTOS)) \
+                    and not any(proxies.has_proxy(m.path, lv) for lv in ("half", "quarter")) \
+                    and not any(k[0] == m.id for k in hechos):
+                out.append((m.id, m.path, m.height, m.duration, "half"))
+        return out
 
     def ensure(self):
         if self.job is not None:

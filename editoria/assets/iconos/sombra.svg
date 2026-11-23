@@ -1,0 +1,16 @@
+<!-- dibujo propio de Reclaimer, estilo Lucide: un recuadro con su sombra abajo a la derecha -->
+<svg
+  class="lucide lucide-sombra"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <rect width="14" height="14" x="3" y="3" rx="2" />
+  <path d="M21 7v12a2 2 0 0 1-2 2H7" />
+</svg>

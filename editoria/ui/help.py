@@ -22,10 +22,15 @@ Aquí están todos tus archivos (narración, gameplay, cinemáticas, música, im
 <li><b>Doble clic</b> en un archivo = se añade a la timeline en el cabezal. También puedes arrastrarlo.</li>
 <li><b>Clic derecho</b> en un archivo: cambiar categoría, etiquetas, corregir lo que vio la IA…</li>
 <li>Los archivos originales nunca se modifican.</li>
-</ul><br><br><b>Organizar</b>: clic derecho → «📂 Mover a…» (otra categoría o carpeta, o una nueva), o arrastra los archivos sobre una carpeta. <b>Supr</b> quita de Medios (el archivo sigue en el disco); «🗑 Eliminar el archivo» lo manda a la Papelera de Windows (recuperable).<br><br><b>🎵 Convertir en solo audio</b>: clic derecho en uno o varios videos. Si el sonido ya es AAC o MP3 se copia tal cual (sin perder nada, en segundos); si no, se convierte a AAC de alta calidad. Se guarda en la carpeta «Audio extraído» de Reclaimer (tus originales no se tocan) y aparece en Medios ▸ «Audio extraído»."""),
+</ul><br><br><b>Organizar</b>: clic derecho → «📂 Mover a…» (otra categoría o carpeta, o una nueva), o arrastra los archivos sobre una carpeta. <b>⌫ Retroceso</b> quita de Medios (el archivo sigue en el disco); «🗑 Eliminar el archivo» lo manda a la Papelera de Windows (recuperable).<br><br><b>🎵 Convertir en solo audio</b>: clic derecho en uno o varios videos. Si el sonido ya es AAC o MP3 se copia tal cual (sin perder nada, en segundos); si no, se convierte a AAC de alta calidad. Se guarda en la carpeta «Audio extraído» de Reclaimer (tus originales no se tocan) y aparece en Medios ▸ «Audio extraído»."""),
     "palabras_clave": ("🔑 Palabras clave", """
-Una carpeta por palabra (Fortnite, Minecraft…) con tu material para ella. Lo que dices en la narración
-aparece aquí y en 🎬 Clips.
+Una carpeta por palabra (Objeto, Lugar…) con tu material para ella. Lo que dices en la narración
+aparece aquí y en 🎬 Clips.<br>
+<b>Panel «Voz y texto» → 4 · Palabras clave</b> (interruptor a la derecha), en pestañas: <b>Dijiste…</b> (las
+palabras, dónde las dices, ◀ ▶, más cercana / lejana), <b>Carpetas</b> y <b>Buscar material</b> (📁 Mi carpeta |
+🌐 Internet), con <b>📥 Descargado</b> (las carpetas con lo
+que Reclaimer ha bajado de internet: clips de YouTube, X, Instagram, TikTok…, sonidos e imágenes; doble clic = al
+cabezal, o arrástralo a la línea de tiempo).
 <ul>
 <li><b>＋ Palabra clave</b>: crea una. <b>✨ Crear de lo que dices</b>: crea una carpeta por cada palabra de tu narración.</li>
 <li><b>📂 Añadir carpeta de mi PC</b>: la enlaza (no se copia). Arrastrar una carpeta del Explorador sobre la palabra hace lo mismo.</li>
@@ -38,7 +43,7 @@ y elige la mejor toma (normalmente la última completa). Cada línea tiene su de
 <ul>
 <li><b>⚠ falta</b>: esa línea no la encontré en la grabación (se marca donde iría).</li>
 <li><b>✎ improvisado</b>: lo dijiste y no estaba en el guion. Se deja, pero se marca.</li>
-<li>Etiquetas entre corchetes: <b>[CLIP: fortnite]</b> pone un clip de esa carpeta en esa frase; <b>[IMG: titular.png]</b>
+<li>Etiquetas entre corchetes: <b>[CLIP: lugar]</b> pone un clip de esa carpeta en esa frase; <b>[IMG: titular.png]</b>
 pone una imagen; <b>[MÚSICA: tensa]</b> y <b>[NOTA: …]</b> solo dejan un marcador con el texto.</li>
 </ul>«✓ Montar» hace todo en UN solo paso: quita las tomas descartadas en todas las pistas. Ctrl+Z lo deshace todo."""),
     "montaje_guiado": ("🧭 Montaje guiado", """
@@ -59,11 +64,22 @@ el mejor momento de cada uno (★★★ = más parecido). Doble clic en un resul
     "visor": ("Visor", """
 Muestra el video tal como saldrá al exportar (encuadres, pantalla dividida, textos y subtítulos).
 <ul><li><b>Espacio</b> = reproducir/pausar, <b>← →</b> = fotograma a fotograma.</li>
+<li><b>Barra de abajo</b> (igual en Video horizontal, Edits y Vertical; también en 🎬 Escenas): <b>−5s / +5s</b> =
+5 segundos atrás / adelante, reproduciendo o en pausa (<b>Mayús+← / Mayús+→</b>) · <b>1×</b> = velocidad: cada clic
+2× → 4× → 8× → 1× (la flechita: elegir; 1× = normal; Espacio reproduce a la elegida; J/K/L siguen igual) ·
+<b>🔊</b> = volumen de ESCUCHA (solo lo que oyes, no cambia el proyecto ni lo exportado): clic = silenciar, rueda
+encima = subir/bajar, flechita = deslizador · <b>LUFS</b> = sonoridad para plataformas (YouTube, Shorts, TikTok,
+Instagram): mide la mezcla entera en segundo plano y dice cuántos dB subir o bajar para llegar a −14 LUFS con el pico
+≤ −1 dBTP; «Aplicar» cambia el volumen de todos los clips con sonido (un Ctrl+Z lo deshace). Si el visor es
+estrecho, se esconden por orden el nivel, LUFS, −5s/+5s, 1× y 🔊 (todos siguen en el menú Reproducción).</li>
 <li>Con un clip de video o imagen seleccionado (como el «Transform» de DaVinci Resolve): cada capa es
 independiente. Sale su caja con 4 esquinas: <b>arrastra</b> dentro para moverla, una <b>esquina</b> o la
 <b>rueda</b> para cambiar su tamaño (sin deformar); se ve lo de las pistas de debajo. <b>Doble clic</b> = vuelve
-a pantalla completa. <b>Alt + arrastrar / Alt + rueda</b> = mover o acercar la imagen DENTRO de su caja
-(encuadre). Todo con Ctrl+Z.</li></ul>"""),
+a pantalla completa. <b>Alt + arrastrar</b> = mover la imagen DENTRO de su caja y <b>Ctrl + Alt + rueda</b> =
+acercarla (encuadre). Todo con Ctrl+Z.</li>
+<li><b>Rueda</b> = acercar/alejar la vista · <b>Alt + rueda</b> = subir/bajar la vista (también con el video entero a
+la vista; rueda hacia abajo = la vista baja, como al desplazar una página) · <b>rueda pulsada + arrastrar</b> =
+moverla · clic en el % (o «Ajustar») = vuelve a centrarla.</li></ul>"""),
     "timeline": ("Timeline", """
 <ul>
 <li><b>Arrastrar</b> un clip = moverlo · <b>arrastrar su borde</b> = recortarlo · <b>S</b> = dividir en el cabezal.</li>
@@ -72,11 +88,11 @@ larga al empezar cada compás), punto naranja en los golpes fuertes y línea roj
 las pistas en cada compás. Al elegir una canción se escucha sola (una vez; luego queda guardado). Al arrastrar o cortar,
 el imán se pega a los golpes y dice a qué se pegó (golpe, compás o drop). <b>Clic derecho en 🥁</b>: marcadores en el
 drop y en cada parte, o en cada compás (numerados); volver a escuchar; imán a los golpes sí/no.</li>
-<li><b>Barra de la línea de tiempo</b>: <b>✨ B-roll</b> (la IA propone clips para lo que dices), <b>🎬 Escenas</b>
-(corta los clips elegidos en cada cambio de escena), <b>📱 Vertical</b> (solo en Shorts y Edits: el recorte sigue la
-acción), <b>🖼 Miniatura</b> y <b>⬆ Exportar</b>. En <b>⋯ Más</b>: ⚡ Ráfaga de cortes al ritmo y 〰 Curvas. Si la
-ventana es estrecha, los botones enseñan solo su icono (el nombre sale al pasar el ratón). Lo de la IA también está en
-la pestaña <b>IA ✨</b> → <b>«✨ Más»</b>.</li>
+<li><b>Barra de la línea de tiempo</b>: <b>↶ Deshacer</b> y <b>↷ Rehacer</b> a la izquierda, <b>📱 Vertical</b> (solo
+en Shorts y Edits: el recorte sigue la acción) y <b>⋯ Más</b>: <b>✂ Cambios de plano</b> (corta los clips elegidos en
+cada cambio de plano), ⚡ Ráfaga de cortes al ritmo y 〰 Curvas. Si la ventana es estrecha, los botones enseñan solo su
+icono (el nombre sale al pasar el ratón). El <b>B-roll</b> está en <b>IA ✨ → B-roll</b>; la miniatura, en la página
+<b>🖼 Miniatura</b>; exportar, en la página <b>🚀 Entrega</b> (Ctrl+E).</li>
 <li><b>Supr</b> = eliminar · <b>Mayús+Supr</b> = eliminar y cerrar el hueco · <b>Ctrl+L</b> = bloquear el clip.</li>
 <li><b>🔑 Palabras clave</b> (botón 🔑 arriba de los nombres de las pistas): en la regla sale cada vez que dices una
 palabra que tiene carpeta (Medios → 🔑 Palabras clave; también carpetas de tu PC), con lo que va: 🎮 gameplay,
@@ -113,7 +129,7 @@ va más fluido. Clic derecho → «Deshacer clip compuesto» devuelve los origin
 de las de audio (clic = barrita para el tamaño exacto; rueda del ratón encima = más / menos). Si arrastras algo a
 la <b>franja de abajo</b> («➕ Suelta aquí…»), se crea una pista nueva para eso. <b>Doble clic en el nombre</b> (o clic derecho → Renombrar) = ponle el nombre que quieras; salen
 sugerencias (Narración, Música, Efectos…). Si la llamas <b>Música</b>, baja sola cuando hablas; <b>Efectos</b>
-recibe los sonidos; <b>Narración/Voz</b> recibe la mejora de voz. Cuando la IA pone música o sonidos y no hay
+recibe los sonidos; <b>Narración/Voz</b> es tu voz (el ecualizador y el compresor, si tu voz está grabada sin procesar, se encienden en «Limpieza y mezcla» → Mezcla y música → Voz). Cuando la IA pone música o sonidos y no hay
 pista para ellos, crea una nueva (nunca encima de tu voz).</li>
 <li>Borde naranja con «IA» = lo hizo la IA. ✂ naranja = corte de la IA. Rombos amarillos = claves de zoom.</li>
 <li>La franja de colores de arriba son los <b>temas</b> de tu narración: doble clic = cambiar, arrastra el borde para ajustarlo.</li>
@@ -137,8 +153,9 @@ van encima del video, la comparación se pone arriba y abajo, y el B-roll cambia
 <b>Edit musical</b> (9:16): videos sin comentario donde manda la música.
 Para montarlo solo: pestaña IA ✨ → «🎵 Edit musical» (Ctrl+M). En la pestaña <b>Edits</b> no es una ventanita: las
 opciones están a la derecha y los clips, con miniaturas grandes, a la izquierda.<br><br>
-<b>Cada pestaña tiene sus paneles</b>: YouTube enseña 🔑 Palabras clave y 🎞 Material del clip (sin Texto ni
-Subtítulos); Edits, el edit musical y 🔑 Palabras clave; Shorts, la voz, el Texto y los Subtítulos. Lo que enciendas o
+<b>Cada pestaña tiene sus paneles</b>: Edits añade los del edit musical (Clips del edit y Edit musical); la voz, el
+texto, los subtítulos y las palabras clave están en <b>«Voz y texto»</b> y el sonido en <b>«Limpieza y mezcla»</b>, en las tres
+pestañas. Lo que enciendas o
 apagues tú desde el menú Ventana se recuerda en esa pestaña.<br>
 <b>¿Empezaste en la pestaña equivocada?</b> Menú «🔄 Reinicio» → «↪ Cambiar este proyecto a…»: lo lleva a YouTube,
 Edits o Shorts con su formato y lo quita de la pestaña de origen (que queda vacía). Ctrl+Z devuelve el formato.<br><br>
@@ -242,9 +259,9 @@ La IA revisa <b>cada imagen y cada segundo</b> de tus videos (no solo unos pocos
 en planos y aprende <b>quién y qué aparece</b>. Así, cuando en tu narración dices «el protagonista», el
 B-roll muestra una imagen, cinemática o momento donde sale.<br><br>
 <b>Cómo aprende los nombres:</b><br>
-• De tus <b>imágenes</b>: «jefe maestro.png» le enseña cómo es, y lo busca en tus videos por parecido.
+• De tus <b>imágenes</b>: «persona.png» le enseña cómo es, y lo busca en tus videos por parecido.
   Es lo más fiable: añade unas cuantas imágenes con buen nombre.<br>
-• De los nombres de tus archivos y carpetas («Cinemáticas/Cortana.mp4»).<br>
+• De los nombres de tus archivos y carpetas («Cinemáticas/persona.mp4»).<br>
 • De los <b>nombres propios que dices</b> en la narración.<br>
 • Del <b>glosario</b> (a la derecha): «El protagonista = Juan, Juanito» une apodos y nombres.<br><br>
 Despliega un nombre para ver dónde lo encontró (con miniaturas). Tarda ≈1 minuto por cada hora de
@@ -339,14 +356,14 @@ Mientras ajustas, la línea de tiempo marca en <b>naranja</b> lo que se quitará
 todas las pistas (no se desincroniza el video de tu voz). Tus ajustes de Resolve ya están guardados y puedes guardar
 más. Todo se deshace con un Ctrl+Z."""),
     "limpieza_auto": ("Limpieza automática", """
-Quita de una vez lo que marques, después de transcribir:<br>
+Con «Limpiar» se quita de una vez lo marcado en la columna <b>«Quitar»</b> de «Qué buscar», después de transcribir:<br>
 <b>Muletillas seguras</b> (eh, mmm…) · <b>posibles muletillas</b> (este, bueno, o sea… solo con pausa detrás) ·
 <b>palabras repetidas y cortadas</b> («el el», «pro… problema»; las que suelen ser a propósito, como «muy muy» o
 «no no», no se tocan) · <b>tomas repetidas</b> · <b>silencios largos</b> · <b>respiraciones</b>.<br><br>
 <b>Tomas repetidas</b>: si dices una frase dos o más veces, la IA se queda con la <b>mejor</b> (no siempre la última):
 la que no dejaste a medias, la más completa, sin muletillas ni trabas, sin pausas raras y que se entiende mejor.
 En la lista verás ⭐ la elegida y el porqué; con «✓ Elegir toma…» puedes quedarte con otra.<br><br>
-<b>Hacerlo solo al terminar</b>: limpia en cuanto acaba la transcripción. Todo se deshace con un Ctrl+Z, o corte a
+<b>Al terminar de transcribir</b>: limpia en cuanto acaba la transcripción (o el análisis). Todo se deshace con un Ctrl+Z, o corte a
 corte desde «Aplicadas» con «↺ Restaurar». Para revisar una por una, usa la lista de abajo (modo manual).<br><br>
 Estas casillas también deciden qué sale <b>tachado en rojo</b> en la pestaña «Texto»; lo que taches o destaches
 allí manda sobre ellas."""),
@@ -414,6 +431,9 @@ En gris, el sonido del clip en el cabezal.</li>
 Al exportar se aplica exactamente la curva que ves."""),
     "texto_pantalla": ("Texto en pantalla", """
 Títulos y etiquetas encima del video, como el «Texto» de DaVinci Resolve (el texto se aplica solo al escribir).<br>
+<b>Quitar un texto</b>: <b>🗑 Quitar</b> (junto a «T Añadir»: el seleccionado o, sin selección, el del cabezal), o
+selecciónalo en la línea de tiempo o en el visor y pulsa <b>Supr</b> (o «Eliminar»). Mientras escribes en el cuadro,
+Supr borra letras: con el cuadro vacío, Supr quita el texto; <b>Esc</b> vuelve a la línea de tiempo. Ctrl+Z lo devuelve.<br>
 <b>✍ Ortografía</b> (debajo del cuadro): subraya en rojo lo mal escrito; clic derecho en la palabra → sugerencias,
 «Añadir al diccionario» o «Ignorar». Idioma: <b>Mixto</b> (español de México + inglés, para cuando mezclas: «el boss
 final del gameplay»), Español (México), English o Sin corregir. También en las frases del edit y en las miniaturas.
@@ -429,6 +449,9 @@ textos nuevos («⭐ Aplicar mi estilo» lo pone en uno que ya existe).<br>
 Se ve exactamente igual en el visor y al exportar."""),
     # ---------------------------------------------------------- voz
     "transcripcion": ("Transcripción", """
+Panel <b>«Voz y texto»</b> (interruptor a la derecha), en el orden de trabajo: <b>1 · Transcribir</b> (arriba, qué
+archivo es tu <b>narración</b>; grabarla con «🎙 Grabar la narración» o que la lea la IA en «5 · Voz IA»),
+<b>2 · Transcripción</b> (el texto), <b>3 · Subtítulos</b> y <b>4 · Palabras clave</b>.<br>
 Convierte tu narración en texto con el momento exacto de cada palabra (Whisper, en tu PC).
 <ul><li><b>Modelo</b>: Equilibrado (recomendado), Rápido (menos preciso) o Máxima precisión (más lento).</li>
 <li>La primera vez se descarga el modelo. Una narración de 15 min tarda unos 3–4 min.</li>
@@ -437,8 +460,8 @@ podría quitar. Un segundo oído (en tu PC) escucha todo letra a letra y recuper
 narración de 12 min: unos 9 min en total; 3 horas: unas 2 horas), pero se escapan muchas menos tomas.</li>
 <li>Al terminar se analiza sola la limpieza de voz.</li></ul>"""),
     "limpieza": ("Limpieza de voz", """
-Elige qué debe buscar la IA: silencios largos (dejando siempre una pausa natural), respiraciones y ruidos,
-muletillas, palabras repetidas, tomas repetidas, frases que suenan parecido, palabras dudosas y saturación.<br><br>
+En la columna <b>«Marcar»</b> de «Qué buscar» eliges qué debe buscar la IA: silencios largos (dejando siempre una pausa natural), respiraciones y ruidos,
+muletillas seguras y posibles, palabras repetidas, tomas repetidas, frases que suenan parecido, palabras dudosas y saturación.<br><br>
 <b>Tomas repetidas</b>, en tres niveles: <b>se repite</b> (casi palabra por palabra, o la empezaste y la volviste a
 empezar), <b>se medio repite</b> (cambia algo: «ayer estaba jugando» → «ayer estaba trabajando») y <b>suena
 parecido</b> (lo mismo con otras palabras; solo se avisa, no se tacha solo).<br>
@@ -528,11 +551,16 @@ usa las <b>aceptadas</b>: por ejemplo, la «✨ Primera versión automática» p
 y te dice por qué («Ver razonamiento»). Nunca cambia tu proyecto por su cuenta.<br>
 <b>Este proyecto</b>: aprender de él o excluirlo, y qué tipo de contenido es.<br>
 <b>Pausar</b>, <b>Analizar esta sesión</b> y <b>Eliminar perfil aprendido</b> (empezar de cero)."""),
-    "desenfoque_zona": ("◌ Desenfoque en zona", """
-En <b>Efectos → Efectos de imagen</b>: «▭ Cuadro» o «◯ Círculo» desenfoca solo una parte del clip seleccionado
-(una cara, un logo, un dato). Con el clip seleccionado, en el visor ves su contorno naranja: <b>arrastra dentro</b>
-para moverla y <b>la esquina naranja</b> para cambiar su tamaño. «Fuerza» cambia cuánto desenfoca (se recuerda) y
-«✕» quita las zonas. Puedes poner varias. Se exporta igual que se ve; Ctrl+Z deshace."""),
+    "desenfoque_zona": ("▭ Figuras geométricas: tapar (censurar) y figuras de color", """
+En el panel <b>Transiciones y efectos → ▭ Figuras geométricas</b>:<br>
+<b>🙈 Tapar</b>: «▭ Cuadro» o «◯ Círculo» tapa solo una parte del clip seleccionado (una cara, un logo, un dato),
+con <b>Desenfoque</b> o <b>Pixelado</b>. Con el clip seleccionado, en el visor ves su contorno naranja: <b>arrastra
+dentro</b> para moverla y <b>la esquina naranja</b> para cambiar su tamaño. «Fuerza» cambia cuánto tapa (se recuerda).
+En la lista, elige una zona: <b>Supr</b> o <b>🗑 Quitar la zona</b> la quita (y cambiar Desenfoque/Pixelado cambia
+la elegida); «✕ Quitar todas» quita todas. ¿Algo que se mueve? Inspector → «Seguir» y taparlo.<br>
+<b>▭ ◯ Figuras de color</b>: un rectángulo o un círculo de color encima del video (en el cabezal, en la pista de
+arriba): muévelo y cambia su tamaño en el visor (⤧ Transformar); «■» = su color; «🗑 Quitar la figura» (o Supr en
+la línea de tiempo) la quita.<br>Todo se exporta igual que se ve; Ctrl+Z deshace."""),
     "mis_efectos": ("⭐ Mis efectos para la IA", """
 Eliges tus efectos favoritos y la IA los propone donde encajan; tú decides.<br><br>
 <b>1. Elige</b>: «➕ Añadir efecto…», o clic derecho en un efecto de imagen, un sonido (también los de tu
@@ -550,7 +578,8 @@ un ⭐ = en los clips seleccionados. Si el clip está bloqueado 🔒, te lo dice
 <b>Aprende</b>: cada ✓/✗ le enseña qué efecto te gusta en qué tipo de momento y con qué tipo de imagen; la
 próxima vez propone mejor. Todo se deshace con Ctrl+Z."""),
     "audio_ia": ("Audio inteligente", """
-Se aplica al reproducir y al exportar; tus archivos no se modifican.
+Está en el panel <b>«Limpieza y mezcla» → 2 · Mezcla y música</b> (interruptor a la derecha; la sonoridad final, en
+<b>3 · Sonoridad</b>). Se aplica al reproducir y al exportar; tus archivos no se modifican.
 <ul><li><b>Voz</b>: reducir ruido, ecualizar (más clara), de-esser (suaviza las «s»), compresor (volumen más parejo).</li>
 <li><b>Bajar la música cuando hablo</b> (ducking): la música baja sola mientras hablas y sube en las pausas.</li>
 <li><b>Volumen final para YouTube</b>: normaliza el video a -14 LUFS.</li>
@@ -606,7 +635,8 @@ recorre cada video en miniatura (se guarda) y después es casi instantáneo.""")
 La descripción completa del video, lista para pegar en YouTube: un párrafo inicial (solo para este proyecto), los
 <b>capítulos</b> («0:00 Intro · 3:12 Jugabilidad…», que YouTube convierte en capítulos), los <b>créditos</b> de los clips
 bajados, tu <b>pie fijo</b> (Ko-fi, redes…, para todos los videos) y <b>hashtags</b> sugeridos. Cada parte se activa o no.
-Al exportar el video se guarda también «<video>.descripcion.txt» junto a él.<br>
+Al exportar, si marcas «📝 Crear también la descripción (.txt)», se guarda también «<video>.descripcion.txt»
+junto a él.<br>
 Sale de tus <b>marcadores con nombre</b> (M en la línea de tiempo) o de los <b>temas de la narración</b>. Cambia
 los nombres en la lista (se guardan en los marcadores) y quita los que no quieras.<br>
 Reglas de YouTube (se aplican solas y te avisa): el primero en 0:00, al menos 3, cada uno de 10 s o más.<br>
@@ -641,7 +671,7 @@ para ver sus momentos. A la derecha de cada palabra: <b>👍</b> = es palabra cl
 <b>⚡ Agregar todo</b> pone de una vez el material de tus carpetas (lo descargado y lo de tu computadora) donde
 dices cada palabra clave, con la duración de tu frase y sin repetir; un Ctrl+Z lo quita.
 Todo lo que pongas desde Palabras clave (botones, doble clic o arrastrando) entra <b>sin su audio</b>: el sonido es
-tu narración. Si tu equipo tiene la búsqueda en internet, al bajar la casilla <b>🔇 Sin audio</b> (marcada de entrada) baja solo la imagen: más
+tu narración. Si tu equipo tiene la búsqueda en internet, al bajar la casilla <b>Sin audio</b> (marcada de entrada) baja solo la imagen: más
 rápido y ocupa menos.
 <b>🗂 Carpetas</b> es una pestaña a la derecha (junto al Inspector) que enseña siempre la carpeta de la palabra
 elegida en «Dijiste…», en dos partes, «🌐 Descargado de internet» y «💻 De tu computadora», con botones para borrar lo
@@ -673,7 +703,7 @@ Abajo a la izquierda del visor (como en Resolve):<br>
 <b>✂ Recortar</b>: arrastra los bordes para esconder partes de la imagen (lo de fuera, transparente).<br>
 <b>🔍 Zoom dinámico</b>: rectángulo VERDE = cómo empieza, ROJO = cómo acaba; el encuadre va suave de uno a otro.<br>
 <b>✏ Anotaciones</b>: dibuja a mano (no sale al exportar); «Borrar las anotaciones de aquí».<br>
-<b>Rueda</b> = acercar/alejar la vista · <b>rueda pulsada + arrastrar</b> = moverla · clic en el % = ajustar.<br>
+<b>Rueda</b> = acercar/alejar la vista · <b>Alt + rueda</b> = subir/bajar la vista · <b>rueda pulsada + arrastrar</b> = moverla · clic en el % = ajustar.<br>
 <b>▦ Guías</b>: relaciones de aspecto de redes (1:1, 4:5, 9:16, 1.91, 16:9) y cine (1.33–2.40), áreas de
 acción/título, centro, zona de Shorts, tercios y reglas."""),
 }

@@ -19,8 +19,10 @@ from . import thumbnail as T
 # Tamaños reales en pantalla (ancho en píxeles) donde la gente ve tu miniatura
 YT_SIZES = [("Inicio (escritorio)", 360), ("Móvil", 246), ("Videos sugeridos", 168)]
 SHORTS_SIZES = [("Estante de Shorts", 180), ("Shorts en móvil", 140)]
-# 📱 En el feed de inicio la tarjeta del Short es más ancha que 9:16 (~208×285): YouTube recorta arriba y abajo
-FEED_SHORTS = 0.73            # ancho / alto de esa tarjeta
+# 📱 En el feed de inicio y en la cuadrícula del canal la tarjeta del Short es 2:3 (más ancha que 9:16): YouTube
+# recorta arriba y abajo ~8 % por lado. (Medido el 22/11/2026 sobre capturas reales del usuario; antes 0,73, que
+# marcaba más recorte del que hay.)
+FEED_SHORTS = 2 / 3           # ancho / alto de esa tarjeta
 
 
 def feed_ventana(doc: dict) -> tuple[float, float]:

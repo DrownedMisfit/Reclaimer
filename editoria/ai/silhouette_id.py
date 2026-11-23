@@ -164,6 +164,13 @@ def index_media(path: str, duration: float, progress=None, cancelled=None) -> tu
     if os.path.exists(cp):
         d = np.load(cp)
         return d["times"], d["bins"]
+    from . import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ver ai/lectura_unica.py)
+    if lectura_unica.usar(path, duration, "siluetas"):
+        lectura_unica.asegurar_o_seguir(path, duration, ["siluetas"], cancelled, lambda f, _t: report(
+            progress, f, f"👤 Recorriendo el video · {int(100 * f)} %"))
+        if os.path.exists(cp):
+            d = np.load(cp)
+            return d["times"], d["bins"]
     proc = subprocess.Popen([media_tools.ffmpeg(), "-nostdin", "-v", "error", "-skip_loop_filter", "all",
                              "-i", path, "-an", "-sn",   # ⚡ sin filtro de desbloqueo: ~25 % más rápido; en imágenes pequeñas para analizar no cambia nada
                              "-vf", f"fps=1/{STEP},scale={MAP_W}:{MAP_H}:flags=area", "-pix_fmt", "rgb24",
@@ -189,9 +196,16 @@ def index_media(path: str, duration: float, progress=None, cancelled=None) -> tu
     finally:
         proc.stdout.close()
         proc.wait()
+    return save_index(path, times, maps)
+
+
+INDEX_FILTER = f"fps=1/{STEP},scale={MAP_W}:{MAP_H}:flags=area"   # (la lectura única usa el mismo filtro)
+
+
+def save_index(path: str, times: list, maps: list) -> tuple[np.ndarray, np.ndarray]:
     t = np.array(times, np.float32)
     b = np.stack(maps) if maps else np.zeros((0, MAP_H, MAP_W), np.uint8)
-    np.savez_compressed(cp, times=t, bins=b)
+    np.savez_compressed(_index_path(path), times=t, bins=b)
     return t, b
 
 

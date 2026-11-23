@@ -243,7 +243,13 @@ class EditDialog(QDialog):
             self.cancel_btn.setText("Detener")
             self.cancel_btn.setToolTip("Detiene el edit que se está creando")
             self.cancel_btn.hide()
-            ctrl.media_changed.connect(lambda: self._fill(self.song.currentData()) if self.job is None else None)
+            # (agrupado y FUERA de la señal: al analizar medios llegan muchos avisos seguidos, y rehacer la lista
+            #  dentro de cada uno coincidía con los cierres inesperados)
+            self._t_fill = QTimer(self)
+            self._t_fill.setSingleShot(True)
+            self._t_fill.setInterval(250)
+            self._t_fill.timeout.connect(lambda: self._fill(self.song.currentData()) if self.job is None else None)
+            ctrl.media_changed.connect(self._t_fill.start)
         for sec in self.sections.values():         # al abrir o cerrar una sección, el tamaño justo
             sec.abierta.connect(lambda _on: QTimer.singleShot(0, self._fit))
         self._fill()
@@ -267,23 +273,42 @@ class EditDialog(QDialog):
     # ------------------------------------------------------------ datos
     def _fill(self, select_song: str | None = None):
         p = self.ctrl.project
-        self.song.clear()
         songs = [m for m in p.media.values() if m.kind == KIND_AUDIO and m.id not in self.ctrl.missing]
         songs.sort(key=lambda m: (not any(w in m.category.lower() for w in ("músic", "music", "song")), m.name))
-        for m in songs:
-            self.song.addItem(f"{m.name}  ({fmt_time(m.duration)})", m.id)
+        filas_songs = [(f"{m.name}  ({fmt_time(m.duration)})", m.id) for m in songs]
+        if filas_songs != getattr(self, "_filas_songs", None):         # (solo si cambió algo)
+            self._filas_songs = filas_songs
+            self.song.clear()
+            for txt, mid in filas_songs:
+                self.song.addItem(txt, mid)
         if select_song:
             self.song.setCurrentIndex(max(0, self.song.findData(select_song)))
-        checked = {self.clips.item(i).data(Qt.UserRole) for i in range(self.clips.count())
-                   if self.clips.item(i).checkState() == Qt.Checked}
-        self.clips.clear()
+        filas = []
         for m in sorted(p.media.values(), key=lambda m: (m.kind != KIND_VIDEO, m.name)):
             if m.kind not in (KIND_VIDEO, KIND_IMAGE) or m.id in self.ctrl.missing:
                 continue
             extra = fmt_time(m.duration) if m.kind == KIND_VIDEO else "imagen"
             if m.kind == KIND_VIDEO and m.edit_ranges:
                 extra += f"   ·  ✂ {len(m.edit_ranges)} tramo(s), {sum(b - a for a, b in m.edit_ranges):.0f} s"
-            it = QListWidgetItem(f"{'🎞' if m.kind == KIND_VIDEO else '🖼'}  {m.name}   ·  {extra}")
+            filas.append((m, f"{'🎞' if m.kind == KIND_VIDEO else '🖼'}  {m.name}   ·  {extra}"))
+        firma = [(m.id, txt) for m, txt in filas]
+        if firma == getattr(self, "_firma_clips", None) and self.clips.count() == len(firma):
+            for i, (m, _txt) in enumerate(filas):               # (lo mismo: no se rehace la lista; solo miniaturas)
+                it = self.clips.item(i)
+                if it is not None and m.id in self._thumbs and it.icon().isNull():
+                    it.setIcon(QIcon(self._thumbs[m.id]))
+            self._load_thumbs()
+            if not songs:
+                self.status.setText("Primero importa una canción (o pulsa «Otra canción…»).")
+            return
+        self._firma_clips = firma
+        checked = {self.clips.item(i).data(Qt.UserRole) for i in range(self.clips.count())
+                   if self.clips.item(i).checkState() == Qt.Checked}
+        self.clips.setCurrentItem(None)
+        self._big.hide()
+        self.clips.clear()
+        for m, txt in filas:
+            it = QListWidgetItem(txt)
             it.setData(Qt.UserRole, m.id)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Checked if (not checked or m.id in checked) else Qt.Unchecked)

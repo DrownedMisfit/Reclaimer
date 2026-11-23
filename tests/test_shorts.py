@@ -9,6 +9,24 @@ import subprocess
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,6 +74,9 @@ def main():
     while ctrl.analyzing:
         pump(app, 0.1)
 
+    # (aquí: «▦ Encuadrar → solo al añadir videos» APAGADO —como lo tiene el usuario—: el video entra tal cual. El
+    #  encuadre automático encendido, que es lo de fábrica desde el 16/11, lo prueba test_barra_shorts)
+    ctrl.encuadre_auto_vertical = False
     ctrl.set_project_format("short")
     p = ctrl.project
     assert (p.width, p.height, p.format) == (1080, 1920, "short")
@@ -66,16 +87,16 @@ def main():
     c1 = ctrl.add_media([ic], v1.id, 0.0)[0]
     c2 = ctrl.add_media([ii], v2.id, 2.0)[0]
     c3 = ctrl.add_media([iv], v1.id, 8.0)[0]
-    # 📱 en vertical, un video horizontal en V1 (sin nada debajo) entra entero con arriba y abajo su imagen borrosa
-    # (▦ Relleno automático, «auto»); lo de encima (la captura) no lo lleva: taparía lo de V1
-    rel = (p.clips[c1].fx or {}).get("relleno") or {}
-    assert rel.get("auto") and p.clips[c1].layout and p.clips[c1].layout.get("fit") == "contain" and         p.clips[c1].layout.get("bg") == "none", ("horizontal abajo: entero con relleno vertical", p.clips[c1].fx,
-                                                 p.clips[c1].layout)
+    # 📱 en vertical, un video horizontal en V1 entra entero con su forma y SIN efectos automáticos (el usuario: «no
+    # espero que porque sea 9:16 tenga una imagen arriba y abajo»; el fondo con la propia imagen = ▦ Relleno, lo pones
+    # tú); lo de encima (la captura) tampoco lleva relleno
+    assert not (p.clips[c1].fx or {}).get("relleno") and p.clips[c1].layout is None, (
+        "horizontal abajo: entero, sin relleno automático", p.clips[c1].fx, p.clips[c1].layout)
     assert not (p.clips[c2].fx or {}).get("relleno"), ("la captura de encima, sin relleno", p.clips[c2].fx)
     assert p.clips[c2].layout == dict(transform.FULL, bg="none"), ("captura encima: entera, alrededor se ve lo de "
                                                                     "debajo", p.clips[c2].layout)
     assert p.clips[c3].layout is None, "un clip vertical llena la pantalla sin más"
-    print("✓ al añadir: horizontal en V1 entero con relleno vertical · captura encima con lo de debajo alrededor")
+    print("✓ al añadir: horizontal en V1 entero sin relleno automático · captura encima con lo de debajo alrededor")
     t_id = ctrl.add_text(0.5, 3.0, "Gears of War 3 Beta")
     assert p.clips[t_id].text["y"] == 0.29 and not p.clips[t_id].text["box"]
     print("✓ etiqueta de contexto encima del video (como «Gears of War 3 Beta»)")

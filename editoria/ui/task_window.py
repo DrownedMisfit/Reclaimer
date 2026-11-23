@@ -43,8 +43,8 @@ class TaskManager(QObject):
 
     def _adopt(self, job: BackgroundJob):
         """Cualquier trabajo largo del programa aparece aquí (si dura más de un segundo)."""
-        if getattr(job, "_task", None) is not None:
-            return
+        if getattr(job, "_task", None) is not None or getattr(job, "silencioso", False):
+            return                  # (silencioso: trabajo de la interfaz —miniaturas de una lista—, no de la IA)
         task = Task("")
         task.job, task.auto = job, True
         job._task = task
@@ -161,8 +161,10 @@ class TaskChip(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("taskchip")
-        self.setStyleSheet("#taskchip { border: 1px solid #e8742f; border-radius: 5px; background: rgba(232,116,47,0.08); }"
-                           "#taskchip QLabel { color: #f2c7a8; }")
+        from .theme import ACCENT, ACCENT_TINTE, acento_rgba
+        self.setStyleSheet(f"#taskchip {{ border: 1px solid {ACCENT}; border-radius: 5px; "
+                           f"background: {acento_rgba(0.08)}; }}"
+                           f"#taskchip QLabel {{ color: {ACCENT_TINTE}; }}")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 1, 3, 1)
         lay.setSpacing(6)
@@ -172,7 +174,7 @@ class TaskChip(QFrame):
         self.bar.setTextVisible(False)
         self.bar.setFixedSize(70, 6)
         self.bar.setStyleSheet("QProgressBar { background: #2a2b2f; border: none; border-radius: 3px; }"
-                               "QProgressBar::chunk { background: #e8742f; border-radius: 3px; }")
+                               f"QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}")
         self.stop = QToolButton()
         self.stop.setText("■")
         self.stop.setToolTip("Detener")
@@ -248,6 +250,15 @@ class TasksPanel(QWidget):
             self.levels.addButton(rb)
             gl.addWidget(rb)
         self.levels.buttonClicked.connect(lambda b: set_resource_level(b.property("level")))
+        from PySide6.QtWidgets import QCheckBox
+        from .cola_analisis import analizar_al_importar, set_analizar_al_importar
+        self.al_importar = QCheckBox("Analizar lo que importo")
+        self.al_importar.setToolTip("Al importar o descargar un video, la IA lo analiza enseguida en segundo plano "
+                                    "(prioridad baja, en pausa mientras reproduces o editas): cuando lo necesites "
+                                    "ya estará listo. Abrir un proyecto no analiza nada.")
+        self.al_importar.setChecked(analizar_al_importar())
+        self.al_importar.toggled.connect(set_analizar_al_importar)
+        gl.addWidget(self.al_importar)
         lay.addWidget(g)
         self.box = QVBoxLayout()
         lay.addLayout(self.box)
@@ -276,7 +287,8 @@ class TasksPanel(QWidget):
             if row is None:
                 row = QFrame()
                 row.setObjectName("taskchip")
-                row.setStyleSheet("#taskchip { border: 1px solid #e8742f; border-radius: 6px; }")
+                from .theme import ACCENT
+                row.setStyleSheet(f"#taskchip {{ border: 1px solid {ACCENT}; border-radius: 6px; }}")
                 rl = QHBoxLayout(row)
                 row.lab = QLabel()
                 row.lab.setWordWrap(True)
@@ -301,7 +313,9 @@ def stop_all(wait_ms: int = 3000):
     """Al cerrar Reclaimer: pide a todos los trabajos en segundo plano que paren y espera un poco a que lo
     hagan (así el programa se cierra limpio, sin dejar nada funcionando)."""
     import time
+    from .cola_analisis import cerrar_cola
     from .jobs import live_jobs
+    cerrar_cola()                        # ◈ la cola única de análisis: no empieza nada más y cancela lo suyo
     jobs = set(_ALIVE) | {t.job for t in manager().tasks if t.job is not None} | set(live_jobs())
     for t in list(manager().tasks):
         t.stopped = True

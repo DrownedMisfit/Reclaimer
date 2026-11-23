@@ -107,6 +107,11 @@ def timeline_words(p: Project, media_id: str) -> list[tuple[float, float, str, i
     """Palabras que suenan en la timeline: [(t_ini, t_fin, texto, índice)], ordenadas."""
     words = p.transcripts.get(media_id, {}).get("words", [])
     index = mapping.SourceIndex(p, media_id)
+    if len(words) >= 64 and index.clips:
+        try:
+            return _timeline_words_np(words, index.clips)
+        except (TypeError, ValueError, IndexError):   # (palabras raras: el camino de siempre)
+            pass
     out = []
     for i, w in enumerate(words):
         mid = (w[0] + w[1]) / 2
@@ -114,6 +119,46 @@ def timeline_words(p: Project, media_id: str) -> list[tuple[float, float, str, i
         if t is None:
             continue  # palabra cortada
         out.append((max(0.0, t - (mid - w[0])), t + (w[1] - mid), w[2], i))
+    out.sort()
+    return out
+
+
+def _timeline_words_np(words, clips) -> list[tuple[float, float, str, int]]:
+    """⚡ (21/11, ronda 2) Lo mismo que el bucle de timeline_words con mapping.SourceIndex.time, pero con numpy: con una
+    narración de 65 min (5400 palabras) bajaba de ~7 ms a ~1 ms en cada edición de la voz. Las MISMAS operaciones en el
+    mismo orden (mismo resultado, bit a bit): bisect_right = searchsorted «right»; se miran el clip de antes y hasta 3
+    más atrás; max(0.0, x) = where(x > 0, x, 0)."""
+    import numpy as np
+    tol = mapping.TOL
+    si = np.array([c.source_in for c in clips], dtype=float)
+    ln = np.array([c.src_len for c in clips], dtype=float)
+    st = np.array([c.start for c in clips], dtype=float)
+    sp = np.array([c.speed for c in clips], dtype=float)
+    rv = np.array([bool(c.reverse) for c in clips], dtype=bool)
+    w0 = np.array([w[0] for w in words], dtype=float)
+    w1 = np.array([w[1] for w in words], dtype=float)
+    mid = (w0 + w1) / 2
+    j = np.searchsorted(si, mid + tol, side="right") - 1
+    t = np.zeros(len(words), dtype=float)
+    hecho = np.zeros(len(words), dtype=bool)
+    fin = si + ln
+    for k in range(4):
+        cand = j - k
+        libre = ~hecho & (cand >= 0)
+        if not libre.any():
+            break
+        cc = np.where(libre, cand, 0)
+        cubre = libre & (si[cc] - tol <= mid) & (mid < fin[cc])
+        d = np.where(rv[cc], fin[cc] - mid, mid - si[cc])
+        d = np.where(d > 0.0, d, 0.0)
+        t = np.where(cubre, st[cc] + d / sp[cc], t)
+        hecho |= cubre
+    a = t - (mid - w0)
+    a = np.where(a > 0.0, a, 0.0)
+    b = t + (w1 - mid)
+    idx = np.nonzero(hecho)[0].tolist()
+    al, bl = a.tolist(), b.tolist()
+    out = [(al[i], bl[i], words[i][2], i) for i in idx]
     out.sort()
     return out
 

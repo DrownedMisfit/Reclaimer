@@ -46,6 +46,9 @@ class _Soltar:
     def position(self):
         return QPointF(10, 10)
 
+    def modifiers(self):                # (sin Mayús: se suelta normal, sin inserción)
+        return Qt.NoModifier
+
     def acceptProposedAction(self):
         pass
 

@@ -98,7 +98,9 @@ def main():
     t0 = time.time()
     while pm.job is not None and time.time() - t0 < 120:
         pump(app, 0.1)
-    assert PX.has_proxy(vid, "half") and PX.has_proxy(vid, "quarter")
+    # (desde el 07/11 solo se hace la copia de la calidad que se usa: «Media», no también «Un cuarto»)
+    assert PX.has_proxy(vid, "half") and not PX.has_proxy(vid, "quarter"), (PX.has_proxy(vid, "half"),
+                                                                             PX.has_proxy(vid, "quarter"))
     assert texts and all("%" not in t for t in texts), texts[:3]
     assert any("quedan" in t for t in texts), texts[-3:]
     print(f"✓ barra: «{texts[-1]}» (sin el porcentaje repetido)")

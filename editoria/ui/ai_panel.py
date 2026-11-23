@@ -84,6 +84,10 @@ class AIPanel(QWidget):
         v = QVBoxLayout(pagina)
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(6)
+        nb = getattr(voz, "narr_box", None)          # 📝 la narración (qué archivo es tu voz) también viene aquí
+        if nb is not None:
+            v.addWidget(nb)
+            voz.narr_fila.setVisible(True)            # (en «Limpieza» queda la línea «Narración: …» + 📝 Cambiar)
         v.addWidget(voz.sec1)
         fila = QHBoxLayout()
         self.tr_progress = QProgressBar()
@@ -117,6 +121,49 @@ class AIPanel(QWidget):
         self._tr_espejo()
         self.tabs.setCurrentIndex(1 if self.narration() is not None else 0)
 
+    def sacar_transcriptor(self) -> QWidget | None:
+        """🎙 La subpestaña «Transcribir» (narración, modelo, idioma, escucha literal, el botón y su progreso) sale de
+        IA ✨ a la sección «1 · Transcribir» del panel «Voz y texto» (agrupación del 20/11: el orden de trabajo de la
+        voz en un solo sitio). Devuelve la página (None si no está); su espejo de progreso sigue funcionando."""
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "🎙 Transcribir":
+                w = self.tabs.widget(i)
+                self.tabs.removeTab(i)
+                self._tab_of = {k: (j - 1 if j > i else j) for k, j in self._tab_of.items()}
+                return w
+        return None
+
+    def sacar_audio(self) -> QWidget:
+        """🎚 «Audio inteligente» (mejorar la voz, música y bajarla al hablar, mezcla, −14 LUFS, cortes al ritmo,
+        escuchar con efectos) sale de la pestaña «Audio» de IA ✨ a su propio panel de la página «🎚 Audio» (el
+        usuario: la página Audio, solo para el audio). Devuelve el panel; la tarjeta «🔊 Audio inteligente» del mapa
+        lleva a esa página (action_requested("audio"))."""
+        from . import diseno as D
+        g4 = self._audio_group
+        caja = QWidget()
+        v = QVBoxLayout(caja)
+        v.setContentsMargins(D.px(D.M2), 0, D.px(D.M2), D.px(D.M2))
+        g4.setParent(caja)                       # (antes de quitar su pestaña: removeTab borra lo que quede dentro)
+        g4.setTitle("")
+        g4.setFlat(True)                         # (🎨 sin marco: los títulos de sección ya separan, como el Inspector)
+        g4.setStyleSheet("QGroupBox { border: none; margin: 0; padding: 0; }")
+        if g4.layout() is not None:
+            g4.layout().setContentsMargins(0, 0, 0, 0)
+        v.addWidget(g4)
+        i = self._tab_of.pop("audio", None)
+        if i is not None:
+            self.tabs.removeTab(i)
+            self._tab_of = {k: (j - 1 if j > i else j) for k, j in self._tab_of.items()}
+        self._groups.pop("audio", None)
+        g4.show()
+        v.addStretch()
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QScrollArea.NoFrame)
+        sc.setWidget(caja)
+        self.audio_panel = sc
+        return sc
+
     def _tr_espejo(self):
         """El progreso y el estado del transcriptor, también aquí (los lleva «Limpieza»)."""
         voz = self._voz
@@ -130,6 +177,8 @@ class AIPanel(QWidget):
             txt = voz.status.text()
             if self.tr_status.text() != txt:
                 self.tr_status.setText(txt)
+            if self.tr_status.toolTip() != voz.status.toolTip():      # (la explicación del estado corto)
+                self.tr_status.setToolTip(voz.status.toolTip())
         except RuntimeError:
             self._tr_timer.stop()
 
@@ -210,6 +259,11 @@ class AIPanel(QWidget):
         self.topic_list.customContextMenuRequested.connect(self._topic_menu)
         self.topic_list.setProperty("own_menu", True)
         v1.addWidget(self.topic_list)
+        from . import diseno as _Dv                  # (🎨 tabla escondida hasta que tenga filas: una línea en su lugar)
+        self._vacio_temas = _Dv.aviso_vacio("Sin temas todavía", "Pulsa «Detectar temas»: la IA parte tu narración en "
+                                            "tramos y les pone tema. Doble clic en uno = ir ahí")
+        v1.addWidget(self._vacio_temas)
+        _Dv.ocultar_si_vacia(self.topic_list, self._vacio_temas)
         set_help(g1, "temas")
 
         # --- 2. B-roll ---
@@ -274,6 +328,10 @@ class AIPanel(QWidget):
         self.slot_tree.itemDoubleClicked.connect(self._slot_double_click)
         self.slot_tree.itemSelectionChanged.connect(self._slot_selected)
         v2.addWidget(self.slot_tree, 1)
+        self._vacio_broll = _Dv.aviso_vacio("Sin propuestas de B-roll", "Pulsa «Proponer B-roll»: para cada cosa que "
+                                            "nombras, la IA propone un clip de tus medios (y por qué)")
+        v2.addWidget(self._vacio_broll)
+        _Dv.ocultar_si_vacia(self.slot_tree, self._vacio_broll)
         b = QHBoxLayout()
         self.btn_insert = QPushButton("✓ Insertar elegido")
         self.btn_insert.clicked.connect(self.insert_selected)
@@ -301,6 +359,10 @@ class AIPanel(QWidget):
         self.zoom_list.setMaximumHeight(170)
         self.zoom_list.itemDoubleClicked.connect(self._zoom_preview)
         v3.addWidget(self.zoom_list)
+        self._vacio_zoom = _Dv.aviso_vacio("Sin sugerencias todavía", "Pulsa «Buscar momentos»: la IA busca dónde un "
+                                           "zoom o una comparación ayudan a lo que dices")
+        v3.addWidget(self._vacio_zoom)
+        _Dv.ocultar_si_vacia(self.zoom_list, self._vacio_zoom)
         zb = QHBoxLayout()
         self.btn_zoom_apply = QPushButton("✓ Aplicar")
         self.btn_zoom_apply.clicked.connect(lambda: self.apply_zooms(selected_only=True))
@@ -313,41 +375,52 @@ class AIPanel(QWidget):
         v3.addLayout(zb)
         set_help(g3, "visuales")
 
-        # --- 4. Audio inteligente ---
+        # --- 4. Audio inteligente ---  (🎨 20/11: con el sistema de diseño —ui/diseno.py—, como el Inspector: títulos
+        #  de sección, filas etiqueta/control, casillas pequeñas, iconos monocromos y UN botón principal)
+        from . import diseno as D
         g4 = QGroupBox("4 · Audio inteligente")
         v4 = QVBoxLayout(g4)
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Voz"))
+        v4.setSpacing(D.px(D.M1))
         self.voice_track = QComboBox()
         self.voice_track.currentIndexChanged.connect(self._refresh_audio)
-        r1.addWidget(self.voice_track, 1)
-        v4.addLayout(r1)
-        self.fx_checks = {}
-        grid = QGridLayout()
-        for i, key in enumerate(audio_fx.FX_ORDER):
-            chk = QCheckBox(audio_fx.VOICE_FX[key][0])
-            chk.toggled.connect(lambda on, k=key: self._set_fx(k, on))
-            self.fx_checks[key] = chk
-            grid.addWidget(chk, i // 2, i % 2)
-        v4.addLayout(grid)
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Música"))
         self.music_track = QComboBox()
         self.music_track.currentIndexChanged.connect(self._refresh_audio)
-        r2.addWidget(self.music_track, 1)
-        v4.addLayout(r2)
+        for cb in (self.voice_track, self.music_track):
+            D.alto_fijo(cb)
+        v4.addWidget(D.TituloSeccion("Voz"))
+        v4.addWidget(D.FilaInspector("Pista", self.voice_track, "La pista de tu voz (la narración): a ella se le "
+                                                                "aplican los efectos de abajo"))
+        self.fx_checks = {}
+        lista_fx = QVBoxLayout()                 # (una casilla por fila, como el Inspector: nunca se cortan)
+        lista_fx.setSpacing(D.px(D.M1))
+        lista_fx.setContentsMargins(D.px(D.M1), 0, 0, 0)
+        for key in audio_fx.FX_ORDER:
+            chk = D.CasillaTexto(audio_fx.VOICE_FX[key][0])
+            chk.setToolTip(audio_fx.AYUDA_FX.get(key, ""))
+            chk.toggled.connect(lambda on, k=key: self._set_fx(k, on))
+            self.fx_checks[key] = chk
+            lista_fx.addWidget(chk)
+        v4.addLayout(lista_fx)
+        v4.addWidget(D.TituloSeccion("Música"))
+        v4.addWidget(D.FilaInspector("Pista", self.music_track, "La pista de la música (la que se baja cuando hablas)"))
         r3 = QHBoxLayout()
-        self.duck = QCheckBox("Bajar la música cuando hablo")
+        r3.setSpacing(D.px(D.M2))
+        self.duck = D.CasillaTexto("Bajar la música cuando hablo")
+        self.duck.setToolTip("Mientras hablas, la música baja estos dB y vuelve a subir al callarte")
         self.duck.toggled.connect(self._set_duck)
         self.duck_db = QSpinBox()
         self.duck_db.setRange(-30, -3)
         self.duck_db.setSuffix(" dB")
+        self.duck_db.setToolTip("Cuánto baja la música mientras hablas")
+        D.alto_fijo(self.duck_db)
         self.duck_db.valueChanged.connect(lambda v: self._set_duck(self.duck.isChecked()))
-        r3.addWidget(self.duck)
+        r3.addWidget(self.duck, 1)
         r3.addWidget(self.duck_db)
         v4.addLayout(r3)
-        self.btn_mix = QPushButton("🎚 Analizar y proponer mezcla…")
-        self.btn_mix.setToolTip("Mezcla que cambia a lo largo del video: según lo que se dice (emotivo, acción…) y la "
+        v4.addWidget(D.TituloSeccion("Mezcla"))
+        self.btn_mix = D.BotonPrincipal("Proponer mezcla…", "sliders-horizontal")   # (corto: baja a 200 px sin cortar)
+        self.btn_mix.setToolTip("Analizar y proponer mezcla: una mezcla que cambia a lo largo del video según lo que se "
+                                "dice (emotivo, acción…) y la "
                                 "forma de la canción. Te enseña cada cambio con su motivo antes de aplicarlo.")
         self.btn_mix.clicked.connect(lambda: hasattr(self.window(), "open_mix") and self.window().open_mix())
         v4.addWidget(self.btn_mix)
@@ -356,15 +429,20 @@ class AIPanel(QWidget):
         self.loud.toggled.connect(lambda on: not self._audio_loading and
                                   self.ctrl.set_settings(loudnorm=on))
         v4.addWidget(self.loud)
-        self.btn_beats = QPushButton("🥁 Cortes del B-roll al ritmo")
+        self.btn_beats = QPushButton("Cortes del B-roll al ritmo")
+        self.btn_beats.setIcon(D.icono("scissors"))
         self.btn_beats.setToolTip("Lleva los cortes del B-roll al ritmo de la música: detecta los golpes y mueve cada "
                                   "corte de la pista de video "
                                   "elegida en B-roll al golpe más cercano (como mucho 0,3 s).")
         self.btn_beats.clicked.connect(self.snap_to_beats)
-        v4.addWidget(self.btn_beats)
-        self.btn_listen_fx = QPushButton("🎧 Escuchar 10 s con los efectos (desde el cabezal)")
+        self.btn_listen_fx = QPushButton("Escuchar 10 s con los efectos")
+        self.btn_listen_fx.setIcon(D.icono("headphones"))
+        self.btn_listen_fx.setToolTip("Escucha 10 s desde el cabezal con los efectos de voz marcados arriba (sin "
+                                      "cambiar nada del proyecto)")
         self.btn_listen_fx.clicked.connect(self.listen_with_fx)
-        v4.addWidget(self.btn_listen_fx)
+        for b_ in (self.btn_beats, self.btn_listen_fx):
+            D.medida(b_, lambda w: w.setMinimumHeight(D.px(D.ALTO_CAMPO)))
+            v4.addWidget(b_)
         set_help(g4, "audio_ia")
         self._audio_group = g4
 
@@ -389,6 +467,10 @@ class AIPanel(QWidget):
         self.plan_tree.setHeaderLabels(["Plan"])
         self.plan_tree.setMinimumHeight(120)
         v5.addWidget(self.plan_tree)
+        self._vacio_plan = _Dv.aviso_vacio("Sin plan todavía", "Escribe una instrucción y pulsa «Interpretar» (o lee "
+                                           "las de los marcadores): aquí sale el plan antes de aplicarlo")
+        v5.addWidget(self._vacio_plan)
+        _Dv.ocultar_si_vacia(self.plan_tree, self._vacio_plan)
         pr = QHBoxLayout()
         self.btn_plan_apply = QPushButton("✓ Aplicar plan")
         self.btn_plan_apply.setObjectName("primary")
@@ -494,15 +576,17 @@ class AIPanel(QWidget):
         elif any(v is not None for v in self.ctrl.clip_shots.values()):
             self.understand_label.setText("✓ Biblioteca analizada a fondo.")
         else:
-            self.understand_label.setText("Sin analizar a fondo: el B-roll se elige solo por lo que se ve en "
-                                          "unos pocos fotogramas de cada clip.")
+            self.understand_label.setText("Sin analizar a fondo")          # (20/11: una línea; el porqué, al tooltip)
+            self.understand_label.setToolTip("El B-roll se elige solo por lo que se ve en unos pocos fotogramas de "
+                                             "cada clip. «Entender mi biblioteca a fondo…» lo mejora.")
 
     def _card(self, key: str):
         """Clic en una tarjeta del mapa: abre la herramienta o baja a su sección."""
         if key in self._groups:
             g = self._groups[key]
             self.tabs.setCurrentIndex(self._tab_of[key])
-            g.setStyleSheet("QGroupBox { border: 1px solid #e8742f; }")
+            from .theme import ACCENT
+            g.setStyleSheet(f"QGroupBox {{ border: 1px solid {ACCENT}; }}")
             from PySide6.QtCore import QTimer
             QTimer.singleShot(1200, lambda: g.setStyleSheet(""))
             if key == "topics" and self.btn_topics.isEnabled() and not any(
@@ -574,8 +658,9 @@ class AIPanel(QWidget):
             if not has_narr:
                 self.status.setText("Primero transcribe tu narración (subpestaña «🎙 Transcribir»).")
             elif not self.ctrl.clip_vecs:
-                self.status.setText("Para el B-roll, la IA tiene que analizar tus clips: botón ◈ "
-                                    "de la biblioteca.")
+                self.status.setText("Clips sin analizar")                 # (20/11: una línea; el cómo, al tooltip)
+                self.status.setToolTip("Para el B-roll, la IA tiene que analizar tus clips: botón de la varita en "
+                                       "Medios (Analizar el contenido).")
             elif not self.status.text().startswith("✓"):
                 self.status.setText("")
         self._mark_slots()
@@ -652,7 +737,11 @@ class AIPanel(QWidget):
             help_ui.exec_menu(menu, self.topic_list.viewport().mapToGlobal(pos))
 
     def show_audio_section(self):
-        self.tabs.setCurrentIndex(self._tab_of["audio"])
+        """El audio inteligente: su pestaña, o (si ya salió a la página 🎚 Audio con sacar_audio) esa página."""
+        if "audio" in self._tab_of:
+            self.tabs.setCurrentIndex(self._tab_of["audio"])
+        else:
+            self.action_requested.emit("audio")
 
     # ------------------------------------------------------- Modo Director
     def _topic_under_playhead(self):
@@ -1222,6 +1311,12 @@ class AIPanel(QWidget):
 
     def _show_slots(self, slots):
         self.slots = slots
+        try:                                 # 🧬 la huella de los candidatos (BAJA): no repetir lo que sale de otro archivo
+            from . import repetidos_ui as _RU
+            _RU.pedir_huellas_de(self.ctrl, [c.get("media_id") for s in (slots or [])
+                                             for c in (s.get("candidates") or [])], "candidato del B-roll")
+        except Exception:  # noqa: BLE001 - las huellas nunca paran el B-roll
+            pass
         self.slot_tree.clear()
         bold = QFont(self.font())
         bold.setBold(True)

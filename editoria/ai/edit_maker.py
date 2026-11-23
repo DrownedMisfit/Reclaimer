@@ -56,20 +56,41 @@ def motion_profile(path: str, duration: float, cancelled: CancelFn = None, progr
     progress(fracción 0–1) mientras lo ve. En videos largos (películas, «all cutscenes»…) solo mira los
     fotogramas clave. (Con la tarjeta gráfica era más lento: copiar cada imagen de vuelta cuesta más.)"""
     cache = _profile_path(path)
+    got = _load_profile(cache)
+    if got is not None:
+        return got
+    from . import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ver ai/lectura_unica.py)
+    if lectura_unica.usar(path, duration, "movimiento"):
+        lectura_unica.asegurar_o_seguir(path, duration, ["movimiento"], cancelled,
+                                        (lambda f, _t: progress(f)) if progress is not None else None)
+        got = _load_profile(cache)
+        if got is not None:
+            return got
+    long_video = (duration or 0) > LONG_VIDEO
+    res = _read_profile(path, duration, cancelled, progress, hw=False, keyframes=long_video)
+    if long_video and len(res["motion"]) < 4:      # (por si el archivo no tiene fotogramas clave legibles)
+        res = _read_profile(path, duration, cancelled, progress, hw=False, keyframes=False)
+        long_video = False
+    return save_profile(path, res, long_video)
+
+
+def _load_profile(cache: str) -> dict | None:
     if os.path.exists(cache):
         try:
             d = np.load(cache)
             return {k: d[k] for k in ("motion", "bright", "cut")}
         except (OSError, ValueError, KeyError):
             pass
-    long_video = (duration or 0) > LONG_VIDEO
-    res = _read_profile(path, duration, cancelled, progress, hw=False, keyframes=long_video)
-    if long_video and len(res["motion"]) < 4:      # (por si el archivo no tiene fotogramas clave legibles)
-        res = _read_profile(path, duration, cancelled, progress, hw=False, keyframes=False)
-    if long_video and len(res["motion"]) > 2:
+    return None
+
+
+def save_profile(path: str, res: dict, keyframes: bool) -> dict:
+    """Lo último del análisis (también lo usa la lectura única): solo con fotogramas clave se rellenan los
+    repetidos; se guarda si hay al menos 4 medidas."""
+    if keyframes and len(res["motion"]) > 2:
         res["motion"] = _fill_repeats(res["motion"])
     if len(res["motion"]) >= 4:
-        np.savez_compressed(cache, **res)
+        np.savez_compressed(_profile_path(path), **res)
     return res
 
 
@@ -99,39 +120,54 @@ def _read_profile(path: str, duration: float, cancelled, progress, hw: bool, key
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             stdin=subprocess.DEVNULL, creationflags=flags)
     size = PW * PH * 3
-    motion, bright, cut = [], [], []
-    prev = prev_hist = None
+    acc = MotionAccumulator()
     total = max(1.0, (duration or 0) / STEP)
     try:
         while True:
             buf = proc.stdout.read(size)
             if len(buf) < size:
                 break
-            if len(motion) % 200 == 0:
+            if len(acc.motion) % 200 == 0:
                 if cancelled is not None:
                     check_cancel(cancelled)
                 if progress is not None:
-                    progress(min(0.999, len(motion) / total))
-            f = np.frombuffer(buf, np.uint8).reshape(PH, PW, 3).astype(np.float32)
-            g = f.mean(axis=2)
-            hist = np.concatenate([np.histogram(f[..., c], bins=12, range=(0, 256))[0] for c in range(3)])
-            hist = hist / (PW * PH)
-            if prev is None:
-                motion.append(0.0)
-                cut.append(False)
-            else:
-                d = float(np.abs(g - prev).mean())
-                hd = float(np.abs(hist - prev_hist).sum())
-                motion.append(d)
-                cut.append(hd > 0.9 and d > 22)
-            bright.append(float(g.mean() / 255))
-            prev, prev_hist = g, hist
+                    progress(min(0.999, len(acc.motion) / total))
+            acc.add(buf)
     finally:
         proc.stdout.close()
         proc.kill() if proc.poll() is None else None
         proc.wait()
-    return {"motion": np.array(motion, np.float32), "bright": np.array(bright, np.float32),
-            "cut": np.array(cut, bool)}
+    return acc.result()
+
+
+class MotionAccumulator:
+    """Movimiento, brillo y cortes fotograma a fotograma (imágenes RGB de PW×PH). Lo usan la lectura de siempre y la
+    lectura única (ai/lectura_unica.py): el mismo cálculo, el mismo resultado."""
+    FILTER = f"fps={1 / STEP:g},scale={PW}:{PH}:flags=fast_bilinear"
+
+    def __init__(self):
+        self.motion, self.bright, self.cut = [], [], []
+        self.prev = self.prev_hist = None
+
+    def add(self, buf: bytes):
+        f = np.frombuffer(buf, np.uint8).reshape(PH, PW, 3).astype(np.float32)
+        g = f.mean(axis=2)
+        hist = np.concatenate([np.histogram(f[..., c], bins=12, range=(0, 256))[0] for c in range(3)])
+        hist = hist / (PW * PH)
+        if self.prev is None:
+            self.motion.append(0.0)
+            self.cut.append(False)
+        else:
+            d = float(np.abs(g - self.prev).mean())
+            hd = float(np.abs(hist - self.prev_hist).sum())
+            self.motion.append(d)
+            self.cut.append(hd > 0.9 and d > 22)
+        self.bright.append(float(g.mean() / 255))
+        self.prev, self.prev_hist = g, hist
+
+    def result(self) -> dict:
+        return {"motion": np.array(self.motion, np.float32), "bright": np.array(self.bright, np.float32),
+                "cut": np.array(self.cut, bool)}
 
 
 # ------------------------------------------------------------------ análisis de la canción

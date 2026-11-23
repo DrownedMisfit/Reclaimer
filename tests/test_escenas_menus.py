@@ -73,8 +73,8 @@ def main():
               if pg.lista_img.item(i).data(Qt.UserRole) == rutas["dos"].id)
     textos_de(pg._armar_menu_img(it.data(Qt.UserRole)))
     textos = vistos[-1]
-    assert any(t.startswith("📄 ") and "dos.png" in t for t in textos), textos
-    assert "📂 Abrir su carpeta" in textos and "📋 Copiar la ruta" in textos and "🗑 Quitar de Medios" in textos
+    assert any("dos.png" in t for t in textos), textos
+    assert "Abrir su carpeta" in textos and "Copiar la ruta" in textos and "Quitar de Medios" in textos
     pg._abrir_carpeta(rutas["dos"].path)
     assert pg._ultima_carpeta == rutas["dos"].path
     print("✓ imagen: clic derecho con su ruta, 📋 copiar, 📂 abrir su carpeta y 🗑 quitar")
@@ -103,14 +103,16 @@ def main():
 
     def item_de(pred):
         return next(pg.lista_snd.item(i) for i in range(pg.lista_snd.count()) if pred(pg.lista_snd.item(i)))
-    for pred, debe in ((lambda x: x.data(Qt.UserRole) == ra, "🗑 Quitar de Medios"),
-                       (lambda x: x.data(Qt.UserRole) == rw, "🗑 Mandar a la papelera")):
+    for pred, debe in ((lambda x: x.data(Qt.UserRole) == ra, "Quitar de Medios"),
+                       (lambda x: x.data(Qt.UserRole) == rw, "Mandar a la papelera")):
         it_s = item_de(pred)
         textos_de(pg._armar_menu_snd(it_s.data(Qt.UserRole)))
-        assert debe in vistos[-1] and "📂 Abrir su carpeta" in vistos[-1], vistos[-1]
+        assert debe in vistos[-1] and "Abrir su carpeta" in vistos[-1], vistos[-1]
     it_s = item_de(lambda x: str(x.data(Qt.UserRole)).startswith("sfx:"))
     textos_de(pg._armar_menu_snd(it_s.data(Qt.UserRole)))
-    assert not any(t.startswith("🗑") for t in vistos[-1]) and "📂 Abrir su carpeta" in vistos[-1]
+    menu_sfx = vistos[-1]
+    assert not any(t.startswith(("Quitar de Medios", "Mandar a la papelera")) for t in menu_sfx)
+    assert "Abrir su carpeta" in menu_sfx
     print("✓ sonidos: Medios → quitar · internet → papelera · ✦ de Reclaimer → solo ruta y carpeta")
     from PySide6.QtCore import QFile
     a_papelera = []

@@ -8,6 +8,8 @@ MEDIA_MIME = "application/x-editoria-media"
 NOAUDIO_MIME = "application/x-reclaimer-sin-audio"   # 🔇 marca: lo arrastrado (de Palabras clave) entra sin su audio
 EFFECT_MIME = "application/x-reclaimer-effect"     # un efecto (look:… · trans:… · sfx:… · file:…) para soltar en un clip
 
+from .theme import ACCENT as _ACENTO  # noqa: E402
+
 COLORS = {
     # Estilo DaVinci Resolve
     "bg": QColor("#1e1e20"),
@@ -16,7 +18,7 @@ COLORS = {
     "line": QColor("#36363a"),
     "text": QColor("#dcdce0"),
     "text_dim": QColor("#a4a4ab"),
-    "accent": QColor("#e8742f"),
+    "accent": QColor(_ACENTO),       # (el acento elegido: theme.poner_acento lo cambia aquí mismo)
     "playhead": QColor("#e5413c"),
     "selection": QColor("#ec3a32"),   # todo lo seleccionado (clips, transición, rectángulo): UN solo color, rojo
     "clip_sel": QColor("#ec3a32"),    # contorno del clip seleccionado: rojo sólido, como en Resolve
@@ -127,7 +129,18 @@ def pick_color(initial, parent=None, title: str = "Color", alpha: bool = False) 
     from PySide6.QtWidgets import QColorDialog
     opts = QColorDialog.ColorDialogOption.ShowAlphaChannel if alpha else QColorDialog.ColorDialogOption(0)
     win = parent.window() if parent is not None else None
-    return QColorDialog.getColor(QColor(initial), win, title, opts)
+    ini = QColor(initial)
+    inicio, sustituto = ini, None
+    if ini.isValid() and ini.value() < 40:
+        # Desde negro (o casi), la barra de brillo del diálogo de Qt empieza abajo del todo y elegir en el cuadro de
+        # colores sigue dando negro («quiero cambiar el color y no se cambia»): se abre con el brillo arriba. Si
+        # aceptas sin tocar nada, se queda el color que tenías.
+        sustituto = QColor.fromHsv(0, 0, 255, ini.alpha())
+        inicio = sustituto
+    c = QColorDialog.getColor(inicio, win, title, opts)
+    if sustituto is not None and c.isValid() and c.rgba() == sustituto.rgba():
+        return ini
+    return c
 
 
 def modo_archivo_suelto(parent) -> str | None:

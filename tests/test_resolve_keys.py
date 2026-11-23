@@ -98,6 +98,11 @@ def main():
         key_tr = next(k for k in win.shortcut_actions if k.endswith("/⧉ Poner transición (disolver) en el corte"))
         key_tx = next(k for k in win.shortcut_actions if "Transcribir y analizar" in k)
         assert win.shortcut_actions[key_tx][0].shortcut() == QKeySequence("Ctrl+T")
+        # (desde el 15/11 «Dividir» ya viene con Ctrl+B, como en Resolve: se pone «S» —el de antes— para probar que
+        #  la importación lo cambia)
+        assert win.shortcut_actions[key_split][0].shortcut() == QKeySequence("Ctrl+B")
+        assert dlg.set_shortcut(key_split, QKeySequence("S"), ask=False)
+        assert win.shortcut_actions[key_split][0].shortcut() == QKeySequence("S")
         seen = {}
 
         def accept():

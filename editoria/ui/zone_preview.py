@@ -85,8 +85,10 @@ class ZonePreview(QObject):
             self._emit_marks()
             return
         try:
-            with self.ctrl.project.lectura(getattr(self.ctrl, "rev", None)):
-                zs = ZR.zones(self.ctrl.project, transitions=enabled(), heavy=fx_enabled())
+            from ..core import escena_clip             # 🎬 (los clips de escena, desplegados: su clave cambia al editarla)
+            pq = escena_clip.expandir(self.ctrl.project)
+            with pq.lectura(getattr(self.ctrl, "rev", None)):
+                zs = ZR.zones(pq, transitions=enabled(), heavy=fx_enabled())
         except Exception:  # noqa: BLE001 - la vista previa nunca debe molestar al editar
             zs = []
         self.zones = zs
@@ -286,6 +288,9 @@ class ZonePreview(QObject):
 
     def _source(self, path: str):
         src = self._sources.get(path)
+        if src is not None and src.cerrado:            # (🔓 cerrada por soltar_archivos: se abre otra)
+            self._sources.pop(path, None)
+            src = None
         if src is None:
             from ..core.live_video import FrameSource
             src = self._sources[path] = FrameSource(path)

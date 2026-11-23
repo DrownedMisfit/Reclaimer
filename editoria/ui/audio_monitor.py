@@ -37,6 +37,9 @@ class AudioMonitor(QObject):
         self.player = QMediaPlayer(self)
         self.out = QAudioOutput(self)
         self.player.setAudioOutput(self.out)
+        from .transport_extra import escucha           # 🔊 el volumen de escucha de la barra del visor
+        self.out.setVolume(escucha().gain)
+        escucha().changed.connect(self.out.setVolume)
         self.player.setLoops(QMediaPlayer.Infinite)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)

@@ -110,6 +110,15 @@ def eaten_ms(cuts, clean, floor_db: float = -60) -> float:
     return sum(int(voice[int(a * SR):int(b * SR)].sum()) for a, b in cuts) / SR * 1000
 
 
+def _todas(menu):           # (todas las opciones, también las de los submenús: «Más ▸», «IA ▸»…)
+    out = []
+    for x in menu.actions():
+        out.append(x)
+        if x.menu() is not None:
+            out += _todas(x.menu())
+    return out
+
+
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
@@ -224,7 +233,7 @@ def main():
     orig_exec = help_ui.exec_menu
 
     def fake_exec(menu, *a, **k):            # el menú no se abre de verdad: solo se mira lo que ofrece
-        shown["texts"] = [x.text() for x in menu.actions()]
+        shown["texts"] = [x.text() for x in _todas(menu)]          # (a la vista o en «Más ▸»)
         return None
     help_ui.exec_menu = fake_exec
     try:

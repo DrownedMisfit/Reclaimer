@@ -32,9 +32,52 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
 from ..core import thumbnail as T
 from ..core.model import KIND_IMAGE, KIND_VIDEO
 from .help import set_help
+from .theme import acento as _acento
 from .thumb_text_bar import TextBar
 
-HANDLE = 9          # tamaño de las asas (píxeles de pantalla)
+HANDLE_BASE = 11    # tamaño de las asas (píxeles de pantalla a «Letra» 100 %; antes 9 fijos)
+
+
+def _asa() -> float:
+    """El tamaño de las asas en pantalla, con «Letra» (Ventana → Tamaño de letra)."""
+    from .diseno import escala
+    return HANDLE_BASE * escala()
+
+
+_MINIS: dict[tuple, QPixmap] = {}       # ⚡ miniaturas de «Material» ya hechas (sirven al volver a abrir el taller)
+
+
+def _mini_rapida(path: str, t: float = 0.0, w: int = 140, h: int = 80) -> QPixmap:
+    """⚡ La miniatura de una imagen para la lista de «Material» sin cargarla entera: QImageReader la decodifica ya
+    reducida (una foto 4K en JPG, a 1/8 directamente) al doble del tamaño final y luego se suaviza al tamaño. Antes,
+    abrir el taller cargaba cada imagen a resolución completa (5 fotos 4K: ~0,3 s de tirón). Se guarda por archivo y
+    fecha: abrir otra vez el taller es instantáneo."""
+    clave = (path, t, w, h)
+    pm = _MINIS.get(clave)
+    if pm is not None:
+        return pm
+    img = QImage()
+    r = QImageReader(path)
+    sz = r.size()
+    if sz.isValid() and sz.width() > 0 and sz.height() > 0:
+        k = min(1.0, 2.0 * min(w / sz.width(), h / sz.height()))
+        if k < 1.0:
+            r.setScaledSize(QSize(max(1, round(sz.width() * k)), max(1, round(sz.height() * k))))
+        img = r.read()
+    pm = QPixmap.fromImage(img) if not img.isNull() else QPixmap(path)
+    pm = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation) if not pm.isNull() else pm
+    if len(_MINIS) > 400:
+        _MINIS.clear()
+    _MINIS[clave] = pm
+    return pm
+
+
+def _dist_lado(pt: QPointF, a: QPointF, b: QPointF) -> tuple[float, float]:
+    """(distancia de pt al segmento a–b, posición 0–1 a lo largo del segmento)."""
+    vx, vy = b.x() - a.x(), b.y() - a.y()
+    n2 = vx * vx + vy * vy or 1e-9
+    t = max(0.0, min(1.0, ((pt.x() - a.x()) * vx + (pt.y() - a.y()) * vy) / n2))
+    return math.hypot(pt.x() - (a.x() + t * vx), pt.y() - (a.y() + t * vy)), t
 
 
 class _ColorButton(QPushButton):
@@ -298,6 +341,7 @@ class Canvas(QGraphicsView):
         self._stroke: list = []
         self._hover = None
         self._crop_prev: dict | None = None    # ⬚ recortando con un lado: la imagen entera y el recorte al vuelo
+        self._hover_asa = None                  # (id de la capa, tipo de asa, cuál): el asa resaltada
         self.multi: set[str] = set()            # Mayús+clic / Ctrl+A: varias capas elegidas (se mueven y borran juntas)
         self.liq_mode = "inflar"          # ≈ Licuar: inflar | encoger | empujar | restaurar
         self.liq_strength = 0.5
@@ -448,8 +492,47 @@ class Canvas(QGraphicsView):
             if lay.get("kind") == "image":
                 self._render_bg(lay)
                 return last
+        if last is None and lay.get("kind") == "image" and not lay.get("liquify") and not T.is_rendered(lay):
+            prov = self._provisional(lay)        # ⚡ foto enorme sin dibujar aún: una copia rápida a la resolución de
+            if prov is not None:                 #    pantalla y la buena, en segundo plano (sin tirón al abrir)
+                self._render_bg(lay)
+                return prov
         res = T.render_layer(lay)
         self._last[lid] = (res, forma)
+        return res
+
+    PROVISIONAL_MP = 4.0          # (megapíxeles: a partir de aquí, la primera vez se ve una copia rápida)
+
+    def _provisional(self, lay: dict):
+        """Copia rápida de una imagen MUY grande (más de PROVISIONAL_MP) mientras la buena se dibuja en segundo plano:
+        QImageReader la decodifica ya reducida a lo que se ve en pantalla, con su recorte, sin ajustes ni efectos;
+        mismo sitio y tamaño en el lienzo (lleva su reducción en «k»). None = no hace falta (imagen normal)."""
+        path = lay.get("path") or ""
+        memo = self.__dict__.setdefault("_prov", {})
+        clave = (lay.get("id"), path, tuple(lay.get("crop") or ()), round(float(lay.get("scale", 1.0)), 3))
+        if clave in memo:
+            return memo[clave]
+        r = QImageReader(path)
+        sz = r.size()
+        res = None
+        if sz.isValid() and sz.width() * sz.height() > self.PROVISIONAL_MP * 1e6:
+            k = T.draft_k(lay, self._view())
+            if k < 1.0:
+                r.setScaledSize(QSize(max(1, round(sz.width() * k)), max(1, round(sz.height() * k))))
+            img = r.read()
+            if not img.isNull():
+                x0, y0, x1, y1 = [float(v) for v in (lay.get("crop") or [0, 0, 1, 1])]
+                w, h = img.width(), img.height()
+                img = img.copy(int(x0 * w), int(y0 * h), max(1, int((x1 - x0) * w)), max(1, int((y1 - y0) * h)))
+                img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+                kk = img.width() / max(1.0, (x1 - x0) * sz.width())
+                img.setText("k", repr(kk))
+                img.setText("cw", repr(float(img.width())))
+                img.setText("ch", repr(float(img.height())))
+                res = (img, float(img.width()), float(img.height()))
+        if len(memo) > 32:
+            memo.clear()
+        memo[clave] = res
         return res
 
     def _render_bg(self, lay: dict):
@@ -779,8 +862,8 @@ class Canvas(QGraphicsView):
             p.setPen(QPen(QColor(0, 0, 0, 160), 1.0 * k, Qt.DotLine))
             p.drawEllipse(self._hover, self.brush + 1.5 * k, self.brush + 1.5 * k)
         if self.tool in ("box", "blurzone") and self._drag and self._drag.get("mode") == "box":
-            p.setPen(QPen(QColor("#e8742f"), 2 * k, Qt.DashLine))
-            p.setBrush(QColor(232, 116, 47, 40))
+            p.setPen(QPen(_acento(), 2 * k, Qt.DashLine))
+            p.setBrush(_acento(40))
             r = QRectF(self._drag["p0"], self._drag["p1"]).normalized()
             if self.tool == "blurzone" and self.blur_shape == "ellipse":
                 p.drawEllipse(r)
@@ -797,7 +880,7 @@ class Canvas(QGraphicsView):
                 p.drawText(r, Qt.AlignCenter | Qt.TextWordWrap, "🖼\nSuelta aquí una imagen")
                 p.restore()
         self._paint_guides(p, k)
-        p.setPen(QPen(QColor(232, 116, 47, 160), 0, Qt.DashLine))
+        p.setPen(QPen(_acento(160), 0, Qt.DashLine))
         for g in self._guides:
             if g[0] == "v":
                 p.drawLine(QPointF(g[1], 0), QPointF(g[1], d["h"]))
@@ -806,7 +889,7 @@ class Canvas(QGraphicsView):
         for oid in self.multi - {self.sel}:               # las otras elegidas (Mayús+clic): recuadro discontinuo
             o = self.editor.layer(oid)
             if o is not None and o.get("visible", True):
-                p.setPen(QPen(QColor("#e8742f"), 1.5 * k, Qt.DashLine))
+                p.setPen(QPen(_acento(), 1.5 * k, Qt.DashLine))
                 p.setBrush(Qt.NoBrush)
                 p.drawPolygon(self._box(o))
         lay = self.editor.layer(self.sel)
@@ -814,14 +897,14 @@ class Canvas(QGraphicsView):
             return
         h = self._handles(lay)
         k = h["k"]
-        p.setPen(QPen(QColor("#e8742f"), 1.5 * k))
+        p.setPen(QPen(_acento(), 1.5 * k))
         p.setBrush(Qt.NoBrush)
         p.drawPolygon(QPolygonF(h["corners"]))
         elegidas = self.active_words(lay)
         if elegidas:                             # las palabras elegidas, resaltadas
             img, cw, ch = self._render(lay)
             p.setPen(QPen(QColor("#ffb27a"), 1.5 * k))
-            p.setBrush(QColor(232, 116, 47, 70))
+            p.setBrush(_acento(70))
             for i, q in T.word_quads(lay, img, cw, ch):
                 if i in elegidas:
                     p.drawPolygon(q)
@@ -829,28 +912,52 @@ class Canvas(QGraphicsView):
         if lay.get("locked"):
             return
         if self.warp_mode:                       # ◇ Deformar: rombos naranjas en las esquinas (sin asa de giro)
-            p.setBrush(QColor("#e8742f"))
+            p.setBrush(_acento())
             p.setPen(QPen(QColor("white"), 1.2 * k))
-            r = HANDLE * k * 0.8
+            r = _asa() * k * 0.8
             for c in h["corners"]:
                 p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - r), QPointF(c.x() + r, c.y()),
                                          QPointF(c.x(), c.y() + r), QPointF(c.x() - r, c.y())]))
             return
-        p.setBrush(QColor("white"))
-        for c in h["corners"]:
-            p.drawRect(QRectF(c.x() - HANDLE * k / 2, c.y() - HANDLE * k / 2, HANDLE * k, HANDLE * k))
+        # (asas más grandes y con el acento, halo oscuro; la que está bajo el ratón, resaltada y su lado marcado)
+        A = _asa()
+        hv = self._hover_asa if self._hover_asa and self._hover_asa[0] == lay["id"] else None
+        hv = hv[1:] if hv else None
+        if hv and hv[0] == "crop":
+            cs = h["corners"]
+            a_, b_ = {"t": (cs[0], cs[1]), "r": (cs[1], cs[2]), "b": (cs[2], cs[3]), "l": (cs[3], cs[0])}[hv[1]]
+            p.setPen(QPen(_acento(), 3.5 * k))
+            p.drawLine(a_, b_)
+        for i, c in enumerate(h["corners"]):
+            activa = hv == ("scale", i)
+            s = A * k * (0.68 if activa else 0.5)
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.2 * k))
+            p.setBrush(_acento() if activa else QColor("white"))
+            p.drawRect(QRectF(c.x() - s, c.y() - s, 2 * s, 2 * s))
+            if not activa:
+                p.setPen(QPen(_acento(), 1.5 * k))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(QRectF(c.x() - s + 1.2 * k, c.y() - s + 1.2 * k, 2 * s - 2.4 * k, 2 * s - 2.4 * k))
         if (self._crop_allowed(lay) or self._is_zone(lay)) and not self.multi - {lay["id"]}:   # ⬚ recortar (y 🌫 zona)
             rot = float(lay.get("rotation", 0))
             for side, c in self._side_points(h["corners"]).items():
+                activa = hv == ("crop", side)
                 p.save()
                 p.translate(c)
                 p.rotate(rot)
-                w_, h_ = (HANDLE * 1.9 * k, HANDLE * 0.62 * k) if side in "tb" else (HANDLE * 0.62 * k, HANDLE * 1.9 * k)
-                p.drawRect(QRectF(-w_ / 2, -h_ / 2, w_, h_))
+                largo, grueso = A * k * (2.3 if activa else 1.9), A * k * (0.75 if activa else 0.55)
+                w_, h_ = (largo, grueso) if side in "tb" else (grueso, largo)
+                p.setPen(QPen(QColor(0, 0, 0, 200), 1.2 * k))
+                p.setBrush(_acento())
+                p.drawRoundedRect(QRectF(-w_ / 2, -h_ / 2, w_, h_), grueso / 2, grueso / 2)
                 p.restore()
         top_mid = (h["corners"][0] + h["corners"][1]) / 2
+        p.setPen(QPen(_acento(), 1.5 * k))
         p.drawLine(top_mid, h["rot"])
-        p.drawEllipse(h["rot"], HANDLE * k * 0.6, HANDLE * k * 0.6)
+        activa = hv == ("rot", 0)
+        p.setPen(QPen(QColor(0, 0, 0, 200), 1.2 * k))
+        p.setBrush(_acento() if activa else QColor("white"))
+        p.drawEllipse(h["rot"], A * k * (0.75 if activa else 0.6), A * k * (0.75 if activa else 0.6))
 
     def _paint_guides(self, p: QPainter, k: float):
         d = self.doc
@@ -1010,7 +1117,7 @@ class Canvas(QGraphicsView):
         lay = self.editor.layer(self.sel)
         if lay is not None and not lay.get("locked") and e.button() == Qt.LeftButton:
             h = self._handles(lay)
-            tol = HANDLE * h["k"]
+            tol = _asa() * h["k"]
             if self.warp_mode:                   # ◇ coger una esquina y llevarla a donde quieras
                 for i, c in enumerate(h["corners"]):
                     if (pt - c).manhattanLength() < tol * 1.8:
@@ -1022,13 +1129,9 @@ class Canvas(QGraphicsView):
                 return
             if self._is_zone(lay) and self._zone_press(lay, pt, h, tol):     # 🌫 zona: esquinas y lados
                 return
-            # esquinas (tamaño) y centros de los lados (⬚ recortar): gana el asa más cercana al ratón
-            cands = [((pt - c).manhattanLength(), "scale", None)
-                     for c in ([] if self.warp_mode else h["corners"]) if (pt - c).manhattanLength() < tol * 1.6]
-            if self._crop_allowed(lay):
-                cands += [((pt - c).manhattanLength(), "crop", side)
-                          for side, c in self._side_points(h["corners"]).items()
-                          if (pt - c).manhattanLength() < tol * 1.5]
+            # esquinas (tamaño sin deformar) y lados (⬚ recortar; todo el lado se puede agarrar, no solo su centro)
+            asa = None if self.warp_mode else self._asa_en(lay, pt, h)
+            cands = [(0, asa[0], asa[1])] if asa and asa[0] in ("scale", "crop") else []
             if cands:
                 _dist, kind, side = min(cands, key=lambda x: x[0])
                 if kind == "crop":
@@ -1286,19 +1389,62 @@ class Canvas(QGraphicsView):
                 self.committed.emit("Mover / tamaño / giro")
             self.viewport().update()
 
+    def _asa_en(self, lay: dict, pt: QPointF, h: dict | None = None):
+        """El asa de la capa elegida bajo el ratón: ("rot", 0) · ("scale", esquina) · ("crop", lado) · None.
+        Gana la más cercana (a igualdad, la esquina); un lado se agarra a lo largo de todo el lado (salvo junto a las
+        esquinas)."""
+        h = h or self._handles(lay)
+        tol = _asa() * h["k"]
+        if (pt - h["rot"]).manhattanLength() < tol * 1.6:
+            return "rot", 0
+        cs = h["corners"]
+        esq = [(math.hypot(pt.x() - c.x(), pt.y() - c.y()), i) for i, c in enumerate(cs)
+               if (pt - c).manhattanLength() < tol * 1.7]
+        lados = []
+        if self._crop_allowed(lay) or self._is_zone(lay):
+            # (por fuera, toda la zona de agarre; por DENTRO de la capa, solo un filo fino: agarrar cerca del borde
+            #  para moverla tiene que moverla, no recortarla)
+            dentro = QPolygonF(cs).containsPoint(pt, Qt.OddEvenFill)
+            lim = tol * (0.4 if dentro else 0.95)
+            for side, (a, b) in (("t", (cs[0], cs[1])), ("r", (cs[1], cs[2])), ("b", (cs[2], cs[3])),
+                                 ("l", (cs[3], cs[0]))):
+                dist, t = _dist_lado(pt, a, b)
+                if dist < lim and 0.08 < t < 0.92:
+                    lados.append((dist, side))
+        # (gana el asa más cercana; a igualdad, la esquina. Con la miniatura muy alejada —o pequeña— la zona de las
+        #  esquinas llegaba al centro de los lados y un lado ya no recortaba: escalaba)
+        if esq and (not lados or min(esq)[0] <= min(lados)[0]):
+            return "scale", min(esq)[1]
+        if lados:
+            return "crop", min(lados)[1]
+        return None
+
     def _hover_cursor(self, pt: QPointF):
-        """Encima de un lado de lo elegido: la flecha de recortar."""
+        """El cursor dice qué hará el ratón: ⇹ recortar un lado, ⤡ tamaño en una esquina, girar en el asa de arriba,
+        ✥ mover encima de lo elegido. Y el asa bajo el ratón se resalta."""
         if self.tool:
             return
         lay = self.editor.layer(self.sel)
         cur = Qt.ArrowCursor
-        if (self._crop_allowed(lay) or self._is_zone(lay)) and lay.get("visible", True):
-            h = self._handles(lay)
-            for side, c in self._side_points(h["corners"]).items():
-                if (pt - c).manhattanLength() < HANDLE * h["k"] * 1.5:
-                    ang = (float(lay.get("rotation", 0)) + (90 if side in "tb" else 0)) % 180
-                    cur = Qt.SizeHorCursor if ang < 45 or ang > 135 else Qt.SizeVerCursor
-                    break
+        hover = None
+        if lay is not None and lay.get("visible", True) and not lay.get("locked"):
+            asa = None if self.warp_mode else self._asa_en(lay, pt)
+            rot = float(lay.get("rotation", 0))
+            if asa and asa[0] == "crop":
+                ang = (rot + (90 if asa[1] in "tb" else 0)) % 180
+                cur = Qt.SplitHCursor if ang < 45 or ang > 135 else Qt.SplitVCursor
+            elif asa and asa[0] == "scale":
+                ang = (rot + (45 if asa[1] in (0, 2) else 135)) % 180
+                cur = Qt.SizeFDiagCursor if 22.5 <= ang < 67.5 else Qt.SizeBDiagCursor if 112.5 <= ang < 157.5 \
+                    else Qt.SizeHorCursor if ang < 22.5 or ang >= 157.5 else Qt.SizeVerCursor
+            elif asa and asa[0] == "rot":
+                cur = Qt.PointingHandCursor
+            elif self._box(lay).containsPoint(pt, Qt.OddEvenFill):
+                cur = Qt.SizeAllCursor
+            hover = (lay["id"],) + asa if asa else None
+        if hover != self._hover_asa:
+            self._hover_asa = hover
+            self.viewport().update()
         if self.cursor().shape() != cur:
             self.setCursor(cur)
 
@@ -1807,6 +1953,10 @@ class ThumbnailEditor(QMainWindow):
     # ----------------------------------------------------------- izquierda
     def _build_left(self) -> QWidget:
         tabs = QTabWidget()
+        # (20/11, auditoría: con el relleno de siempre las pestañas no cabían —«Form…» y flechas—: más compactas)
+        tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 4px 6px; min-width: 0px; }")
+        tabs.tabBar().setElideMode(Qt.ElideNone)
+        tabs.setUsesScrollButtons(True)
         # Material
         mat = QWidget()
         ml = QVBoxLayout(mat)
@@ -1828,10 +1978,7 @@ class ThumbnailEditor(QMainWindow):
         self.reco_status.setObjectName("dim")
         self.reco_status.setWordWrap(True)
         ml.addWidget(self.reco_status)
-        tip = QLabel("Clic = añadir encima · doble clic = de fondo · arrastra aquí tus imágenes o carpetas")
-        tip.setObjectName("dim")
-        tip.setWordWrap(True)
-        ml.addWidget(tip)
+        mat.setToolTip("Clic = añadir encima · doble clic = de fondo · arrastra aquí tus imágenes o carpetas")
         self.btn_folders = QPushButton("📁 Carpetas")
         self.btn_folders.setCheckable(True)
         self.btn_folders.setToolTip("Tus carpetas de material (Fuego, Ojos, Agua…) y las tuyas del disco, en orden de "
@@ -2115,8 +2262,8 @@ class ThumbnailEditor(QMainWindow):
         self.prop_status.setText("Elige una (clic) y edítala. Puedes volver aquí y elegir otra.")
 
     # ----------------------------------------------------------- 🔎 PNG (Google Imágenes dentro del taller)
-    PNG_URL = "https://www.google.com/search?tbm=isch&tbs=ic:trans,ift:png&q={q}"
-    BG_URL = "https://www.google.com/search?tbm=isch&tbs=isz:l,iar:{ar}&q={q}"     # modo Fondo: grandes; ar = w (horizontal) / t (vertical)
+    PNG_URL = "https://www.google.com/search?udm=2&tbm=isch&tbs=ic:trans,ift:png&q={q}"
+    BG_URL = "https://www.google.com/search?udm=2&tbm=isch&tbs=isz:l,iar:{ar}&q={q}"     # modo Fondo: grandes; ar = w (horizontal) / t (vertical)
     _PNG_PLACEHOLDER = {"png": "🔎 Buscar PNG: fuego, explosión, logo de…",
                         "fondo": "🔎 Buscar fondo: ciudad de noche, bosque, espacio…"}
     _PNG_HINT = {"png": "Clic derecho en una imagen → «Usar en la miniatura»",
@@ -2347,7 +2494,7 @@ class ThumbnailEditor(QMainWindow):
         self.canvas.sel = sel
         self._sel_prev = sel
         self._save()
-        self.refresh_all()
+        self.refresh_all(props_luego=True)
 
     def undo(self):
         if self.pos > 0:
@@ -2362,9 +2509,25 @@ class ThumbnailEditor(QMainWindow):
             self._restore()
 
     def on_live_change(self):
-        self._render_soon.start()
+        try:
+            self._render_soon.start()
+        except RuntimeError:          # (un taller ya cerrado: su cuadro de texto aún avisaba al cambiar; nada que hacer)
+            pass
 
-    def refresh_all(self):
+    def _fill_props_luego(self):
+        """El panel de propiedades tras deshacer, sin quitarle el foco a quien lo tenga (el lienzo: sus Ctrl+C,
+        Ctrl+V… son atajos del lienzo y dejarían de ir si el foco saltara al panel nuevo)."""
+        foco = QApplication.focusWidget()
+        self._fill_props()
+        try:
+            if foco is not None and foco.isVisible() and QApplication.focusWidget() is not foco:
+                foco.setFocus(Qt.OtherFocusReason)
+        except RuntimeError:                # (el que lo tenía era del panel viejo)
+            pass
+
+    def refresh_all(self, props_luego: bool = False):
+        """props_luego (deshacer / rehacer): el lienzo y las capas al momento y el panel de propiedades —rehacerlo entero
+        cuesta ~0,2 s con una imagen elegida— justo después, en el siguiente giro (Ctrl+Z seguidos: una sola vez)."""
         self._loading = True
         if hasattr(self, "act_short"):
             self.act_short.setVisible(self.doc["format"] == "youtube")
@@ -2376,7 +2539,16 @@ class ThumbnailEditor(QMainWindow):
         self._loading = False
         self.canvas.refresh()
         self._refresh_layers()
-        self._fill_props()
+        if props_luego:
+            t = self.__dict__.get("_t_props")
+            if t is None:
+                t = self._t_props = QTimer(self)
+                t.setSingleShot(True)
+                t.setInterval(0)
+                t.timeout.connect(self._fill_props_luego)
+            t.start()
+        else:
+            self._fill_props()
         self._fill_material()
 
     def _build_layers_panel(self) -> QWidget:
@@ -2564,6 +2736,10 @@ class ThumbnailEditor(QMainWindow):
             return QIcon(pm)
         try:
             img, _w, _h = self.canvas._render(lay)          # (recién licuada: la rápida hasta que esté la buena)
+            memo = self.__dict__.setdefault("_iconos_capa", {})
+            ic = memo.get(img.cacheKey())                  # ⚡ la misma imagen: el mismo icono (cada commit los rehacía)
+            if ic is not None:
+                return ic
             pm = QPixmap.fromImage(img).scaled(56, 56, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         except Exception:  # noqa: BLE001
             return QIcon()
@@ -2576,7 +2752,10 @@ class ThumbnailEditor(QMainWindow):
                     p.fillRect(x, y, 8, 8, QColor("#3a3a40"))
         p.drawPixmap((56 - pm.width()) // 2, (56 - pm.height()) // 2, pm)
         p.end()
-        return QIcon(out)
+        if len(memo) > 64:
+            memo.clear()
+        memo[img.cacheKey()] = QIcon(out)
+        return memo[img.cacheKey()]
 
     def _layer_row(self, row: int):
         it = self.layers.item(row)
@@ -2609,8 +2788,7 @@ class ThumbnailEditor(QMainWindow):
         p = self.ctrl.project
         for c in self.reco:
             m = p.media.get(c.media_id)
-            it = QListWidgetItem(QIcon(QPixmap(c.path).scaled(140, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)),
-                                 "✨ " + ", ".join(c.reasons[:2]))
+            it = QListWidgetItem(QIcon(_mini_rapida(c.path)), "✨ " + ", ".join(c.reasons[:2]))
             it.setData(Qt.UserRole, c.path)
             it.setData(MAT_KIND, "reco")
             it.setToolTip(f"Recomendado por la IA: {', '.join(c.reasons)}\n{m.name if m else ''} · {c.time:.1f} s")
@@ -2786,7 +2964,7 @@ class ThumbnailEditor(QMainWindow):
             t = 0
         got = self._mat_icons.get(path)
         if got is None or got[0] != t:
-            got = (t, QIcon(QPixmap(path).scaled(140, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            got = (t, QIcon(_mini_rapida(path, t)))
             self._mat_icons[path] = got
         return got[1]
 
@@ -4306,6 +4484,9 @@ class ThumbnailEditor(QMainWindow):
 
     # ----------------------------------------------------------- propiedades
     def _fill_props(self):
+        t = self.__dict__.get("_t_props")         # (el del Ctrl+Z pendiente ya no hace falta: se rehace ahora)
+        if t is not None and t.isActive():
+            t.stop()
         self._hist_rows = []
         while self.props_lay.count():
             w = self.props_lay.takeAt(0).widget()
@@ -4315,8 +4496,9 @@ class ThumbnailEditor(QMainWindow):
                 w.deleteLater()
         lay = self.cur()
         if lay is None:
-            lb = QLabel("Elige algo en el lienzo (o en «Capas») para ver sus opciones.\n\n"
-                        "Empieza por «🖼 Material»: un fotograma de tu video de fondo (doble clic) y otro delante.")
+            lb = QLabel("Nada elegido")                               # (20/11: una línea; la guía, al tooltip)
+            lb.setToolTip("Elige algo en el lienzo (o en «Capas») para ver sus opciones.\n\nEmpieza por «Material»: "
+                          "un fotograma de tu video de fondo (doble clic) y otro delante.")
             lb.setWordWrap(True)
             lb.setObjectName("dim")
             self.props_lay.addWidget(lb)
@@ -4351,9 +4533,10 @@ class ThumbnailEditor(QMainWindow):
         """Cada grupo del panel, detrás de su título (Posición, Efectos, Licuar…): clic = abrir o cerrar, como en
         Resolve. Lo que dejas abierto sigue abierto al elegir otra cosa (se recuerda), y el panel no se hace eterno."""
         from .tabs import Section
-        for i in range(self.props_lay.count()):
-            w = self.props_lay.itemAt(i).widget()
-            if not isinstance(w, QGroupBox) or not w.title():
+        from .responsive import widgets_en           # (sin itemAt: ver «lo que hay en un layout» en responsive.py)
+        for w in widgets_en(self.props_lay):
+            i = self.props_lay.indexOf(w)
+            if not isinstance(w, QGroupBox) or not w.title() or i < 0:
                 continue
             titulo = w.title()
             limpio = re.sub(r"[^\wáéíóúñü ]+", "", titulo, flags=re.I).strip() or titulo
@@ -4811,9 +4994,18 @@ class ThumbnailEditor(QMainWindow):
     def _soft_props(self, lay):
         box = QGroupBox("🌗 Bordes suaves")
         f = QFormLayout(box)
+        ch = QCheckBox("Suavizar bordes")
+        ch.setChecked(float(lay.get("feather", 0) or 0) > 0)
+        ch.setToolTip("El borde de la imagen (o lo recortado) se desvanece a transparente en vez de un corte seco.\n"
+                      "Al activarlo: un 5 % de su lado corto. Con bordes suaves el contorno no se pinta (vuelve al "
+                      "quitarlo); la sombra sigue la forma desvanecida.")
+        ch.toggled.connect(lambda on: (self._set(lay, "Bordes suaves", feather=0.2 if on else 0.0),
+                                       QTimer.singleShot(0, self._fill_props)))
+        f.addRow(ch)
         fe = _SliderNum(0, 1, float(lay.get("feather", 0) or 0), 100, suffix=" %")
         fe.setToolTip("Difumina el borde de la imagen hacia dentro (también el del sujeto recortado): se funde con lo "
-                      "de detrás sin un corte duro")
+                      "de detrás sin un corte duro. 0 = corte seco; 20 % ≈ un 5 % del lado corto. Con bordes suaves "
+                      "el contorno no se pinta (vuelve al quitarlo)")
         fe.applied.connect(lambda v: self._set(lay, "Bordes suaves", feather=round(v, 3)))
         f.addRow("Difuminar borde", fe)
         for lado, nombre in (("bottom", "Fundir abajo"), ("top", "Fundir arriba"), ("left", "Fundir izquierda"),

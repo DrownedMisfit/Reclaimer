@@ -89,7 +89,15 @@ def _face_detector(w: int, h: int):
         else:   # local_dir: archivo normal (sin enlaces simbólicos, que en Windows pueden fallar)
             _face_model = hf_hub_download("opencv/face_detection_yunet", "face_detection_yunet_2023mar.onnx",
                                           local_dir=str(models_dir() / "caras"))
-    return cv2.FaceDetectorYN.create(_face_model, "", (w, h), 0.6, 0.3, 50)
+    # ⚡ Un detector por hilo y tamaño (antes se creaba uno nuevo —leyendo el modelo— en cada fotograma)
+    got = getattr(_face_local, "det", None)
+    if got is None or got[0] != (w, h, _face_model):
+        got = ((w, h, _face_model), cv2.FaceDetectorYN.create(_face_model, "", (w, h), 0.6, 0.3, 50))
+        _face_local.det = got
+    return got[1]
+
+
+_face_local = __import__("threading").local()
 
 
 def detect_faces(frame: np.ndarray) -> list[tuple[float, float, float, float, float]]:

@@ -109,7 +109,10 @@ def main():
     posiciones: list[float] = []
     orig_step = tl._nudge_step
 
+    pasos_t: list[float] = []
+
     def step_medido():
+        pasos_t.append(time.perf_counter())
         orig_step()
         if tl._nudge is not None:
             posiciones.append(tl._nudge["d"]["dt"])
@@ -141,7 +144,10 @@ def main():
     intermedias = sorted({round(d, 6) for d in posiciones if 1e-6 < d < esperado - 1e-6})
     print(f"✓ 1 paso de rueda: enseña {esperado:.3f} s más adelante del archivo (imagen y sonido; mismo sitio y "
           f"tamaño), un solo Ctrl+Z; {len(intermedias)} posiciones intermedias")
-    assert len(intermedias) >= 6, f"poco suave: solo {len(intermedias)} posiciones intermedias"
+    huecos = [b - a for a, b in zip(pasos_t, pasos_t[1:])]
+    assert len(intermedias) >= 6, (f"poco suave: solo {len(intermedias)} posiciones intermedias "
+                                   f"({len(pasos_t)} pasos, hueco mayor {max(huecos or [0]) * 1000:.0f} ms, "
+                                   f"repintado mayor {max(pintados or [0]):.0f} ms)")
     ctrl.undo_stack.undo()
     assert abs(src(a[0]) - src0[a[0]]) < 1e-9
     print("✓ Ctrl+Z lo devuelve a lo de antes")

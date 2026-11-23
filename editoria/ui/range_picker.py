@@ -234,7 +234,8 @@ class _ZoomGauge(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        col = QColor("#e8742f") if self.level > 0.001 else QColor("#8b8f98")
+        from .theme import acento
+        col = acento() if self.level > 0.001 else QColor("#8b8f98")
         p.setPen(QPen(col, 1.6))                   # la lupa (dibujada: nítida y del color del estado)
         p.setBrush(Qt.NoBrush)
         p.drawEllipse(QRectF(1.5, 1.5, 9, 9))
@@ -444,7 +445,8 @@ class _RangeBar(QWidget):
                 p.fillRect(QRectF(self._x(a), r.top(), max(1.0, self._x(b) - self._x(a)), r.height()),
                            QColor(255, 255, 255, 14))
         for a, b in self.ranges:
-            p.fillRect(QRectF(self._x(a), r.top(), max(2.0, self._x(b) - self._x(a)), r.height()), QColor("#e8742f"))
+            p.fillRect(QRectF(self._x(a), r.top(), max(2.0, self._x(b) - self._x(a)), r.height()),
+                       __import__("editoria.ui.theme", fromlist=["acento"]).acento())
         for a, b in self.blacks:                  # ⬛ imagen negra: rayita amarilla debajo (un solo fotograma también)
             p.fillRect(QRectF(self._x(a), r.bottom() + 3, max(3.0, self._x(b) - self._x(a)), 4), QColor("#ffd23c"))
         if self.sel is not None:                # el tramo arrastrado (verde: listo para añadir)

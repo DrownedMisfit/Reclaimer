@@ -41,11 +41,13 @@ class KeywordsDialog(QDialog):
         from .help import set_help
         set_help(self, "buscar_palabras")              # («¿Qué hace esto?» en cualquier parte del diálogo)
         lay = QVBoxLayout(self)
-        tip = QLabel("Escribe palabras o frases separadas por comas. Solo se escucha donde hay voz (sin la música "
-                     "ni el silencio) y con un modelo pequeño: gasta poco y puedes seguir editando. Lo escuchado "
-                     "se guarda: buscar otra vez en el mismo archivo es instantáneo.")
+        tip = QLabel("Palabras o frases, separadas por comas")       # (20/11: una línea; el resto, al tooltip)
         tip.setWordWrap(True)
         tip.setObjectName("dim")
+        tip.setToolTip("Solo se escucha donde hay voz (sin la música ni el silencio) y con un modelo pequeño: gasta "
+                       "poco y puedes seguir editando. Lo escuchado se guarda: buscar otra vez en el mismo archivo es "
+                       "instantáneo.")
+        self.setToolTip(tip.toolTip())
         lay.addWidget(tip)
         row = QHBoxLayout()
         self.query = QLineEdit()

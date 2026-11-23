@@ -64,6 +64,8 @@ def main():
     subprocess.run([ff, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=1280x720:d=4:r=30",
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", vid], check=True,
                    creationflags=M.NO_WINDOW)
+    from PySide6.QtCore import QSettings as _QS
+    _QS("EditorIA", "EditorIA").setValue("shorts/encuadre_auto", True)   # (el de la prueba, no el tuyo)
     win = MainWindow()
     win.resize(1500, 950)
     win.show()

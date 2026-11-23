@@ -45,31 +45,32 @@ def main():
     ins = InspectorPanel(ctrl)
     tabs = ins.clip_tabs
 
+    from editoria.ui.inspector_secciones import INDICE
     ins.set_selection([cv.id])
-    assert tabs.currentIndex() == 0, tabs.currentIndex()
+    assert ins.pestana_activa() == "video", ins.pestana_activa()
     ins.set_selection([ca.id])
-    assert tabs.currentIndex() == 2, f"un audio debe abrir su ecualizador ({tabs.currentIndex()})"
+    assert ins.pestana_activa() == "audio", f"un audio debe abrir su ecualizador ({ins.pestana_activa()})"
     print("✓ elegir un audio abre su ecualizador (pestaña Audio)")
     ins.set_selection([cv.id])
-    assert tabs.currentIndex() == 0, f"un video no se queda en el ecualizador ({tabs.currentIndex()})"
-    print("✓ elegir un video después: pestaña general «Clip», no el ecualizador")
-    tabs.setCurrentIndex(3)                     # trabajando en Color…
+    assert ins.pestana_activa() == "video", f"un video no se queda en el ecualizador ({ins.pestana_activa()})"
+    print("✓ elegir un video después: pestaña «Video», no el ecualizador")
+    tabs.setCurrentIndex(INDICE["efectos"])     # trabajando en Efectos…
     ins.set_selection([cv2.id])
-    assert tabs.currentIndex() == 3, "si estabas en Color con un video, sigues en Color"
+    assert ins.pestana_activa() == "efectos", "si estabas en Efectos con un video, sigues en Efectos"
     ins.set_selection([ca.id])
-    assert tabs.currentIndex() == 2
-    print("✓ en Video/Color con videos sigues ahí; un audio siempre abre el ecualizador")
+    assert ins.pestana_activa() == "audio"
+    print("✓ en Video/Efectos/Archivo con videos sigues ahí; un audio siempre abre el ecualizador")
     ins.prefer_audio = True                     # 🎚 en la página Audio: elegir un video no saca del ecualizador
     mv.has_audio = True
     ins.set_selection([cv.id])
-    assert tabs.currentIndex() == 2, f"en la página Audio se queda en el ecualizador ({tabs.currentIndex()})"
+    assert ins.pestana_activa() == "audio", f"en la página Audio se queda en el ecualizador ({ins.pestana_activa()})"
     print("✓ en la página Audio, elegir otro clip no te saca del ecualizador")
     ins.prefer_audio = False
     from PySide6.QtCore import QSettings
     QSettings("EditorIA", "EditorIA").remove("secciones/inspector/velocidad")
     ins.set_selection([ca.id])
     sec = ins.speed_sec
-    assert tabs.widget(2).isAncestorOf(sec), "con un audio, «Velocidad» va en la pestaña Audio (debajo del ecualizador)"
+    assert ins._pag["audio"].isAncestorOf(sec), "con un audio, «Velocidad» va en la pestaña Audio (debajo del ecualizador)"
     lay = ins._audio_lay
     pos = [lay.itemAt(i).widget() for i in range(lay.count())]
     antes = pos[pos.index(sec) - 1]
@@ -81,13 +82,13 @@ def main():
     assert sec.body.isVisibleTo(sec)
     mv.has_audio = False
     ins.set_selection([cv2.id])
-    assert tabs.widget(0).isAncestorOf(sec), "un video sin sonido: «Velocidad» en la pestaña Clip"
-    print("✓ «🐢 Velocidad» plegable: debajo del ecualizador con sonido, en «Clip» sin sonido; se abre al pulsarla")
+    assert ins._pag["video"].isAncestorOf(sec), "un video sin sonido: «Velocidad» en la pestaña Video"
+    print("✓ «🐢 Velocidad» plegable: debajo del ecualizador con sonido, en «Video» sin sonido; se abre al pulsarla")
     ins.set_selection([ca.id])                  # tecla R con un audio y el Inspector en otra pestaña
-    tabs.setCurrentIndex(0)
+    tabs.setCurrentIndex(INDICE["efectos"])
     sec.head.setChecked(False)
     ins.focus_speed()
-    assert tabs.currentIndex() == 2 and sec.body.isVisibleTo(sec), (tabs.currentIndex(), sec.body.isVisibleTo(sec))
+    assert ins.pestana_activa() == "audio" and sec.body.isVisibleTo(sec), (ins.pestana_activa(), sec.body.isVisibleTo(sec))
     print("✓ tecla R: lleva a la velocidad y la abre, aunque estuvieras en otra pestaña")
     print("TODO OK")
 

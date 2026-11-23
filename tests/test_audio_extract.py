@@ -74,7 +74,11 @@ def main():
         r = E.motion_profile(v_aac, 6.0, None, prog.append)
     finally:
         E.LONG_VIDEO = real
-    assert len(r["motion"]) >= 20 and prog and all(0 <= f < 1 for f in prog), (len(r["motion"]), prog[:3])
+    # (con la lectura única —ai/lectura_unica— el progreso termina en 1.0 al acabar: solo el ÚLTIMO puede ser 1;
+    #  todos van de 0 a 1 y nunca hacia atrás)
+    sube = all(b_ >= a_ for a_, b_ in zip(prog, prog[1:]))
+    assert len(r["motion"]) >= 20 and prog and all(0 <= f < 1 for f in prog[:-1]) and 0 <= prog[-1] <= 1 and sube, \
+        (len(r["motion"]), prog[:6])
     filled = E._fill_repeats([0.0, 5.0, 0.0, 0.0, 8.0, 0.0])
     assert filled[2] == 6.0 and filled[3] == 7.0, filled
     msgs = []

@@ -190,6 +190,7 @@ def prueba_menciones(panel):
 
 
 def prueba_marcas(ctrl, panel, timeline):
+    panel.set_modo("elegida")                 # (solo la palabra elegida; por defecto se ven «Todas»)
     _elegir(panel, "Fortnite")
     esperadas = [float(h["tl"]) for h in panel.mencion["hits"] if h["tl"] is not None]
     assert len(esperadas) == 2, esperadas

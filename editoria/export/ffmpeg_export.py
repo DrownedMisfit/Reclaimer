@@ -9,6 +9,7 @@ Cómo funciona:
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, replace
 
@@ -73,9 +74,10 @@ def subtitle_fonts_dir(ass_text: str) -> str:
 
 
 def _filter_path(path: str) -> str:
-    """Ruta de Windows escrita como la entiende un filtro de FFmpeg: 'C\\:/carpeta/archivo'."""
-    p = path.replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
-    return f"'{p}'"
+    """Ruta de Windows escrita como la entiende un filtro de FFmpeg (valor de una opción dentro del grafo): ver
+    _ruta_en_grafo. 🔧 21/11: antes, entre comillas simples, una carpeta con comilla («Assassin's Creed») rompía
+    subtítulos, LUT, máscaras y zonas («No such file»)."""
+    return _ruta_en_grafo(path)
 
 ENCODERS = {
     ("h264", "cpu"): "libx264",
@@ -154,6 +156,7 @@ class ExportOptions:
     duration: float = 0.0      # duración exacta (0 = la del proyecto)
     max_quality: bool = False  # tarjeta gráfica en «máxima calidad» (con análisis previo): ~2 veces más lento
     low_priority: bool = False  # «Dejar libre el PC»: FFmpeg en prioridad baja (puedes usar el PC mientras exporta)
+    chapters: bool = False     # 📍 los capítulos (de tus marcadores o los temas) dentro del MP4
 
 
 _AAC_MF: bool | None = None
@@ -202,6 +205,44 @@ def _num(x: float) -> str:
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
 
+def suavizar_filtros(tag: str, src: str, dst: str, w: int, h: int, K: tuple, F: float) -> list[str]:
+    """🌗 Suavizar bordes (22/11): el alfa de src baja en línea recta hasta 0 en el borde del rectángulo K (x0, y0, x1,
+    y1 en píxeles de una imagen w×h), en un ancho F. Máscara = un rectángulo blanco metido F/2 y desenfocado con
+    boxblur de radio F/2 (UNA imagen: se repite en todos los fotogramas), multiplicada por el alfa que ya tenía (el
+    recorte y las bandas transparentes se conservan). El visor hace el mismo degradado (LookEffect._suavizar)."""
+    x0, y0, x1, y1 = (int(round(v)) for v in K)
+    r = max(1, min(int(round(F / 2)), max(1, min(w, h) // 2 - 1)))
+    bw_, bh_ = max(1, x1 - x0 - 2 * r), max(1, y1 - y0 - 2 * r)
+    return [f"{src}format=yuva420p,split=2[sa{tag}][sb{tag}]",
+            f"[sb{tag}]alphaextract[al{tag}]",
+            f"color=c=black:s={w}x{h}:d=0.1:r=10,format=gray,drawbox=x={x0 + r}:y={y0 + r}:w={bw_}:h={bh_}:"
+            f"color=white:t=fill,boxblur=luma_radius={r}:luma_power=1[mk{tag}]",
+            f"[al{tag}][mk{tag}]blend=all_mode=multiply:repeatlast=1[am{tag}]",
+            f"[sa{tag}][am{tag}]alphamerge{dst}"]
+
+
+def _rect_suave(c, m, bw: int, bh: int, box: dict, ofs=(0.0, 0.0), img=None):
+    """🌗 Lo que se ve de la capa (la imagen dentro de su caja bw×bh menos el recorte) como (x0, y0, x1, y1) y el ancho
+    del desvanecido (suave × su lado corto). ofs/img: en coordenadas de la imagen sola (con sombra o contorno)."""
+    from ..core import decor
+    s = decor.suavizar_of(c.fx)
+    fit = box.get("fit", "contain")
+    if fit == "contain" and m.width and m.height:
+        sw, sh = transform.fit_size(m.width, m.height, bw, bh, "contain")
+    else:
+        sw, sh = bw, bh
+    cx0, cy0 = (bw - sw) / 2, (bh - sh) / 2
+    cr = box.get("crop") or {}
+    kx0, ky0 = float(cr.get("l", 0)) * bw, float(cr.get("t", 0)) * bh
+    kx1, ky1 = bw - float(cr.get("r", 0)) * bw, bh - float(cr.get("b", 0)) * bh
+    x0, y0, x1, y1 = max(cx0, kx0) - ofs[0], max(cy0, ky0) - ofs[1], min(cx0 + sw, kx1) - ofs[0], min(cy0 + sh, ky1) - ofs[1]
+    if img is not None:
+        x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(float(img[0]), x1), min(float(img[1]), y1)
+    if x1 - x0 < 4 or y1 - y0 < 4 or s <= 0:
+        return None, 0.0
+    return (x0, y0, x1, y1), s * min(x1 - x0, y1 - y0)
+
+
 def clip_video_filters(k: int, c, m, W: int, H: int, F: str) -> list[str]:
     """Filtros de un clip. Con ✂ recorte de sujeto (IA), la máscara se pone lo primero (en tiempo del archivo).
     ▭ Sin barras negras: el archivo se recorta a su zona con imagen ANTES de todo, y el clip se encuadra con ese
@@ -217,6 +258,17 @@ def clip_video_filters(k: int, c, m, W: int, H: int, F: str) -> list[str]:
         bw_, bh_ = min(bw_, m.width - bx_), min(bh_, m.height - by_)
         mc = replace(m, width=bw_, height=bh_)
     out = _clip_video_filters(k, c, mc, W, H, F)
+    from ..core import decor as _DC
+    if _DC.suavizar_of(c.fx) > 0 and not _DC.has_frame(c.fx):      # 🌗 bordes suaves (con sombra: antes, abajo)
+        bx = dict(c.layout or transform.FULL)
+        if _anim(c):
+            wm, hm = transform.layout_max(c)
+            bx = dict(bx, w=wm, h=hm)
+        bw_s, bh_s = transform.even(bx["w"] * W), transform.even(bx["h"] * H)
+        K, Fs = _rect_suave(c, mc, bw_s, bh_s, bx)
+        if K is not None:
+            out[-1] = out[-1][: out[-1].rindex(f"[v{k}]")] + f"[v{k}sv]"
+            out += suavizar_filtros(f"e{k}", f"[v{k}sv]", f"[v{k}]", bw_s, bh_s, K, Fs)
     box = c.layout or transform.FULL
     rot = transform.rot_of(box)
     if rot and not _anim(c):          # ⟳ girada: en un lienzo cuadrado transparente (se coloca centrada en su sitio)
@@ -281,7 +333,7 @@ def _clip_video_filters(k: int, c, m, W: int, H: int, F: str) -> list[str]:
     regions = effects.blur_regions(c.fx)
     rgraph = ""   # ◌ desenfoque por zonas: se sale de la cadena y se vuelve a ella con [ro{k}]; ANTES de voltear (las
     if regions:   # zonas están en la caja sin voltear, como las dibujas en el visor, que voltea la capa entera después)
-        rgraph = f"null[rz{k}];{effects.region_blur_graph(regions, k)};[ro{k}]"
+        rgraph = f"null[rz{k}];{effects.region_blur_graph(regions, k, bw, bh)};[ro{k}]"
     from ..core import motion_track as MT
     tregs = MT.tracked_blurs(c.fx) if m.kind == KIND_VIDEO else []
     tgraph = ""   # 🙈 tapar lo que se sigue: zonas que se mueven con el objeto (mismas rectas que el visor), ANTES de
@@ -355,9 +407,16 @@ def _clip_video_filters(k: int, c, m, W: int, H: int, F: str) -> list[str]:
         iw_ = max(16, (bw - 2 * dm - 2 * dow) // 2 * 2)
         ih_ = max(16, (bh - 2 * dm - 2 * dow) // 2 * 2)
         sw, sh = transform.fit_size(m.width, m.height, iw_, ih_, "stretch" if fit == "stretch" else "contain")
-        fl, _dw, _dh = decor.ffmpeg_frame(k, c.fx, sw, sh, W, H, f"dsrc{k}")
+        sv_f: list[str] = []
+        src_d = f"dsrc{k}"
+        if decor.suavizar_of(c.fx) > 0:        # 🌗 bordes suaves ANTES de la sombra: la sombra sigue esa forma
+            K, Fs = _rect_suave(c, m, bw, bh, box, ((bw - sw) / 2, (bh - sh) / 2), (sw, sh))
+            if K is not None:
+                sv_f = suavizar_filtros(f"d{k}", f"[dsrc{k}]", f"[dsv{k}]", sw, sh, K, Fs)
+                src_d = f"dsv{k}"
+        fl, _dw, _dh = decor.ffmpeg_frame(k, c.fx, sw, sh, W, H, src_d)
         place = place.replace("format=yuv420p,", "format=yuva420p,", 1)
-        return ([f"[{k}:v]{rt}fps={F},{zoom_or_scale(sw, sh)},setsar=1[dsrc{k}]"] + fl +
+        return ([f"[{k}:v]{rt}fps={F},{zoom_or_scale(sw, sh)},setsar=1[dsrc{k}]"] + sv_f + fl +
                 [f"[dec{k}]pad={bw}:{bh}:(ow-iw)/2:(oh-ih)/2:color=black@0,{place}[v{k}]"])
     sw, sh = transform.fit_size(m.width, m.height, bw, bh, fit)
     chain = [f"fps={F}", zoom_or_scale(sw, sh)]
@@ -412,15 +471,16 @@ def opacity_filters(c, m) -> str:
     if not c.op_kf:
         return f"format=yuva420p,colorchannelmixer=aa={c.opacity:.4f},"
     s_expr = curves.s_of_t(c, "T", m.kind == KIND_IMAGE)
-    a = f"{c.opacity:.4f}*({curves.ffmpeg_expr(c.op_kf, s_expr)})"
+    a = f"{c.opacity:.4f}*({curves.ffmpeg_expr(c.op_kf, s_expr, 1.0, *curves.tramo(c, m.kind == KIND_IMAGE))})"
     return f"format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*clip({a},0,1)',"
 
 
 def volume_curve(c) -> list[str]:
-    """Curva de volumen (si tiene puntos): t es el tiempo dentro del clip (ya con su velocidad)."""
+    """Curva de volumen (si tiene puntos): t es el tiempo dentro del clip (ya con su velocidad). Solo los puntos de su
+    tramo del archivo, en árbol (curves.ffmpeg_expr): exporta bien con miles de puntos."""
     if not c.vol_kf:
         return []
-    return [f"volume='{curves.ffmpeg_expr(c.vol_kf, curves.s_of_t(c, 't'))}':eval=frame"]
+    return [f"volume='{curves.ffmpeg_expr(c.vol_kf, curves.s_of_t(c, 't'), 1.0, *curves.tramo(c))}':eval=frame"]
 
 
 def blend_filters(k: int, c, last: str, W: int, H: int, bx: int, by: int, box_w: int, box_h: int) -> list[str]:
@@ -465,12 +525,38 @@ def retime_video(c, m, box_w: int, F: str) -> str:
     return out
 
 
+_RUBBERBAND: list = []       # [¿el FFmpeg trae rubberband?] (se mira una vez)
+# 🎚 Sonido a otra velocidad (22/11, medido por Fable): atempo va mejor de sincronía a cámara lenta y hasta 1,5×;
+# rubberband deja golpes y consonantes más nítidos a 2× y 4× (14–21 ms de emborronado frente a 38–51 ms de atempo).
+# Los dos quedan por debajo de un fotograma. Por eso: rubberband SOLO desde RUBBERBAND_DESDE (si el FFmpeg lo trae;
+# licencia GPL, como Reclaimer) y atempo para todo lo demás (cámara lenta y hasta justo antes de 2×).
+RUBBERBAND_DESDE = 2.0
+
+
+def _hay_rubberband() -> bool:
+    if not _RUBBERBAND:
+        try:
+            import re
+
+            from ..core import media as _MT
+            r = _MT.run_quiet([_MT.ffmpeg(), "-hide_banner", "-filters"], timeout=20)
+            _RUBBERBAND.append(bool(re.search(r"^\s*\S+\s+rubberband\s", r.stdout.decode(errors="replace")
+                                              if isinstance(r.stdout, bytes) else (r.stdout or ""), re.M)))
+        except Exception:  # noqa: BLE001 - no se sabe: atempo, como antes
+            _RUBBERBAND.append(False)
+    return _RUBBERBAND[0]
+
+
 def retime_audio(c) -> list[str]:
-    """Filtros de velocidad del sonido: al revés y más rápido/lento sin voz de ardilla (atempo)."""
+    """Filtros de velocidad del sonido: al revés y más rápido/lento sin voz de ardilla (atempo encadenado; rubberband
+    desde RUBBERBAND_DESDE, si el FFmpeg lo trae)."""
     if not c.retimed or c.speed <= 0:
         return []
     out = ["areverse"] if c.reverse else []
     sp = c.speed
+    if sp >= RUBBERBAND_DESDE - 1e-4 and sp <= 20.0 and _hay_rubberband():
+        out.append(f"rubberband=tempo={sp:.5f}")
+        return out
     while sp > 2.0:              # atempo admite 0.5–2 por paso: se encadena
         out.append("atempo=2.0")
         sp /= 2.0
@@ -480,6 +566,54 @@ def retime_audio(c) -> list[str]:
     if abs(sp - 1.0) > 1e-4:
         out.append(f"atempo={sp:.5f}")
     return out
+
+
+LIMITE_WINDOWS = 32000   # (la orden más larga que Windows lanza es de 32.767 caracteres)
+DENTRO_EXACTOS = (".m4a", ".mp4", ".mov", ".m4v", ".wav", ".mp3")   # leídos dentro del filtro = mismas muestras (21/11)
+LIMITE_ORDEN = 30000     # ⚡ caracteres de la orden a partir de los cuales el audio se lee DENTRO del filtro (Windows: 32.767)
+
+
+def _ruta_en_grafo(path: str) -> str:
+    """Una ruta como valor de una opción DENTRO de un grafo de filtros (amovie=…): dos escapados, el de la opción
+    (\\ ' :) y el del grafo (\\ ' [ ] , ;). Con una sola capa, una carpeta como «Assassin's Creed» se quedaba sin
+    la comilla («No such file»)."""
+    v = path.replace("\\", "/")
+    v = v.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    return "".join("\\" + ch if ch in "\\'[],;" else ch for ch in v)
+
+
+_INICIO_AUDIO: dict = {}     # ruta → segundo en que empieza su sonido (o None si no se pudo mirar)
+
+
+def _inicio_audio(path: str) -> float | None:
+    """Dónde empieza el ARCHIVO (start_time del contenedor: .ts que empiezan en 1,4 s, MKV desplazados, el retardo del
+    MP3). -ss cuenta desde ahí; amovie usa el tiempo absoluto: se suma. Del contenedor, no de la pista de sonido: un
+    MP4/MOV cuyo sonido empieza 0,35 s tarde salía corrido −250 ms (revisión de Fable). None = no se sabe (va por el
+    camino normal). Se mira una vez por archivo; el visor lo deja mirado en segundo plano al abrir el proyecto
+    (preview._codec_de), así que al exportar normalmente ya está y no cuesta nada en el hilo de la interfaz."""
+    if path not in _INICIO_AUDIO:
+        try:
+            import av
+            with av.open(path) as cont:
+                _INICIO_AUDIO[path] = cont.start_time / 1e6 if cont.start_time is not None else 0.0
+        except Exception:  # noqa: BLE001
+            _INICIO_AUDIO[path] = None
+    return _INICIO_AUDIO[path]
+
+
+def _amovie_trozo(path: str, c, etiqueta: str) -> str | None:
+    """El trozo de sonido del clip leído dentro del filtro (amovie) en vez de con «-ss -t -i ruta» en la orden: con
+    cientos de piezas (una narración larga tras «Eliminar silencios»), la orden pasaba de 32.767 caracteres y Windows
+    no la lanzaba («WinError 206»). Lo mismo que hace FFmpeg con -ss/-t (saltar y recortar): seek_point > 0 aunque el
+    trozo empiece en 0 (-ss 0 también salta: en AAC eso quita el relleno inicial) y el recorte en tiempo absoluto
+    (inicio del archivo + segundo del trozo). Medido el 21/11: m4a, mp3, wav y .ts idénticos; MKV, ≤ 15 muestras
+    (0,3 ms: sus tiempos van en milisegundos). None si no se sabe dónde empieza el archivo (va por el camino normal)."""
+    t0 = _inicio_audio(path)
+    if t0 is None:
+        return None
+    x = round(float(c.source_in), 3)
+    return (f"amovie={_ruta_en_grafo(path)}:seek_point={max(x, 1e-6):.6f},atrim=start={x + t0:.6f}:"
+            f"duration={c.src_len:.3f},asetpts=PTS-STARTPTS[{etiqueta}]")
 
 
 def _src_args(c) -> list[str]:
@@ -593,14 +727,29 @@ def adjust_filters(i: int, c, last: str, W: int, H: int, fps: float = 30.0) -> t
         if fout > 0:
             alpha.append(f"fade=t=out:st={max(0.0, c.duration - fout):.3f}:d={fout:.3f}:alpha=1")
     k = f"{i}a"
-    head = f"[ajs{i}]trim=start={a:.4f}:end={b:.4f}," + ",".join(["setpts=PTS-STARTPTS"] + chain + ["setsar=1"])
+    # 🎞 Todo en FOTOGRAMAS con los mismos números (la base es k/fps desde 0): el tramo son los fotogramas k0…k1-1
+    # (el primero que se ve en su sitio, como el visor: inicio ≤ t; con tolerancia para inicios redondeados a 4
+    # decimales). Con trim=start en segundos, trim redondeaba al fotograma más cercano y el relleno no: 1 fotograma
+    # de desfase en 1 de cada 3 inicios (revisión de Fable).
+    k0 = max(0, math.ceil(a * fps - 0.01))
+    k1 = max(k0 + 1, math.ceil(b * fps - 0.01))
+    head = (f"[ajs{i}]trim=start_frame={k0}:end_frame={k1}," +
+            ",".join(["setpts=PTS-STARTPTS"] + chain + ["setsar=1"]))
     if glow:     # brillo: dos ramas (como en los clips)
         head += f",null[gz{k}];{effects.glow_graph(fx, k)};[go{k}]"
     else:
         head += ","
-    head += ",".join(["format=yuv420p"] + alpha + [f"setpts=PTS+{a:.4f}/TB"]) + f"[ajf{i}]"
-    out = [f"[{last}]split=2[ajm{i}][ajs{i}]", head,
-           f"[ajm{i}][ajf{i}]overlay=x=0:y=0:eof_action=pass:enable='between(t,{a:.3f},{b:.3f})'[ajo{i}]"]
+    # Delante, hasta el fotograma k0, fotogramas TRANSPARENTES generados (no salen de lo de debajo): sin ellos el
+    # overlay esperaba al primer fotograma recortado guardando en memoria todos los anteriores (GB con la capa a mitad
+    # de un video largo). concat pone el tramo (que empieza en 0) justo donde acaba el relleno: en el fotograma k0.
+    out = [f"[{last}]split=2[ajm{i}][ajs{i}]"]
+    if k0 > 0:
+        head += ",".join(["format=yuv420p"] + alpha + ["format=yuva420p", "setsar=1"]) + f"[ajp{i}]"
+        out += [head, f"color=c=black@0:s={W}x{H}:r={_num(fps)},format=yuva420p,setsar=1,trim=end_frame={k0}[ajz{i}]",
+                f"[ajz{i}][ajp{i}]concat=n=2:v=1:a=0,setpts=N/({_num(fps)}*TB)[ajf{i}]"]   # (n.º = fotograma)
+    else:
+        out.append(head + ",".join(["format=yuv420p"] + alpha) + f"[ajf{i}]")
+    out.append(f"[ajm{i}][ajf{i}]overlay=x=0:y=0:eof_action=pass:enable='between(n,{k0},{k1 - 1})'[ajo{i}]")
     return out, f"ajo{i}"
 
 
@@ -739,10 +888,14 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
     cues: las frases ya calculadas (un trozo de la exportación en paralelo recibe las del video entero, desplazadas:
     core.subtitles.shift_cues). raster=False: los subtítulos que van como imágenes NO se dibujan aquí (el que llama
     hace prepare_subtitles en segundo plano antes de lanzar FFmpeg; así la ventana no se queda congelada)."""
+    from ..core import escena_clip                    # 🎬 cada clip de escena, desplegado (fondo, personajes, sonidos)
+    project = escena_clip.expandir(project)
     total = opts.duration or project.duration()
     if total <= 0:
         raise ValueError("La timeline está vacía: no hay nada que exportar.")
     W, H, F = opts.width, opts.height, _num(opts.fps)
+    from ..core import decor as _decor                # 🌑 sombra nueva: sale por fuera de la caja (el clip no encoge)
+    project = _decor.para_exportar(project, W, H)
 
     # -nostdin: FFmpeg no debe quedarse esperando al teclado (podía colgar la exportación)
     args = [ffmpeg, "-nostdin", "-y", "-hide_banner", "-nostats", "-progress", "pipe:1"]
@@ -914,6 +1067,19 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
 
     # --- audio: pistas de audio (con sus efectos y el ducking de la música) ---
     speech = audio_fx.speech_intervals(project)
+    carril_de: dict = {}      # ⚡ pieza leída dentro del filtro → (pista, duración): van seguidas por «carriles» (abajo)
+    # ⚡ con muchas piezas, cada una como «-ss -t -i ruta» desbordaba la orden de Windows (32.767 caracteres): entonces
+    # el sonido de las pistas de audio se lee dentro del filtro (ver _amovie_trozo), que va en un archivo
+    piezas = [project.media_of(c) for tr in project.tracks
+              if tr.kind == TRACK_AUDIO and project.audible(tr) and not opts.video_only
+              for c in project.clips_on(tr.id) if c.enabled and c.volume > 0 and c.speed > 0]
+    largo = sum(len(a) + 3 for a in args) + sum(len(m.path) + 48 for m in piezas if m is not None) + 2000
+    dentro = largo > LIMITE_ORDEN
+    # (.ts, .mkv y otros con tiempos poco finos: leídos dentro del filtro pueden quedar 1–15 muestras corridos frente al
+    #  camino normal; van por el normal, salvo que solo ellos ya desbordaran la orden de Windows)
+    largo_raros = sum(len(a) + 3 for a in args) + 2000 + sum(
+        len(m.path) + 48 for m in piezas if m is not None and os.path.splitext(m.path)[1].lower() not in DENTRO_EXACTOS)
+    raros_dentro = largo_raros > LIMITE_WINDOWS
     for tr in project.tracks:
         if tr.kind != TRACK_AUDIO or not project.audible(tr) or opts.video_only:
             continue
@@ -922,7 +1088,14 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
             if not c.enabled or m is None or c.volume <= 0 or not os.path.exists(m.path) or c.speed <= 0 \
                     or not (m.kind == KIND_AUDIO or (m.kind == KIND_VIDEO and m.has_audio)):
                 continue
-            k = add_input(_src_args(c), m.path)
+            exacto = os.path.splitext(m.path)[1].lower() in DENTRO_EXACTOS
+            trozo = _amovie_trozo(m.path, c, f"am{len(audio_inputs)}") if dentro and (exacto or raros_dentro) else None
+            if trozo is not None:
+                k = f"am{len(audio_inputs)}"
+                filters.append(trozo)
+                carril_de[k] = (tr.id, c.duration)
+            else:
+                k = add_input(_src_args(c), m.path)
             audio_inputs.append((k, c.start, c.volume))
             if m.channels == 1:
                 mono.add(k)
@@ -934,26 +1107,70 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
                 duck = audio_fx.ffmpeg_duck_volume(speech, c.start, c.end, tr.duck_db)
                 if duck:
                     chain.append(duck)
-            fx = c.fx or {}
-            if float(fx.get("fade_in", 0)) > 0:
-                chain.append(f"afade=t=in:st=0:d={float(fx['fade_in']):.3f}")
-            if float(fx.get("fade_out", 0)) > 0:
-                fo = float(fx["fade_out"])
+            from ..core import effects as _efx
+            fi, fo = _efx.audio_fades(c.fx)              # (los tuyos y los automáticos de las uniones)
+            if fi > 0:
+                chain.append(f"afade=t=in:st=0:d={fi:.3f}")
+            if fo > 0:
                 chain.append(f"afade=t=out:st={max(0.0, c.duration - fo):.3f}:d={fo:.3f}")
             extra[k] = [x for x in chain if x]
 
     if audio_inputs:
         labels = []
+        # ⚡ Con muchas piezas (leídas dentro del filtro), cada una retrasada con adelay y todas sumadas con amix costaba
+        # piezas × duración: 2.000 trozos de 0,25 s tardaban más de 10 min y 5 GB. Se ponen SEGUIDAS en «carriles»
+        # (concat, con silencio entre medias) y solo se suman los carriles. Mismas muestras: cada pieza empieza en la
+        # misma muestra que con adelay (milisegundos × 48), su relleno hasta la siguiente es silencio, y dos piezas que
+        # se tocan van en carriles distintos (nada se recorta: se suman igual que antes).
+        sr = 48000
+        seguir: dict = {}             # pieza → muestras hasta el inicio de la siguiente de su carril (o None: la última)
+        carriles: list = []           # [(pista, [(inicio, largo, pieza), …])]
+        for k, start, _vol in audio_inputs:
+            if k not in carril_de:
+                continue
+            pista, dur = carril_de[k]
+            ini, largo = int(round(start * 1000)) * (sr // 1000), int(round(dur * sr))
+            for pista_c, lista in carriles:
+                if pista_c == pista and lista[-1][0] + lista[-1][1] + sr // 1000 <= ini:
+                    lista.append((ini, largo, k))
+                    break
+            else:
+                carriles.append((pista, [(ini, largo, k)]))
+        for _p, lista in carriles:
+            lista.sort()
+            for (i0, _l0, k0), (i1, _l1, _k1) in zip(lista, lista[1:]):
+                seguir[k0] = i1 - i0
+            seguir[lista[-1][2]] = None
         for k, start, vol in audio_inputs:
             ms = int(round(start * 1000))
             fx = "".join(f",{x}" for x in extra.get(k, []))
             eq = f"{clip_eq[k]}," if clip_eq.get(k) else ""
             # Mono → estéreo copiando el canal (la conversión estándar lo bajaría 3 dB)
             to_stereo = "pan=stereo|c0=c0|c1=c0," if k in mono else ""
+            # (⚡ leído dentro del filtro, o una entrada. 🔧 Cada trozo empieza en el tiempo 0: con «-ss» sobre AAC el
+            #  primer tiempo no era 0 y el fundido de entrada automático —st=0— no se aplicaba: chasquido en cada unión
+            #  tras «Eliminar silencios», y el de salida caía corrido. Medido el 20/11.)
+            src = f"[{k}]" if isinstance(k, str) else f"[{k}:a]asetpts=PTS-STARTPTS,"
+            if k in seguir:              # (en su carril: rellena con silencio hasta la siguiente, sin retraso propio)
+                hueco = seguir[k]
+                cola = f",apad=whole_len={hueco},atrim=end_sample={hueco}" if hueco is not None else ""
+                filters.append(
+                    f"{src}aresample=48000,{to_stereo}aformat=sample_fmts=fltp:channel_layouts=stereo,{eq}"
+                    f"volume={vol:.3f}{fx}{cola}[a{k}]")
+                continue
             filters.append(
-                f"[{k}:a]aresample=48000,{to_stereo}aformat=sample_fmts=fltp:channel_layouts=stereo,{eq}"
+                f"{src}aresample=48000,{to_stereo}aformat=sample_fmts=fltp:channel_layouts=stereo,{eq}"
                 f"volume={vol:.3f}{fx},adelay={ms}:all=1[a{k}]")
             labels.append(f"[a{k}]")
+        for n_c, (_p, lista) in enumerate(carriles):
+            partes = []
+            if lista[0][0] > 0:              # (silencio hasta la primera pieza del carril)
+                filters.append(f"anullsrc=r={sr}:cl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                               f"atrim=end_sample={lista[0][0]}[cs{n_c}]")
+                partes.append(f"[cs{n_c}]")
+            partes += [f"[a{k}]" for _i, _l, k in lista]
+            filters.append(f"{''.join(partes)}concat=n={len(partes)}:v=0:a=1[car{n_c}]")
+            labels.append(f"[car{n_c}]")
         final = f",{audio_fx.LOUDNORM},aresample=48000" if (project.loudnorm and opts.loudnorm) else ""
         filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0:"
                        f"duration=longest{final},apad[aout]")
@@ -975,6 +1192,12 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
         from ..core import title_render
         tdir = texts_dir(script_path)
         os.makedirs(tdir, exist_ok=True)
+        # 📝 Fondo borroso alrededor (notas de texto): primero todos, así desenfocan solo el video (no otros textos),
+        # como en el visor (core/nota_texto.py: el mismo recuadro, sigma y máscara)
+        from ..core import nota_texto as NT
+        for i, (a, b, t) in enumerate(titles):
+            fl, last = NT.export_filters(t, a, b, W, H, i, last, add_input, F, tdir, total)
+            filters += fl
         for i, (a, b, t) in enumerate(titles):
             img, pos = title_render.render(t, W, H)
             png = os.path.join(tdir, f"texto_{i}.png")
@@ -1037,6 +1260,11 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
     encoder = video_encoder(codec, opts.encoder)
     br = opts.bitrate_mbps
     gop = max(1, int(round(opts.fps / 2)))       # un fotograma clave cada medio segundo (lo que pide YouTube)
+    capitulos = []                               # 📍 los capítulos dentro del MP4 (ffmetadata, una entrada más)
+    if opts.chapters and not opts.video_only:
+        meta = escribir_capitulos(project, total, os.path.dirname(os.path.abspath(script_path)))
+        if meta:
+            capitulos = ["-map_chapters", str(add_input(["-f", "ffmetadata"], meta))]
     args += ["-/filter_complex", script_path, "-map", "[vout]"] + ([] if opts.video_only else ["-map", "[aout]"]) + [
              "-t", f"{total:.3f}", "-r", F, "-fps_mode", "cfr",
              "-c:v", encoder, "-b:v", f"{_num(br)}M", "-maxrate", f"{_num(br * 1.5)}M",
@@ -1056,5 +1284,18 @@ def build_command(project: Project, opts: ExportOptions, ffmpeg: str,
         args += ["-an", opts.path]
         return args, total
     audio_k = TARGETS[opts.target]["audio"] if opts.target in TARGETS else opts.audio_kbps
-    args += aac_args(audio_k) + ["-ar", "48000", "-ac", "2", "-movflags", "+faststart", opts.path]
+    args += aac_args(audio_k) + ["-ar", "48000", "-ac", "2"] + capitulos + ["-movflags", "+faststart", opts.path]
     return args, total
+
+
+def escribir_capitulos(project: Project, total: float, carpeta: str) -> str | None:
+    """📍 Escribe los capítulos (core/chapters.ffmetadata) en «capitulos.ffmeta» dentro de carpeta. None si no hay."""
+    from ..core import chapters
+    txt = chapters.ffmetadata(project, total)
+    if not txt:
+        return None
+    os.makedirs(carpeta, exist_ok=True)
+    meta = os.path.join(carpeta, "capitulos.ffmeta")
+    with open(meta, "w", encoding="utf-8", newline="\n") as f:     # (FFmpeg lee mejor los finales de línea \n)
+        f.write(txt)
+    return meta

@@ -27,6 +27,10 @@ class ClipAnalysisManager(QObject):
         self._auto_timer.timeout.connect(self._auto)
         ctrl.media_changed.connect(self._auto_timer.start)
         self._auto_on = False
+        # ⚡ Lo que importas o descargas se empieza a analizar enseguida (cola única, prioridad media; lo que ya
+        # había al abrir el proyecto, no): cuando lo pidas, ya estará hecho (ui/cola_analisis.py)
+        from .cola_analisis import AlImportar
+        self.al_importar = AlImportar(ctrl, self)
 
     @property
     def auto(self) -> bool:

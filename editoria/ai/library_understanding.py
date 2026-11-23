@@ -112,51 +112,74 @@ def analyze_deep(path: str, kind: str, duration: float, progress: ProgressFn = N
     cached = load_deep(path)
     if cached is not None:
         return cached
-    from .clip_analysis import letterbox_ratio
+    if kind == "video":
+        from . import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ai/lectura_unica.py)
+        if lectura_unica.usar(path, duration, "a_fondo"):
+            lectura_unica.asegurar_o_seguir(path, duration, ["a_fondo"], cancelled, progress)
+            cached = load_deep(path)
+            if cached is not None:
+                return cached
     enc = embeddings.get("clip_image", progress)
-    full = "scale=224:224:force_original_aspect_ratio=decrease,pad=224:224:(ow-iw)/2:(oh-ih)/2:black"
-    center = "scale=224:224:force_original_aspect_ratio=increase,crop=224:224"
     if kind == "image":
-        vf_f, vf_c = full, center
+        vf_f, vf_c = FULL_FILTER, CENTER_FILTER
     else:
-        vf_f, vf_c = f"fps={1 / STEP:g}," + full, f"fps={1 / STEP:g}," + center
-    vecs_f, vecs_c, sample = [], [], []
-    batch_f, batch_c = [], []
-    total = max(1, int(duration / STEP)) if kind != "image" else 1
-    done = 0
+        vf_f, vf_c = f"fps={1 / STEP:g}," + FULL_FILTER, f"fps={1 / STEP:g}," + CENTER_FILTER
+    acc = DeepAccumulator(enc, max(1, int(duration / STEP)) if kind != "image" else 1, progress)
     for ff, fc in zip(_frames(path, vf_f, cancelled), _frames(path, vf_c, cancelled)):
-        batch_f.append(ff)
-        batch_c.append(fc)
-        if len(sample) < 40 and done % max(1, total // 40) == 0:
-            sample.append(fc)
-        if len(batch_f) == 32:
-            vecs_f.append(enc.encode(np.stack(batch_f), batch=32))
-            vecs_c.append(enc.encode(np.stack(batch_c), batch=32))
-            done += len(batch_f)
-            batch_f, batch_c = [], []
-            report(progress, min(0.99, done / total), "")
-    if batch_f:
-        vecs_f.append(enc.encode(np.stack(batch_f), batch=32))
-        vecs_c.append(enc.encode(np.stack(batch_c), batch=32))
-    if not vecs_f:
-        raise RuntimeError("no se pudieron leer fotogramas")
-    vf_ = np.concatenate(vecs_f)
-    vc_ = np.concatenate(vecs_c)
-    n = len(vf_)
-    t = np.arange(n, dtype=np.float32) * STEP + (0.0 if kind == "image" else STEP / 2)
-    # Planos: cuando la imagen cambia mucho de un segundo al siguiente
-    shots, a = [], 0.0
-    for i in range(1, n):
-        if float(vf_[i] @ vf_[i - 1]) < SHOT_CUT:
-            shots.append((a, i * STEP))
-            a = i * STEP
-    shots.append((a, max(a + STEP, duration if kind != "image" else STEP)))
-    lb = letterbox_ratio(np.stack(sample)) if len(sample) >= 2 else 0.0
-    res = {"times": np.concatenate([t, t]), "vecs": np.concatenate([vf_, vc_]).astype(np.float32),
-           "shots": np.array(shots, np.float32), "letterbox": float(lb)}
-    np.savez_compressed(_deep_path(path), times=res["times"], vecs=res["vecs"].astype(np.float16),
-                        shots=res["shots"], letterbox=res["letterbox"])
-    return res
+        acc.add(ff, fc)
+    return acc.finish(path, kind, duration)
+
+
+FULL_FILTER = "scale=224:224:force_original_aspect_ratio=decrease,pad=224:224:(ow-iw)/2:(oh-ih)/2:black"
+CENTER_FILTER = "scale=224:224:force_original_aspect_ratio=increase,crop=224:224"
+
+
+class DeepAccumulator:
+    """Las huellas CLIP del plano entero y del centro, segundo a segundo, y al final los planos y las bandas negras.
+    Lo usan la lectura de siempre y la lectura única (ai/lectura_unica.py): el mismo cálculo, el mismo resultado."""
+
+    def __init__(self, enc, total: int, progress: ProgressFn = None):
+        self.enc, self.total, self.progress = enc, total, progress
+        self.vecs_f, self.vecs_c, self.sample = [], [], []
+        self.batch_f, self.batch_c = [], []
+        self.done = 0
+
+    def add(self, ff: np.ndarray, fc: np.ndarray):
+        self.batch_f.append(ff)
+        self.batch_c.append(fc)
+        if len(self.sample) < 40 and self.done % max(1, self.total // 40) == 0:
+            self.sample.append(fc)
+        if len(self.batch_f) == 32:
+            self.vecs_f.append(self.enc.encode(np.stack(self.batch_f), batch=32))
+            self.vecs_c.append(self.enc.encode(np.stack(self.batch_c), batch=32))
+            self.done += len(self.batch_f)
+            self.batch_f, self.batch_c = [], []
+            report(self.progress, min(0.99, self.done / self.total), "")
+
+    def finish(self, path: str, kind: str, duration: float) -> dict:
+        from .clip_analysis import letterbox_ratio
+        if self.batch_f:
+            self.vecs_f.append(self.enc.encode(np.stack(self.batch_f), batch=32))
+            self.vecs_c.append(self.enc.encode(np.stack(self.batch_c), batch=32))
+        if not self.vecs_f:
+            raise RuntimeError("no se pudieron leer fotogramas")
+        vf_ = np.concatenate(self.vecs_f)
+        vc_ = np.concatenate(self.vecs_c)
+        n = len(vf_)
+        t = np.arange(n, dtype=np.float32) * STEP + (0.0 if kind == "image" else STEP / 2)
+        # Planos: cuando la imagen cambia mucho de un segundo al siguiente
+        shots, a = [], 0.0
+        for i in range(1, n):
+            if float(vf_[i] @ vf_[i - 1]) < SHOT_CUT:
+                shots.append((a, i * STEP))
+                a = i * STEP
+        shots.append((a, max(a + STEP, duration if kind != "image" else STEP)))
+        lb = letterbox_ratio(np.stack(self.sample)) if len(self.sample) >= 2 else 0.0
+        res = {"times": np.concatenate([t, t]), "vecs": np.concatenate([vf_, vc_]).astype(np.float32),
+               "shots": np.array(shots, np.float32), "letterbox": float(lb)}
+        np.savez_compressed(_deep_path(path), times=res["times"], vecs=res["vecs"].astype(np.float16),
+                            shots=res["shots"], letterbox=res["letterbox"])
+        return res
 
 
 # --------------------------------------------------------------------- entidades

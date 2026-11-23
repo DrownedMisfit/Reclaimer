@@ -79,7 +79,7 @@ class CaptionView(QWidget):
             self.cues = SUBS.build_cues(p, mid, max_chars=sug.max_chars, max_lines=sug.max_lines, style=sug,
                                         max_words=sug.max_words)
             self.info.setText("💡 Sugerencia de lo que saldría en pantalla (a lo mucho 3 palabras). Para ponerlo en "
-                              "el video: pestaña «Subtítulos» → «⚡ Subtítulos para Short». Doble clic = corregir.")
+                              "el video: pestaña «Subtítulos» → «⚡ Subtítulos». Doble clic = corregir.")
         else:
             self.cues = []
             self.info.setText("Sin transcripción: transcríbela en la pestaña «IA ✨» → «🎙 Transcribir».")

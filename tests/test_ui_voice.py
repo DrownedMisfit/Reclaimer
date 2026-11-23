@@ -9,6 +9,24 @@ import os
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -122,7 +140,10 @@ def main():
     ctrl.set_emphasis([idx], True)
     win.subtitles.preset.setCurrentText("YouTube clásico")
     pump(app, 0.3)
-    win.transcript._seek_word(idx)
+    # (ir a la palabra: clic en ella o clic derecho → «Ir a esta palabra», que es _seek_anchor de su aparición)
+    pump(app, 0.3)
+    k = next(k for k, an in enumerate(win.transcript._anc) if an.i == idx)
+    win.transcript._seek_anchor(k)
     pump(app, 0.5)
     assert win.preview.canvas.subs._cue is not None, "no hay subtítulo en el visor"
     win.grab().save(os.path.join(out, "5_subtitulos.png"))

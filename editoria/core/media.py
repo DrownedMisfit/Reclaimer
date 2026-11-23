@@ -59,6 +59,50 @@ def ffprobe() -> str:
     return exe
 
 
+_TRABAJO_WIN: list = []
+
+
+def atar_a_reclaimer(proc) -> bool:
+    """🔒 Mete un proceso hijo (p. ej. FFmpeg) en un «Job Object» de Windows con KILL_ON_JOB_CLOSE: si Reclaimer muere
+    de golpe (cuelgue, Administrador de tareas, os._exit…), Windows cierra también ese proceso, aunque esté en pausa
+    (suspendido). Solo para procesos que no deben sobrevivir a Reclaimer (análisis); nunca para lo que el usuario abre."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        if not _TRABAJO_WIN:
+            job = k32.CreateJobObjectW(None, None)
+            if not job:
+                return False
+
+            class _Basic(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class _Io(ctypes.Structure):
+                _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+            class _Ext(ctypes.Structure):
+                _fields_ = [("Basic", _Basic), ("Io", _Io), ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+            info = _Ext()
+            info.Basic.LimitFlags = 0x2000          # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not k32.SetInformationJobObject(wintypes.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info)):
+                k32.CloseHandle(wintypes.HANDLE(job))
+                return False
+            _TRABAJO_WIN.append(job)            # (el asa vive mientras viva Reclaimer: al morir, se cierra sola)
+        return bool(k32.AssignProcessToJobObject(wintypes.HANDLE(_TRABAJO_WIN[0]), wintypes.HANDLE(int(proc._handle))))
+    except Exception:  # noqa: BLE001 - sin esto, todo sigue igual que antes
+        return False
+
+
 def run_quiet(args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
     # stdin cerrado: FFmpeg nunca se queda esperando al teclado
     return subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL,

@@ -178,7 +178,7 @@ def plan(media_id: str, mat: list[tuple[float, float]], holes: list[tuple[float,
             s0, s1 = segs[pick]
             rem = g1 - t
             L = min(want, rem)
-            if rem - L < max(MIN_PIECE, lo * 0.5):       # no dejar un trocito suelto al final del hueco
+            if rem - L < max(MIN_PIECE, lo):             # no dejar al final del hueco un trozo más corto que el mínimo
                 L = rem if rem <= hi * 1.25 else (rem - lo if rem - lo >= lo else rem / 2)
             L = min(L, s1 - s0)
             left = (s1 - s0) - L

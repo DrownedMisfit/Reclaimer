@@ -76,7 +76,8 @@ def is_active(fx: dict | None) -> bool:
 
 
 # ------------------------------------------------------------- desenfoque por zonas (cuadro / círculo)
-# fx["blur_regions"] = [{"shape": "rect"|"ellipse", "x", "y" (centro), "w", "h" (tamaño), "amount" 0–1}]
+# fx["blur_regions"] = [{"shape": "rect"|"ellipse", "x", "y" (centro), "w", "h" (tamaño), "amount" 0–1,
+#                        "mode": "blur" | "pixel" (🙈 pixelado, para censurar; sin «mode» = desenfoque)}]
 # todo en fracciones de la caja del clip (lo que ves de ese clip en pantalla).
 def blur_regions(fx: dict | None) -> list[dict]:
     out = []
@@ -85,8 +86,11 @@ def blur_regions(fx: dict | None) -> list[dict]:
             w, h = min(1.0, max(0.02, float(r["w"]))), min(1.0, max(0.02, float(r["h"])))
             x = min(1 - w / 2, max(w / 2, float(r["x"])))
             y = min(1 - h / 2, max(h / 2, float(r["y"])))
-            out.append({"shape": "ellipse" if r.get("shape") == "ellipse" else "rect", "x": x, "y": y, "w": w,
-                        "h": h, "amount": min(1.0, max(0.05, float(r.get("amount", 0.6))))})
+            z = {"shape": "ellipse" if r.get("shape") == "ellipse" else "rect", "x": x, "y": y, "w": w,
+                 "h": h, "amount": min(1.0, max(0.05, float(r.get("amount", 0.6))))}
+            if r.get("mode") == "pixel":
+                z["mode"] = "pixel"      # (🙈 el visor pixela igual: motion_track.block_px, relativo al tamaño)
+            out.append(z)
         except (KeyError, TypeError, ValueError):
             continue
     return out
@@ -99,9 +103,10 @@ def new_region(shape: str, box_w: float, box_h: float) -> dict:
     return {"shape": shape, "x": 0.5, "y": 0.5, "w": w, "h": h, "amount": 0.6}
 
 
-def region_blur_graph(regions: list[dict], k: int) -> str:
+def region_blur_graph(regions: list[dict], k: int, bw: int = 0, bh: int = 0) -> str:
     """Trozo de filtergraph de FFmpeg: [rz{k}] → zonas desenfocadas → [ro{k}]. Con expresiones relativas al
-    tamaño (iw/ih), así vale para cualquier caja. El círculo lleva el borde suavizado."""
+    tamaño (iw/ih), así vale para cualquier caja. El círculo lleva el borde suavizado. Las zonas «pixel» se pixelan
+    (bloques del tamaño de motion_track.block_px, como en el visor; hace falta el tamaño de la caja bw × bh)."""
     parts = []
     n = len(regions)
     for i, r in enumerate(regions):
@@ -113,6 +118,10 @@ def region_blur_graph(regions: list[dict], k: int) -> str:
         k_rad = 0.04 + 0.16 * r["amount"]
         blur = (f"boxblur=lr='max(1,min(w,h)*{k_rad:.3f})':lp=3"
                 f":cr='max(1,min(cw,ch)*{k_rad:.3f})':cp=3")
+        if r.get("mode") == "pixel" and bw > 0 and bh > 0:
+            from .motion_track import block_px
+            px = block_px(r["w"] * bw, r["h"] * bh, r["amount"], "pixel")
+            blur = f"pixelize=width={px}:height={px}"
         mask = ""
         if r["shape"] == "ellipse":
             mask = (",format=yuva420p,geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)'"
@@ -449,12 +458,19 @@ def ffmpeg_filters(fx: dict | None, dur: float, w: int, h: int, fps: float = 30.
     return out
 
 
+def audio_fades(fx) -> tuple[float, float]:
+    """(entrada, salida) en segundos de los fundidos de SONIDO de un clip: los tuyos (fade_in / fade_out) o los
+    automáticos de la regla «Fundidos automáticos» (afade_in / afade_out, solo en pistas de audio), el mayor."""
+    fx = fx or {}
+    return (max(float(fx.get("fade_in", 0) or 0), float(fx.get("afade_in", 0) or 0)),
+            max(float(fx.get("fade_out", 0) or 0), float(fx.get("afade_out", 0) or 0)))
+
+
 def fade_gain(fx, local: float, dur: float) -> float:
     """Volumen (0…1) por los fundidos de entrada/salida del clip en el segundo «local» (para escucharlo en el visor;
-    al exportar lo hace «afade»)."""
-    fx = fx or {}
+    al exportar lo hace «afade»). Cuenta también los automáticos (ver audio_fades)."""
     g = 1.0
-    fin, fout = float(fx.get("fade_in", 0) or 0), float(fx.get("fade_out", 0) or 0)
+    fin, fout = audio_fades(fx)
     if fin > 0:
         g = min(g, max(0.0, local / fin))
     if fout > 0:

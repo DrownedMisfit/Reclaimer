@@ -10,7 +10,8 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from . import help as AYUDA
-from .theme import ACCENT, TEXT_DIM
+from . import theme as _theme
+from .theme import TEXT_DIM
 
 VERDE = "#7fd1ae"
 
@@ -27,7 +28,7 @@ class _Paso(QFrame):
         g.setContentsMargins(10, 8, 10, 8)
         g.setHorizontalSpacing(10)
         self.num = QLabel(str(numero))
-        self.num.setStyleSheet(f"font-size: 20pt; font-weight: 700; color: {ACCENT};")
+        self.num.setStyleSheet(f"font-size: 20pt; font-weight: 700; color: {_theme.ACCENT};")
         self.num.setMinimumWidth(30)
         self.num.setAlignment(Qt.AlignCenter)
         g.addWidget(self.num, 0, 0, 3, 1, Qt.AlignTop)
@@ -79,7 +80,7 @@ class GuidedPanel(QWidget):
         lay.setSpacing(6)
 
         self.p1 = _Paso(1, "🗂 Importar", "Trae tus archivos (narración, gameplay, música…) a Medios.")
-        self.p1.boton("Abrir Medios", "Ve a la página Medios para importar o revisar tus archivos.",
+        self.p1.boton("Abrir Medios", "Abre el panel Medios para importar o revisar tus archivos.",
                       lambda: win.go_page("media"))
         self.p2 = _Paso(2, "✂ Quitar silencios", "Quita los silencios y las pausas de la narración.")
         self.p2.boton("Eliminar silencio…", "Abre «✂ Eliminar silencio» (el mismo diálogo que el menú).",
@@ -92,14 +93,14 @@ class GuidedPanel(QWidget):
                                       "Ctrl+Z las deshace todas).", self._aplicar_todas)
         self.p4 = _Paso(4, "🎬 Clips para lo que dices",
                         "Lo que dices en la narración y el material que tienes para cada palabra.")
-        self.p4.boton("Ver", "Muestra el panel 🎬 Clips.", lambda: win.show_panel(win.clips))
+        self.p4.boton("Ver", "Abre «Voz y texto → 4 · Palabras clave».", lambda: win.show_panel(win.clips))
         self.p5 = _Paso(5, "✓ Revisión guiada", "Recorre con teclas solo lo dudoso: la voz, los cortes, los avisos y "
                         "el B-roll que la IA no tiene claro.")
         self.p5.boton("Empezar", "Abre la revisión guiada (Ctrl+Shift+Q).", lambda: win.open_quick_review())
         self.p6 = _Paso(6, "🖼 Miniatura", "Diseña la miniatura del video.")
         self.p6.boton("Abrir", "Ve a la página Miniatura.", lambda: win.go_page("thumb"))
         self.p7 = _Paso(7, "🚀 Entrega", "Exporta el video terminado.")
-        self.p7.boton("Exportar", "Ve a la página Entrega (exportar).", lambda: win.go_page("deliver"))
+        self.p7.boton("Exportar", "Ve a la página 🚀 Entrega, abajo (exportar; también Ctrl+E).", lambda: win.go_page("deliver"))
         self.pasos = [self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7]
         # Escalonado: los pasos en tres partes plegables (clic en su título = abrir o cerrar; se recuerda)
         from .tabs import Section

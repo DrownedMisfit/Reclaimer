@@ -38,6 +38,15 @@ def pump(app, s):
         time.sleep(0.02)
 
 
+def _todas(menu):           # (todas las opciones, también las de los submenús: «Más ▸», «IA ▸»…)
+    out = []
+    for x in menu.actions():
+        out.append(x)
+        if x.menu() is not None:
+            out += _todas(x.menu())
+    return out
+
+
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
@@ -88,7 +97,7 @@ def main():
         tl._clip_menu(p.clips[b], tl.mapToGlobal(QPoint(10, 10)))
     finally:
         help_ui.exec_menu = orig_exec
-    act = next(x for x in menu_holder["m"].actions() if x.text().startswith("Bloquear clip"))
+    act = next(x for x in _todas(menu_holder["m"]) if x.text().startswith("Bloquear clip"))   # (en «Más ▸»)
     act.trigger()
     assert p.clips[a].locked and p.clips[b].locked, "con mezcla, bloquea todos (como Ctrl+L)"
     ctrl.set_clip_props([a, b], "unlock", locked=False)

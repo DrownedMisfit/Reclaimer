@@ -10,6 +10,24 @@ import subprocess
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -107,9 +125,15 @@ def main():
     c.close_gaps_on("video")
     assert spans(p, v2.id) == [(0, 5), (5, 10)] and spans(p, nar.id) == [(0, 4), (6, 10)]
     c.undo_stack.undo()
-    win.timeline.set_selection([p.clips_on(music.id)[0].id])
+    # (como con el ratón: clic en un clip de la música = ese clip y su canal; antes la prueba solo cambiaba la
+    #  selección y se quedaba elegido el canal de la narración del clic en su hueco, que manda)
+    jm = p.track_index(music.id)
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_for(5.0)), int(tl.track_y(jm) + tl.track_h(jm) / 2)))
+    pump(app, 0.2)
+    assert tl.channel_ids() == [music.id], tl.channel_ids()
     win._close_gaps_selected_track()
-    assert spans(p, music.id) == [(0, 1), (1, 9.5)] and spans(p, nar.id) == [(0, 4), (6, 10)]
+    assert spans(p, music.id) == [(0, 1), (1, 9.5)] and spans(p, nar.id) == [(0, 4), (6, 10)], (
+        spans(p, music.id), spans(p, nar.id), win.timeline.channel_ids(), music.id, nar.id)
     c.undo_stack.undo()
     c.close_gaps_on(None)
     assert all(len(spans(p, t.id)) < 2 or spans(p, t.id)[1][0] == spans(p, t.id)[0][1]

@@ -2,7 +2,9 @@
 🎭 PNGTuber: tu avatar en PNG en el video, abriendo la boca cuando hablas y parpadeando.
 
 Eliges (o creas y guardas en «Mis PNGTubers») las imágenes del avatar, de qué audio sale la voz, la sensibilidad, el
-parpadeo, el rebote, el tamaño y la esquina. «🎭 Crear y poner en la línea de tiempo» crea un video sobre verde
+parpadeo, el rebote, el tamaño y la esquina; en «😄 Reacciones», a qué categorías de palabras reacciona (saluda con
+«hola», salta de alegría con «genial», se sobresalta con «¿qué?»…; core/categorias_palabras.py) con una imagen opcional
+para cada una y la lista de qué palabras activaron qué. «🎭 Crear y poner en la línea de tiempo» crea un video sobre verde
 (core/pngtuber.py) en segundo plano, lo importa a Medios y lo pone en una pista de video por encima de todo, con la
 🟩 Pantalla verde y sin sonido, en UN paso de Ctrl+Z. Se ve igual en el visor y al exportar.
 
@@ -17,8 +19,9 @@ import numpy as np
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton,
-                               QSizePolicy, QSlider, QToolButton, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                               QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QTabWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ..core import media as media_tools
 from ..core import pngtuber as PT
@@ -71,6 +74,22 @@ class _Hueco(QToolButton):
         m = QMenu(self)
         m.addAction("✕ Quitar esta imagen", lambda: (self.poner(""), self._cambio()))
         m.exec(self.mapToGlobal(pos))
+
+
+class _HuecoMini(_Hueco):
+    """La imagen opcional de una reacción: un botón pequeño (🖼 sin imagen; su miniatura con ella)."""
+
+    def __init__(self, clave: str, nombre: str, ayuda: str, cambio):
+        super().__init__(clave, nombre, False, ayuda, cambio)
+        self.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.setIconSize(QSize(30, 30))
+        self.setFixedSize(40, 40)
+
+    def poner(self, ruta: str):
+        super().poner(ruta)
+        self.setToolButtonStyle(Qt.ToolButtonIconOnly if self.ruta else Qt.ToolButtonTextOnly)
+        self.setText("" if self.ruta else "🖼")
+        self.setStyleSheet("")
 
 
 class _Onda(QWidget):
@@ -208,8 +227,14 @@ class PNGTuberDialog(QDialog):
         form.addRow("", self.rebote)
         form.addRow("📏 Tamaño:", tam)
         form.addRow("📍 Posición:", self.posicion)
-        caja_ajustes = QGroupBox("⚙ Cómo se mueve")
+        caja_ajustes = QWidget()
         caja_ajustes.setLayout(form)
+        self.pestanas = QTabWidget()
+        self.pestanas.addTab(caja_ajustes, "⚙ Cómo se mueve")
+        self.pestanas.addTab(self._tab_reacciones(), "😄 Reacciones")
+        self.pestanas.setTabToolTip(1, "El avatar reacciona a lo que dices: saluda con «hola», salta de alegría con "
+                                       "«genial», se sobresalta con «¿qué?», se encoge con «qué pena»… (necesita la "
+                                       "transcripción de la voz)")
 
         # ---- vista previa
         self.vista = QLabel()
@@ -248,7 +273,7 @@ class PNGTuberDialog(QDialog):
         abajo.addWidget(btn_cerrar)
 
         medio = QGridLayout()
-        medio.addWidget(caja_ajustes, 0, 0)
+        medio.addWidget(self.pestanas, 0, 0)
         medio.addWidget(caja_vista, 0, 1)
         medio.setColumnStretch(0, 1)
         lay = QVBoxLayout(self)
@@ -275,6 +300,8 @@ class PNGTuberDialog(QDialog):
         self.parpadeo.currentIndexChanged.connect(lambda _i: self._recalc.start())
         self.rebote.toggled.connect(lambda _v: self._recalc.start())
         self.tamano.valueChanged.connect(self._tam_texto)
+        for cb in self.reac_cb.values():
+            cb.toggled.connect(lambda _v: self._recalc.start())
         self.ctrl.peaks_changed.connect(self._picos_llegaron)
         if self.modelos.count() > 1:
             self.modelos.setCurrentIndex(1)              # el primero de «Mis PNGTubers»
@@ -282,20 +309,120 @@ class PNGTuberDialog(QDialog):
         self._recalcular()
         self.timer.start()
 
+    # ------------------------------------------------------------------ 😄 reacciones
+    def _tab_reacciones(self) -> QWidget:
+        from ..core import categorias_palabras as CP
+        cont = QWidget()
+        v = QVBoxLayout(cont)
+        v.setContentsMargins(4, 4, 4, 4)
+        rejilla = QGridLayout()
+        rejilla.setHorizontalSpacing(6)
+        self.reac_cb: dict[str, QCheckBox] = {}
+        self.reac_img: dict[str, _HuecoMini] = {}
+        for i, (k, nombre, reac, dur) in enumerate(PT.REACCIONES):
+            cat = CP.POR_CLAVE_PNGTUBER[k]
+            cb = QCheckBox(nombre)
+            cb.setToolTip(f"Cuando dices palabras como «{cat.get('ejemplos', '')}…», el avatar "
+                          f"{PT.DESC_REACCION.get(reac, reac)} (unos {dur:g} s).\nQuítala si no la quieres.")
+            hb = _HuecoMini("r_" + k, nombre, f"Imagen opcional para «{nombre}»: si la eliges, el avatar la "
+                                              f"enseña mientras dura la reacción (p. ej. con los brazos arriba, "
+                                              f"saludando con la mano…). Sin ella, se anima su imagen normal.",
+                            self._modelo_cambiado)
+            self.reac_cb[k] = cb
+            self.reac_img[k] = hb
+            fila, col = divmod(i, 2)
+            rejilla.addWidget(hb, fila, col * 2)
+            rejilla.addWidget(cb, fila, col * 2 + 1)
+        rejilla.setColumnStretch(1, 1)
+        rejilla.setColumnStretch(3, 1)
+        v.addLayout(rejilla)
+        t = QLabel("Qué palabras lo activan")
+        t.setObjectName("dim")
+        t.setWordWrap(True)
+        v.addWidget(t)
+        self.reac_lista = QListWidget()
+        self.reac_lista.setWordWrap(True)
+        self.reac_lista.setMinimumHeight(90)
+        self.reac_lista.setToolTip("Cada reacción, con la palabra que la provoca y cuándo. Clic = verla en la vista "
+                                   "previa.")
+        self.reac_lista.itemClicked.connect(self._ver_reaccion)
+        v.addWidget(self.reac_lista, 1)
+        caja = QScrollArea()
+        caja.setWidgetResizable(True)
+        caja.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        caja.setFrameShape(QScrollArea.NoFrame)
+        caja.setWidget(cont)
+        caja.setMinimumWidth(cont.minimumSizeHint().width() + caja.verticalScrollBar().sizeHint().width() + 4)
+        self._eventos: list[dict] = []
+        self._pal_cache: tuple | None = None
+        return caja
+
+    def _palabras(self, c: Clip) -> list:
+        """Lo que dices mientras dura ese clip (segundos de la línea de tiempo): su transcripción o, si no tiene, la
+        de lo que suene en ese tramo."""
+        from ..core import categorias_palabras as CP
+        p = self.ctrl.project
+        clave = (c.id, round(c.start, 3), round(c.duration, 3), round(c.source_in, 3),
+                 tuple(sorted((k, len(v.get("words", []))) for k, v in (p.transcripts or {}).items())))
+        if self._pal_cache is not None and self._pal_cache[0] == clave:
+            return self._pal_cache[1]
+        mid = c.media_id if c.media_id in (p.transcripts or {}) else None
+        ws = CP.palabras_linea(p, c.start, c.start + c.duration, mid)
+        self._pal_cache = (clave, ws)
+        return ws
+
+    def _reacciones(self, c: Clip, n: int) -> list[dict]:
+        activas = [k for k, cb in self.reac_cb.items() if cb.isChecked()]
+        if not activas:
+            return []
+        return PT.eventos_reaccion(self._palabras(c), c.start, n, activas, FPS)
+
+    def _llenar_reacciones(self, c: Clip | None):
+        self.reac_lista.clear()
+        nombres = {k: n for k, n, _r, _d in PT.REACCIONES}
+        if c is None:
+            return
+        if not self._eventos:
+            if not self._palabras(c):
+                txt = "Sin transcripción de esta voz: transcríbela (🎙) para que el avatar reaccione a lo que dices."
+            elif not any(cb.isChecked() for cb in self.reac_cb.values()):
+                txt = "Todas las reacciones están quitadas."
+            else:
+                txt = "No dices ninguna palabra de las categorías marcadas."
+            it = QListWidgetItem(txt)
+            it.setFlags(Qt.NoItemFlags)
+            self.reac_lista.addItem(it)
+            return
+        for ev in self._eventos:
+            it = QListWidgetItem(f"{fmt_time(ev['t'], frac=False)}  {nombres.get(ev['cat'], ev['cat'])} ← "
+                                 f"«{ev['palabra']}»")
+            it.setData(Qt.UserRole, ev["i0"])
+            self.reac_lista.addItem(it)
+
+    def _ver_reaccion(self, it):
+        i0 = it.data(Qt.UserRole)
+        if i0 is None or not self._ests:
+            return
+        n = len(self._ests)
+        self._bucle = (max(0, int(i0) - FPS // 3), min(n, int(i0) + int(2.5 * FPS)))
+        self._frame = self._bucle[0]
+
     # ------------------------------------------------------------------ modelo
     def modelo(self) -> dict:
-        return {"nombre": self.nombre.text().strip() or "Mi PNGTuber",
-                "imagenes": {k: h.ruta for k, h in self.huecos.items() if h.ruta},
-                "ajustes": self.ajustes()}
+        imgs = {k: h.ruta for k, h in self.huecos.items() if h.ruta}
+        imgs.update({"r_" + k: h.ruta for k, h in self.reac_img.items() if h.ruta})
+        return {"nombre": self.nombre.text().strip() or "Mi PNGTuber", "imagenes": imgs, "ajustes": self.ajustes()}
 
     def set_imagen(self, clave: str, ruta: str):
-        self.huecos[clave].poner(ruta)
+        hueco = self.huecos.get(clave) or self.reac_img[clave[2:]]
+        hueco.poner(ruta)
         self._modelo_cambiado()
 
     def ajustes(self) -> dict:
         return {"sensibilidad": self.sens.value() / 100.0, "parpadeo": self.parpadeo.currentData(),
                 "rebote": self.rebote.isChecked(), "tamano": self.tamano.value() / 100.0,
-                "posicion": self.posicion.currentData()}
+                "posicion": self.posicion.currentData(),
+                "reacciones": [k for k, cb in self.reac_cb.items() if cb.isChecked()]}
 
     def _ajustes_a_ui(self, a: dict):
         a = dict(PT.AJUSTES, **(a or {}))
@@ -304,6 +431,10 @@ class PNGTuberDialog(QDialog):
         self.rebote.setChecked(bool(a["rebote"]))
         self.tamano.setValue(int(round(float(a["tamano"]) * 100)))
         self.posicion.setCurrentIndex(max(0, self.posicion.findData(a["posicion"])))
+        activas = a.get("reacciones")
+        activas = set(activas) if isinstance(activas, (list, tuple)) else set(PT.AJUSTES["reacciones"])
+        for k, cb in self.reac_cb.items():
+            cb.setChecked(k in activas)
         self._tam_texto()
 
     def _tam_texto(self, *_a):
@@ -327,7 +458,7 @@ class PNGTuberDialog(QDialog):
         if arch == NUEVO:
             self._modelo_archivo = ""
             self.nombre.clear()
-            for h in self.huecos.values():
+            for h in list(self.huecos.values()) + list(self.reac_img.values()):
                 h.poner("")
             self._modelo_cambiado()
             return
@@ -338,8 +469,11 @@ class PNGTuberDialog(QDialog):
         self.nombre.setText(m["nombre"])
         for k, h in self.huecos.items():
             h.poner(m["imagenes"].get(k, ""))
+        for k, h in self.reac_img.items():
+            h.poner(m["imagenes"].get("r_" + k, ""))
         self._ajustes_a_ui(m["ajustes"])
         perdidas = [n for k, n, _o, _d in PT.IMAGENES if m["imagenes"].get(k) and not self.huecos[k].ruta]
+        perdidas += [n for k, n in PT.IMAGENES_REACCION if m["imagenes"].get(k) and not self.reac_img[k[2:]].ruta]
         self._modelo_cambiado()
         if perdidas:
             self.estado.setText("⚠ No se encuentran: " + ", ".join(perdidas) + ". Vuelve a elegirlas.")
@@ -470,6 +604,8 @@ class PNGTuberDialog(QDialog):
         c = self.clip_audio()
         if c is None:
             self._ests = []
+            self._eventos = []
+            self._llenar_reacciones(None)
             self.onda.texto = "Sin audio"
             self.onda.update()
             self._actualizar_boton()
@@ -484,6 +620,9 @@ class PNGTuberDialog(QDialog):
         kw = self._parametros(c)
         ini, fin = kw.pop("inicio"), kw.pop("fin")
         self._ests = PT.estados(pk, media_tools.PEAK_RATE, ini, fin, **kw)
+        self._eventos = self._reacciones(c, len(self._ests))
+        self._ests = PT.aplicar_reacciones(self._ests, self._eventos, FPS)
+        self._llenar_reacciones(c)
         vol = PT.volumen_por_fotograma(pk, media_tools.PEAK_RATE, ini, fin, FPS, kw["velocidad"])
         abrir, _cerrar, _entera, ref = PT.umbrales(vol, kw["sensibilidad"])
         abierta = np.array([e.boca_abierta for e in self._ests], bool)
@@ -507,7 +646,8 @@ class PNGTuberDialog(QDialog):
         e = self._ests[self._frame]
         self.onda.cabezal = self._frame
         self.onda.update()
-        self.vista_t.setText(fmt_time((self._frame) / FPS, frac=False))
+        nombre = dict((k, n) for k, n, _r, _d in PT.REACCIONES).get(e.reaccion, "")
+        self.vista_t.setText(fmt_time((self._frame) / FPS, frac=False) + (f"  ·  {nombre}" if nombre else ""))
         self._dibujar(e)
         self._frame += 1
 
@@ -530,9 +670,21 @@ class PNGTuberDialog(QDialog):
             px = self._pix.get(clave) or self._pix.get("cerrada")
             if px is not None:
                 alto_real = PT.alto_en_px(self.tamano.value() / 100, self.ctrl.project.height)
-                k = px.height() / max(1, alto_real)
-                sube = int(round((e.rebote_px if e is not None else 0.0) * k))
-                q.drawPixmap((W - px.width()) // 2, H - px.height() - sube, px)
+                zoom = 0.8 if self._eventos else 1.0     # (con reacciones: sitio para saltar sin salirse)
+                k = px.height() * zoom / max(1, alto_real)
+                sube = (e.rebote_px if e is not None else 0.0) * k
+                q.save()
+                q.setRenderHint(QPainter.SmoothPixmapTransform)
+                ih = px.height() * zoom
+                if e is not None and e.movido():
+                    q.translate(W / 2 + e.dx * ih, H - sube + e.dy * ih)
+                    q.rotate(e.giro)
+                    q.scale(e.escala * zoom, e.escala * zoom)
+                else:
+                    q.translate(W / 2, H - sube)
+                    q.scale(zoom, zoom)
+                q.drawPixmap(int(-px.width() / 2), -px.height(), px)
+                q.restore()
         else:
             q.setPen(QColor(170, 170, 170))
             q.drawText(QRectF(0, 0, W, H), Qt.AlignCenter, "Elige «😐 Boca cerrada»\ny «😮 Boca abierta»")
@@ -563,6 +715,8 @@ class PNGTuberDialog(QDialog):
         m = p.media_of(c)
         kw = self._parametros(c)
         ini, fin = kw.pop("inicio"), kw.pop("fin")
+        n = max(1, int(round((fin - ini) / max(1e-3, float(kw.get("velocidad") or 1.0)) * FPS)))
+        eventos = self._reacciones(c, n)
         alto = PT.alto_en_px(self.tamano.value() / 100.0, p.height)
         fondo = PT.fondo_para(modelo)
         nombre = "".join(ch for ch in modelo["nombre"] if ch.isalnum() or ch in " -_")[:40].strip() or "PNGTuber"
@@ -578,7 +732,7 @@ class PNGTuberDialog(QDialog):
             if pk is None:
                 progress(0.0, "Leyendo el sonido…")
                 pk = media_tools.waveform_peaks(ruta_audio)
-            ests = PT.estados(pk, media_tools.PEAK_RATE, ini, fin, **kw)
+            ests = PT.aplicar_reacciones(PT.estados(pk, media_tools.PEAK_RATE, ini, fin, **kw), eventos, FPS)
             return PT.renderizar(modelo, ests, salida, alto, FPS, progress, cancelled, verde=fondo)
 
         self.job = BackgroundJob(work, self)

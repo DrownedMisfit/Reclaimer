@@ -15,6 +15,15 @@ from ..core.model import KIND_AUDIO, KIND_IMAGE, KIND_VIDEO
 from .common import fmt_time
 
 
+def _filas(pares: list[tuple[str, str]]) -> str:
+    """Filas «etiqueta · valor» (la etiqueta gris en su columna, el valor partido en líneas si no cabe)."""
+    import html
+    from . import diseno as D
+    filas = "".join(f"<tr><td style='color:{D.GRIS_TITULO}; padding-right:8px; white-space:nowrap'>"
+                    f"{html.escape(k)}</td><td>{html.escape(v)}</td></tr>" for k, v in pares)
+    return f"<table cellspacing='0' cellpadding='1'>{filas}</table>"
+
+
 class ClipMaterialPanel(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -39,6 +48,7 @@ class ClipMaterialPanel(QWidget):
         self.info = QLabel()
         self.info.setWordWrap(True)
         self.info.setObjectName("dim")
+        self.info.setTextFormat(Qt.RichText)          # (🎨 20/11: filas «etiqueta · valor», ver _filas)
         self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         lay.addWidget(self.info)
         g = QGridLayout()
@@ -53,6 +63,7 @@ class ClipMaterialPanel(QWidget):
         for k, b in enumerate((self.b_similar, self.b_example, self.b_tags, self.b_media)):
             g.addWidget(b, k // 2, k % 2)
         lay.addLayout(g)
+        self._rejilla, self._lay = g, lay
         lay.addStretch(1)
         win.timeline.selection_changed.connect(self.set_selection)
         self.ctrl.project_changed.connect(lambda: self.set_selection(self._sel))
@@ -68,6 +79,21 @@ class ClipMaterialPanel(QWidget):
         if tree is not None:                      # (solo un clic tuyo: si Medios se rehace solo, no cambia)
             tree.itemClicked.connect(lambda *_a: self._medios_elegido())
         self.set_selection([])
+
+    def en_columna(self):
+        """Para ir dentro de otro panel estrecho (Inspector → Archivo): sin márgenes propios, botones en una columna y
+        la imagen se ajusta al ancho que le den (nunca lo ensancha)."""
+        from PySide6.QtWidgets import QSizePolicy
+        self._lay.setContentsMargins(0, 4, 0, 4)
+        for k, b in enumerate((self.b_similar, self.b_example, self.b_tags, self.b_media)):
+            self._rejilla.addWidget(b, k, 0)
+            b.setMinimumWidth(0)
+        self.pic.setSizePolicy(QSizePolicy.Ignored, self.pic.sizePolicy().verticalPolicy())
+        self.pic.setMinimumWidth(0)
+        for lab in (self.title, self.info):
+            lab.setMinimumWidth(0)
+            lab.setSizePolicy(QSizePolicy.Ignored, lab.sizePolicy().verticalPolicy())
+        self.setSizePolicy(QSizePolicy.Ignored, self.sizePolicy().verticalPolicy())
 
     def _reproduciendo(self) -> bool:
         return bool(getattr(getattr(self.win, "engine", None), "playing", False))
@@ -151,28 +177,31 @@ class ClipMaterialPanel(QWidget):
         self.pic.setVisible(m.kind in (KIND_VIDEO, KIND_IMAGE))
         visual = m.kind in (KIND_VIDEO, KIND_IMAGE)
         self._botones(*([self.b_similar, self.b_example] if visual else []), self.b_tags, self.b_media)
-        tipo = {KIND_VIDEO: "🎞 Video", KIND_IMAGE: "🖼 Imagen", KIND_AUDIO: "🔊 Audio"}.get(m.kind, m.kind)
+        tipo = {KIND_VIDEO: "Video", KIND_IMAGE: "Imagen", KIND_AUDIO: "Audio"}.get(m.kind, m.kind)
         self.title.setText(("▶ En el cabezal: " if origen == "cabezal" else "") + m.name)
-        lineas = [f"{tipo} · en la línea de tiempo del {fmt_time(c.start)} al {fmt_time(c.end)} "
-                  f"({c.duration:.1f} s)"]
+        filas = [("Tipo", tipo),
+                 ("En la línea", f"{fmt_time(c.start)} – {fmt_time(c.end)} ({c.duration:.1f} s)")]
+        ayuda = []
         if m.kind != KIND_IMAGE:
             a = c.source_in
-            lineas.append(f"Del archivo: del {fmt_time(a)} al {fmt_time(a + c.duration * (c.speed or 1.0))}"
-                          + (f" de {fmt_time(m.duration)}" if m.duration else "")
-                          + ("  ·  ⇆ Alt + rueda encima del clip cambia la parte que enseña" if m.kind == KIND_VIDEO
-                             else ""))
+            filas.append(("Del archivo", f"{fmt_time(a)} – {fmt_time(a + c.duration * (c.speed or 1.0))}"
+                          + (f" de {fmt_time(m.duration)}" if m.duration else "")))
+            if m.kind == KIND_VIDEO:
+                ayuda.append("Alt + rueda encima del clip cambia la parte del archivo que enseña.")
         if m.ai_type or m.ai_tags:
-            lineas.append("◈ La IA ve: " + " · ".join([x for x in [m.ai_type] + list(m.ai_tags or []) if x]))
+            filas.append(("La IA ve", " · ".join([x for x in [m.ai_type] + list(m.ai_tags or []) if x])))
         elif m.kind in (KIND_VIDEO, KIND_IMAGE):
-            lineas.append("◈ La IA aún no lo ha analizado (pestaña IA ✨ → «✨ Más» → Analizar el contenido).")
+            filas.append(("La IA ve", "aún sin analizar"))
+            ayuda.append("Para que la IA lo analice: pestaña IA → «Más» → Analizar el contenido.")
         if m.tags:
-            lineas.append("Tus etiquetas: " + ", ".join(m.tags))
+            filas.append(("Etiquetas", ", ".join(m.tags)))
         if (c.note or "").strip():
-            lineas.append("Nota: " + c.note.strip())
+            filas.append(("Nota", c.note.strip()))
         uso = sum(1 for o in p.clips.values() if o.media_id == m.id)
         if uso > 1:
-            lineas.append(f"Este archivo sale {uso} veces en la línea de tiempo.")
-        self.info.setText("\n".join(lineas))
+            filas.append(("Usos", f"{uso} veces en la línea de tiempo"))
+        self.info.setText(_filas(filas))
+        self.info.setToolTip("\n".join([m.path] + ayuda))
         self.pic.setToolTip(m.path)
         key = (c.id, round(c.source_in, 2))
         if key != self._pic_key and m.kind in (KIND_VIDEO, KIND_IMAGE) and self.isVisible():
@@ -190,18 +219,21 @@ class ClipMaterialPanel(QWidget):
         visual = m.kind in (KIND_VIDEO, KIND_IMAGE)
         self.pic.setVisible(visual)
         self._botones(*([self.b_example] if visual else []), self.b_tags)
-        tipo = {KIND_VIDEO: "🎞 Video", KIND_IMAGE: "🖼 Imagen", KIND_AUDIO: "🔊 Audio"}.get(m.kind, m.kind)
-        self.title.setText("📂 En Medios: " + m.name)
-        lineas = [tipo + (f" · {fmt_time(m.duration)}" if m.duration else "")]
+        tipo = {KIND_VIDEO: "Video", KIND_IMAGE: "Imagen", KIND_AUDIO: "Audio"}.get(m.kind, m.kind)
+        self.title.setText("En Medios: " + m.name)
+        filas = [("Tipo", tipo + (f" · {fmt_time(m.duration)}" if m.duration else ""))]
+        ayuda = []
         if m.ai_type or m.ai_tags:
-            lineas.append("◈ La IA ve: " + " · ".join([x for x in [m.ai_type] + list(m.ai_tags or []) if x]))
+            filas.append(("La IA ve", " · ".join([x for x in [m.ai_type] + list(m.ai_tags or []) if x])))
         elif visual:
-            lineas.append("◈ La IA aún no lo ha analizado (pestaña IA ✨ → «✨ Más» → Analizar el contenido).")
+            filas.append(("La IA ve", "aún sin analizar"))
+            ayuda.append("Para que la IA lo analice: pestaña IA → «Más» → Analizar el contenido.")
         if m.tags:
-            lineas.append("Tus etiquetas: " + ", ".join(m.tags))
+            filas.append(("Etiquetas", ", ".join(m.tags)))
         uso = sum(1 for o in p.clips.values() if o.media_id == m.id)
-        lineas.append(f"Sale {uso} veces en la línea de tiempo." if uso else "Aún no está en la línea de tiempo.")
-        self.info.setText("\n".join(lineas))
+        filas.append(("Usos", f"{uso} veces en la línea de tiempo" if uso else "aún no está en la línea de tiempo"))
+        self.info.setText(_filas(filas))
+        self.info.setToolTip("\n".join([m.path] + ayuda))
         self.pic.setToolTip(m.path)
         key = ("medio", m.id)
         if key != self._pic_key and visual and self.isVisible():

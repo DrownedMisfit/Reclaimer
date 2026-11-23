@@ -188,7 +188,7 @@ def main():
     # 👍 / 👎 en cada fila de «Dijiste…» (a la derecha, junto a la carpeta) y «⚡ Agregar todo» arriba
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
-    assert not hasattr(panel, "btn_si") and panel.btn_todo.text() == "⚡ Agregar todo"
+    assert not hasattr(panel, "btn_si") and panel.btn_todo.text() == "Agregar todo"
     win.show_panel(panel) if hasattr(win, "show_panel") else None
     win.resize(1400, 900)
     win.show()
@@ -204,6 +204,7 @@ def main():
     pump(app, 0.2)
     assert KG.clave("Pradera Lunar") in KG.load()["si"], panel.aviso.text()
     assert os.path.isdir(os.path.join(raiz, "Pradera Lunar")), "👍 le crea la carpeta"
+    pump(app, 0.4)                                  # (la lista se rehace un momento después del clic)
     fila = next(i for i, m in enumerate(panel.menciones) if m["term"] == "Pradera Lunar")
     assert lm.item(fila).data(CP.ROL_LIKE) == "si", "el 👍 queda encendido"
     assert (panel.mencion or {}).get("term") == antes, ("pulsar 👍 no cambia la palabra elegida", antes, panel.mencion)
@@ -251,7 +252,8 @@ def main():
     assert dock.term == elegida, (dock.term, elegida)
     print(f"✓ la pestaña «🗂 Carpetas» (a la derecha) enseña la carpeta de la palabra elegida en «Dijiste…» ({elegida})")
 
-    # «Dijiste…»: tus carpetas que no dices, al final y atenuadas
+    # «Dijiste…»: tus carpetas que no dices (de otros proyectos: solo con «👁 Ver también…»), al final y atenuadas
+    CP._ajustes().setValue("clips/ver_otras_carpetas", True)
     os.makedirs(os.path.join(raiz, "Volcan Dormido"), exist_ok=True)
     _archivo(os.path.join(raiz, "Volcan Dormido", "lava.mp4"))
     panel.recalcular()
@@ -280,7 +282,7 @@ def main():
     # lo descargado va a la carpeta de la palabra ELEGIDA aunque se busque otra cosa
     if hasattr(panel, "_bajar_resultado"):
         destinos = []
-        panel._bajar_trabajo = lambda u, t, k, p_, c, a=True: (destinos.append(k), "")[1]
+        panel._bajar_trabajo = lambda u, t, k, p_, c, a=True, n=None: (destinos.append(k), "")[1]
         panel.termino = "china ccp"
         panel._bajar_resultado({"title": "x", "url": "https://x"})
         pump(app, 0.5)

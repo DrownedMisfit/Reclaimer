@@ -143,7 +143,7 @@ def _instalar_congelado_memoria(win):
     retardo.timeout.connect(lambda: _congelar_memoria(win))
     ctrl = win.ctrl
     ctrl.project_replaced.connect(lambda *_: retardo.start())
-    QTimer.singleShot(3000, lambda: _congelar_memoria(win))
+    QTimer.singleShot(3000, win, lambda: _congelar_memoria(win))   # (con la ventana como dueña: si se cierra antes, no salta)
 
 
 def marca_arranque(texto: str) -> None:
@@ -411,8 +411,7 @@ def run(argv: list[str]) -> int:
     # guardado): así nunca hay un «cierre inesperado» al cerrar.
     from .ui.task_window import stop_all
     if stop_all(4000) or not getattr(win, "_pool_idle", True):
-        sys.stdout.flush()
-        sys.stderr.flush()
-        import os
-        os._exit(rc)
+        # (antes de salir: ajustes al disco, lo pendiente de image_feedback y las demás tareas de salida)
+        from .ui.jobs import salir_sin_romper
+        salir_sin_romper(rc)
     return rc

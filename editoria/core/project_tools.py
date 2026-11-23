@@ -7,6 +7,8 @@ from .model import KIND_IMAGE, Project
 def slice_project(p: Project, a: float, b: float) -> Project:
     """Copia del proyecto con solo el tramo [a, b] de la timeline, empezando en 0.
     Sirve para escuchar/ver un trozo con todos los efectos sin exportar todo el video."""
+    from . import escena_clip                         # 🎬 (antes de cortar: un clip de escena se corta por sus piezas)
+    p = escena_clip.expandir(p)
     q = Project.from_dict(p.to_dict())
     keep = {}
     for c in q.clips.values():

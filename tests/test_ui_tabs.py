@@ -59,11 +59,17 @@ def main():
         names = lambda tw: [tw.tabText(i) for i in range(tw.count())]   # noqa: E731
         for panel in (win.effects, win.voice, win.subtitles, win.ai_panel):
             assert isinstance(panel.tabs, Escalonado), type(panel.tabs)
-        assert names(win.effects.tabs) == ["Imagen", "Transiciones", "Sonidos", "⭐ Para la IA", "✨ Lo que dices"]
+        # (18/11: Efectos por categorías; «Sonidos» va a su panel de 🎚 Audio; lo de antes, dentro de «✦ Efectos»)
+        assert names(win.effects.tabs) == ["⧉ Transiciones", "✦ Efectos", "🎨 Filtros", "▭ Figuras geométricas"]
+        assert names(win.effects.tabs_fx) == ["Efectos de imagen", "📝 Nota de texto", "⭐ Para la IA",
+                                              "✨ Lo que dices"]
         assert names(win.voice.tabs) == ["Limpiar", "Sugerencias"]        # («Transcribir» está en IA ✨)
         assert names(win.subtitles.tabs) == ["Letra", "Colores", "Posición", "Animación"]
         ia = win.ai_panel.tabs
-        assert names(ia)[:2] == ["🎙 Transcribir", "Inicio"] and "B-roll" in names(ia), names(ia)
+        # (agrupación 20/11: «🎙 Transcribir» ya no es de IA ✨: es «Voz y texto» → 1 · Transcribir)
+        assert names(ia)[0] == "Inicio" and "B-roll" in names(ia) and "🎙 Transcribir" not in names(ia), names(ia)
+        assert win.voz_texto.widget_de("transcribir") is not None and \
+            win.voz_texto.widget_de("transcribir").isAncestorOf(win.ai_panel.tr_status), "Transcribir en Voz y texto"
         win.show_panel(win.ai_panel)
         i_broll = names(ia).index("B-roll")
         sec = ia.secciones()[i_broll]

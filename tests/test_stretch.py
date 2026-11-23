@@ -1,6 +1,6 @@
 """
 Prueba de ↔ ↕ DEFORMAR el video en el visor (estirar o aplastar a lo ancho o a lo alto):
-  · las asas a media arista cambian SOLO el ancho (o solo el alto) y la imagen se estira hasta llenar la caja
+  · Alt + asa de un lado cambia SOLO el ancho (o solo el alto) y la imagen se estira hasta llenar la caja
     (sin bandas negras); la arista contraria se queda quieta; un solo paso de Ctrl+Z;
   · Shift + esquina: ancho y alto por separado; las esquinas sin Shift siguen sin deformar;
   · al exportar sale igual de deformado que en el visor; «Sin deformar» le devuelve su proporción.
@@ -102,7 +102,7 @@ def main():
 
     # 1) asa derecha (a media arista) hasta la mitad: solo el ancho; la imagen se APLASTA (sin bandas)
     n0 = ctrl.undo_stack.count()
-    drag((0.999, 0.5), (0.5, 0.5))
+    drag((0.999, 0.5), (0.5, 0.5), Qt.AltModifier)      # (22/11: el lado solo, recorta; con Alt, estira)
     lay = p.clips[top].layout
     assert lay and lay.get("fit") == "stretch", lay
     assert abs(lay["w"] - 0.5) < 0.04 and abs(lay["h"] - 1.0) < 0.01 and abs(lay["x"]) < 0.01, lay
@@ -117,7 +117,7 @@ def main():
     print("✓ al exportar: rojo|azul aplastado en la mitad izquierda (de arriba abajo), lo de debajo a la derecha")
 
     # 2) asa de abajo hacia arriba: ahora solo el alto
-    drag((0.25, 0.999), (0.25, 0.6))
+    drag((0.25, 0.999), (0.25, 0.6), Qt.AltModifier)
     lay2 = p.clips[top].layout
     assert abs(lay2["h"] - 0.6) < 0.04 and abs(lay2["w"] - lay["w"]) < 0.01 and abs(lay2["y"]) < 0.01, lay2
     fr = export("alto.mp4")
@@ -154,7 +154,7 @@ def main():
     win.timeline.set_selection([])
     win.timeline.set_selection([top])
     pump(app, 0.4)
-    drag((0.999, 0.5), (0.7, 0.5))
+    drag((0.999, 0.5), (0.7, 0.5), Qt.AltModifier)
     c = p.clips[top]
     assert c.layout.get("fit") == "stretch" and c.layout_kf and any(abs(k["w"] - 0.7) < 0.05 for k in c.layout_kf), \
         (c.layout, c.layout_kf)

@@ -48,6 +48,8 @@ def main():
         def finish():
             state["title"] = self.windowTitle()
             state["learn"] = self.btn_learning.text()
+            from editoria.core.model import TRACK_AUDIO
+            state["fx_audio"] = [dict(t.fx or {}) for t in self.ctrl.project.tracks if t.kind == TRACK_AUDIO]
             self.ctrl.undo_stack.setClean()
             self.ctrl._media_dirty = False
             self.close()
@@ -60,6 +62,10 @@ def main():
         assert e.code in (0, None), f"salió con código {e.code}"
     assert "win" in state and "Reclaimer" in state.get("title", ""), state
     assert "Aprendizaje IA" in state.get("learn", "")
+    # (22/11) proyecto nuevo: su pista de audio SIN ecualizador ni compresor (nada procesa sin pedirlo)
+    assert state.get("fx_audio") and not any(f.get("eq") or f.get("compress") for f in state["fx_audio"]), state
+    from editoria.core.model import Project
+    assert not any(t.fx for t in Project.new().tracks) and not any(t.fx for t in Project.new(minimal=True).tracks)
     crash = os.path.join(_TMP, "EditorIA", "registros", "cierres_inesperados.log")
     assert os.path.exists(crash) and "=== sesión" in open(crash, encoding="utf-8").read()
     from PySide6.QtCore import QSettings

@@ -1,7 +1,8 @@
 """
 📝 «Descripción para YouTube»: el texto completo de la descripción del video, con secciones que se activan o no:
 párrafo inicial (por proyecto), capítulos, créditos de los clips bajados, tu pie fijo (Ko-fi, redes…) y hashtags.
-Al exportar el video se guarda también «<video>.descripcion.txt» con la descripción (ver export_dialog.py).
+Al exportar, solo con la casilla «📝 Crear también la descripción (.txt)» (apagada de entrada) se guarda también
+«<video>.descripcion.txt» con la descripción (ver export_dialog.py).
 """
 from __future__ import annotations
 

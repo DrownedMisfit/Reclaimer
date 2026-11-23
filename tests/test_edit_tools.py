@@ -10,6 +10,24 @@ import subprocess
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -117,7 +135,7 @@ def main():
     args, _ = build_command(p, ExportOptions(path=os.path.join(out, "x.mp4"), audio_only=True),
                             ff, os.path.join(out, "f.txt"))
     script = open(os.path.join(out, "f.txt"), encoding="utf-8").read()
-    assert script.count(":a]aresample") == 1, script   # una sola entrada de audio: la música
+    assert script.count(":a]asetpts=PTS-STARTPTS,aresample") == 1, script   # una sola entrada de audio: la música
     from editoria.ai import audit
     issues, _n = audit.run_audit(p, ctrl.missing, ctrl.peaks)
     assert any("Solo" in str(i) for i in issues), issues

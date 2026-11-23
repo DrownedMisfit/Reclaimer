@@ -164,6 +164,34 @@ def text_rect(t: dict, W: int, H: int) -> QRectF:
     return QRectF(pos.x(), pos.y(), img.width(), img.height())
 
 
+def ink_rect(t: dict, W: int, H: int) -> QRectF:
+    """Lo que ocupan las letras (las líneas enteras, con su caja si la lleva y el contorno) en el lienzo, SIN el margen
+    de la sombra: el 📝 fondo borroso alrededor (core/nota_texto.py) y la caja para moverlo en el visor."""
+    px = float(_get(t, "size")) / 100 * H
+    font = make_font(t, px)
+    fm = QFontMetricsF(font)
+    lines = apply_case(str(t.get("content", "")), str(_get(t, "case"))).split("\n")
+    line_h = fm.height() + float(_get(t, "line_spacing")) / 100 * px
+    widths = [fm.horizontalAdvance(s) for s in lines]
+    tw = max(widths or [0.0])
+    th = line_h * len(lines) - (line_h - fm.height())
+    align = str(_get(t, "align"))
+    path = QPainterPath()
+    for i, (s, w) in enumerate(zip(lines, widths)):
+        x = -tw / 2 + (0 if align == "left" else (tw - w if align == "right" else (tw - w) / 2))
+        path.addText(QPointF(x, -th / 2 + i * line_h + fm.ascent()), font, s)
+    bound = QRectF(-tw / 2, -th / 2, tw, th).united(path.boundingRect())
+    if bool(_get(t, "box")):
+        pad_x = float(_get(t, "box_width")) / 100 * px
+        pad_y = float(_get(t, "box_height")) / 100 * px
+        bound = bound.united(QRectF(-tw / 2 - pad_x, -th / 2 - pad_y, tw + 2 * pad_x, th + 2 * pad_y).translated(
+            float(_get(t, "box_cx")) / 100 * px, float(_get(t, "box_cy")) / 100 * px))
+    stroke = float(_get(t, "stroke_size")) / 100 * px
+    bound = bound.adjusted(-stroke, -stroke, stroke, stroke)
+    tf = QTransform().rotate(-float(_get(t, "rotation"))).scale(float(_get(t, "zoom_x")), float(_get(t, "zoom_y")))
+    return tf.mapRect(bound).translated(float(_get(t, "x")) * W, float(_get(t, "y")) * H)
+
+
 # ------------------------------------------------------------------ «mi estilo» (memoria de tus valores)
 def my_style() -> dict:
     """Tus valores recordados (lo último que cambiaste de cada opción)."""

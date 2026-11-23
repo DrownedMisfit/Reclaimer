@@ -107,9 +107,9 @@ def main():
     app.processEvents()
     pg = win._scenes_widget
     nombres = [pg.sub_img.tabText(i) for i in range(pg.sub_img.count())]
-    assert nombres == ["🗂 Local", "🌐 Internet"], nombres
+    assert nombres == ["Local", "Internet"], nombres
     modos = [b.text() for b in pg._grupo_web.buttons()]
-    assert modos == ["✂ PNG recortado", "🖼 Fondo"], modos
+    assert modos == ["PNG recortado", "Fondo"], modos
     print("✓ Personajes: 🗂 Local y 🌐 Internet (dentro: ✂ PNG recortado / 🖼 Fondo)")
     llamado = []
     pg._desde_archivo = lambda tipo: llamado.append(tipo)

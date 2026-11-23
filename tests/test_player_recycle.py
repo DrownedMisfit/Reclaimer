@@ -53,6 +53,9 @@ def run():
     from editoria.ui.theme import apply_dark_theme
     apply_dark_theme(app)
     QSettings("EditorIA", "EditorIA").remove("espacios")
+    # (aquí solo cuentan los reproductores: sin «💬 Subtítulos auto», que en Edits transcribiría el video con sonido y
+    #  al cerrar preguntaría «Tarea en curso» —una ventana que, sin pantalla, nadie contesta—)
+    QSettings("EditorIA", "EditorIA").setValue("shorts/subtitulos_auto", False)
     vid = os.path.join(out, "v.mp4")
     subprocess.run([M.ffmpeg(), "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=8",
                     "-f", "lavfi", "-i", "sine=d=8", "-shortest", "-pix_fmt", "yuv420p", vid], check=True)

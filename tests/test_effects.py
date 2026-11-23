@@ -5,12 +5,21 @@ Ejecutar:  .venv/Scripts/python.exe tests/test_effects.py <carpeta_salida>
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+# 🔒 datos y caché en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar)
+_TMPROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_pruebas_tmp")
+os.makedirs(_TMPROOT, exist_ok=True)
+_TMP = tempfile.mkdtemp(prefix="reclaimer_efectos_", dir=_TMPROOT)
+__import__("atexit").register(shutil.rmtree, _TMP, True)
+os.environ["LOCALAPPDATA"] = _TMP
+os.environ["EDITORIA_DATOS"] = os.path.join(_TMP, "EditorIA")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ajustes  # noqa: E402,F401  (tus ajustes quedan como estaban; si se cuelga, dice dónde)
@@ -112,6 +121,12 @@ def main():
 
     # 4) Paneles acoplables: la página Efectos muestra el panel; restablecer la distribución
     win.go_page("effects")
+    pump(app, 0.2)
+    # (agrupación 20/11: la página ✦ Efectos ya no está abajo; go_page("effects") abre el panel Efectos en Editar)
+    assert win.docks["effects"].isVisible() and panel.isVisible() and win.page_buttons["edit"].isChecked()
+    win.go_page("edit")
+    pump(app, 0.2)
+    win.show_panel(panel)
     pump(app, 0.2)
     assert panel.isVisible()
     win.docks["effects"].setFloating(True)

@@ -17,11 +17,10 @@ Un paso apunta a su opción con un texto:
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QDockWidget, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMenuBar, QPushButton, QScrollArea, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
-ORANGE = QColor(232, 116, 47)
 
 # (id, título, palabras para el buscador, [(texto, objetivo, acción previa o None)])
 LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
@@ -46,11 +45,12 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "(la primera vez descarga el modelo).", "w:voice.btn_transcribe", None),
         ("<b>2. Quita los silencios</b>: «✂ Eliminar silencio». La narración tiene pausas largas a propósito; se "
          "marcan en naranja antes de cortarlas.", "w:preview.quick.silence", None),
-        ("<b>3. Pide B-roll</b>: «✨ B-roll» propone clips para cada frase según lo que dices.", "w:btn_broll", None),
+        ("<b>3. Pide B-roll</b>: en <b>IA ✨ → B-roll</b>, «🎬 Proponer B-roll» propone clips para cada frase según "
+         "lo que dices.", "w:ai_panel.btn_propose", None),
         ("<b>4. La música</b>: haz clic en ella (A2) y espera a que 🥁 termine: verás sus golpes en la regla y el drop "
          "en rojo (segundo 16). Con el imán (N) los cortes se pegan a esos golpes.", "w:timeline", None),
-        ("<b>5. Exporta</b>: «⬆ Exportar». Los créditos de los clips de Pexels se escriben solos junto al video.",
-         "w:btn_export", None),
+        ("<b>5. Exporta</b>: «🚀 Entrega» (abajo) o <b>Ctrl+E</b>. Los créditos de los clips de Pexels se escriben "
+         "solos junto al video.", "w:page_buttons.deliver", None),
     ]),
     ("cortar", "✂ Cortar y recortar clips", "cortar dividir recortar borrar hueco cuchilla imán", [
         ("<b>Dividir:</b> pon el cabezal donde quieras cortar y pulsa <b>S</b>. O usa la cuchilla (<b>B</b>) y "
@@ -71,6 +71,14 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          ("Con el tramo marcado: <b>Alt+/</b> lo reproduce, <b>🔁</b> (Ctrl+/) lo repite en bucle, Editar → «Quitar "
           "el tramo marcado» lo borra cerrando el hueco, y al exportar puedes sacar <b>solo ese tramo</b>.",
           "w:preview.btn_loop", None),
+         ("<b>−5s / +5s</b> (Mayús+← / Mayús+→) saltan 5 segundos, reproduciendo o en pausa. <b>1×</b> cambia la "
+          "velocidad a 2×, 4×, 8× y vuelve a 1× (la flechita = elegir; Espacio reproduce a la elegida).",
+          "w:preview.btn_speed", None),
+         ("<b>🔊</b> (en el visor) = volumen de ESCUCHA (solo lo que oyes; el proyecto no cambia): clic = silenciar, "
+          "rueda = subir/bajar. La <b>sonoridad</b> de toda la mezcla se mide en <b>Limpieza y mezcla → 3 · "
+          "Sonoridad</b>: "
+          "«📊 Medir la sonoridad» te dice cuántos dB subir o bajar para YouTube, Shorts, TikTok e Instagram "
+          "(−14 LUFS); «Aplicar» se deshace con Ctrl+Z.", "w:btn_sonoridad", None),
      ]),
     ("velocidad", "🐢 Velocidad, reversa y congelar imagen", "velocidad lento rápido cámara lenta reversa atrás congelar freeze",
      [
@@ -83,7 +91,7 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
      ]),
     ("trans", "⧉ Transiciones entre clips", "transición transiciones disolver fundido barrido latigazo zoom corte",
      [
-         ("En <b>Efectos → ⧉ Transiciones</b> elige una (disolver, fundido a negro, latigazo, zoom…) y su "
+         ("En <b>Transiciones y efectos → ⧉ Transiciones</b> elige una (disolver, fundido a negro, latigazo, zoom…) y su "
           "duración. <b>Doble clic</b> la pone en el corte del clip seleccionado o en el más cercano al cabezal.",
           "w:effects.trans_list", None),
          ("También con <b>clic derecho</b> sobre un clip → «⧉ Transición», o <b>Alt+T</b> (disolver). En la línea "
@@ -112,7 +120,8 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          ("En una pista de audio, <b>S</b> = <b>solo</b> (solo suenan las pistas con S) y <b>M</b> = silenciar. "
           "La barrita de color a la derecha de cada pista es su nivel.", "w:timeline", None),
          ("El <b>medidor</b> del visor muestra el nivel total en dB: verde bien, amarillo alto, rojo = cerca de "
-          "saturar.", "w:preview.meter", None),
+          "saturar. Si el visor es estrecho se esconde: ensánchalo para verlo.", "w:preview.meter|preview.transport_row",
+          None),
      ]),
     ("color", "🎨 Color del clip y gráficas", "color exposición contraste saturación lut temperatura scopes gráficas histograma",
      [
@@ -132,7 +141,7 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
      ]),
     ("silencio", "✂ Eliminar silencio (como en Resolve)", "silencio silencios callado pausa umbral resolve cortar audio",
      [
-         ("En la barra de encima del visor: <b>«✂ Eliminar silencio»</b> (o Ctrl+Mayús+Supr). Selecciona antes los "
+         ("En la barra de debajo del visor, a la izquierda: <b>«Silencios»</b> (o Ctrl+Mayús+Supr). Selecciona antes los "
           "clips (si no, usa la narración).", "w:preview.quick.silence", None),
          ("Ajusta <b>umbral</b>, <b>antes del inicio</b>, <b>después del final</b> y <b>mínimo a eliminar</b> (o elige "
           "uno de tus ajustes guardados): lo que se quitará se marca en <b>naranja</b> en la línea de tiempo. "
@@ -166,13 +175,14 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
         ("Pulsa <b>«🎙 Transcribir y analizar»</b>. La IA escribe lo que dices y busca silencios, "
          "respiraciones, muletillas y tomas repetidas. Con <b>«🔁 Escucha literal»</b> (marcada) no se escapa ninguna "
          "toma repetida aunque Whisper la haya escrito una sola vez (tarda más).", "w:voice.btn_transcribe", None),
-        ("<b>Automático</b>: en «⚡ Limpieza automática» marca qué quitar (muletillas, repeticiones, tomas repetidas "
-         "—la IA se queda con la mejor—, silencios) y pulsa <b>«⚡ Limpiar automáticamente»</b>. Puedes hacer que lo "
-         "haga solo al terminar de transcribir.", "w:voice.btn_auto_clean", None),
+        ("<b>Automático</b>: en «Qué buscar», la columna <b>«Quitar»</b> dice qué se quita solo (muletillas, "
+         "repeticiones, tomas repetidas —la IA se queda con la mejor—, silencios); pulsa <b>«Limpiar»</b> (el botón de "
+         "la varita). Con «Al terminar de transcribir» lo hace solo.", "w:voice.btn_auto_clean", None),
         ("<b>Manual</b>: revisa las sugerencias una por una: <b>▶ Escuchar</b>, <b>✓ Aplicar</b> o <b>✗ Ignorar</b>. "
          "En una toma repetida, ⭐ marca la que recomienda la IA. «↺ Restaurar» devuelve un corte.",
          "w:voice.btn_apply", None),
-        ("En <b>Texto</b> ves lo que dices: clic en una palabra = ir a ese momento; doble clic = corregirla.",
+        ("En <b>Voz y texto → 2 · Transcripción</b> ves lo que dices: clic en una palabra = ir a ese momento; doble "
+         "clic = corregirla.",
          "w:transcript", None),
         ("<b>Editar con el texto</b>: lo que se va a quitar sale <b>tachado en rojo</b>. Clic en lo tachado = se "
          "queda; selecciona texto y pulsa <b>Supr</b> para tacharlo tú. Luego <b>«✂ Cortar lo tachado»</b>.",
@@ -183,7 +193,8 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
     ]),
     ("subs", "💬 Subtítulos", "subtítulos srt karaoke estilo", [
         ("Activa los <b>subtítulos dentro del video</b> y elige un estilo (YouTube clásico, Shorts dinámico, "
-         "Karaoke…). Siguen a la voz aunque cortes.", "w:subtitles.enabled", None),
+         "Karaoke…). Siguen a la voz aunque cortes. Están en el panel <b>«Voz y texto» → 3 · Subtítulos</b> (la "
+         "transcripción, en 1 y 2).", "w:subtitles.enabled", None),
         ("Para subirlos aparte a YouTube: <b>«Exportar .srt»</b>.", "w:transcript.btn_srt", None),
     ]),
     ("auto", "✨ Primera versión automática", "automático autoedición primera versión ia", [
@@ -195,7 +206,7 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
     ]),
     ("entender", "🔬 Que la IA conozca tus clips", "entender biblioteca personajes nombres reconocer", [
         ("<b>«🔬 Entender mi biblioteca a fondo»</b>: la IA revisa cada segundo de tus videos y aprende quién y "
-         "qué aparece. Ponle a tus imágenes nombres claros («jefe maestro.png»).",
+         "qué aparece. Ponle a tus imágenes nombres claros («objeto.png»).",
          "w:ai_panel.btn_understand", None),
     ]),
     ("momentos", "🔎 Encontrar un momento concreto", "buscar momento escena aparece imagen referencia", [
@@ -221,8 +232,12 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "quitar o poner en la ventana.", "w:docks.ai", None),
     ]),
     ("efectos", "🎆 Efectos", "efectos sonido whoosh blanco negro viñeta destello fundido", [
-        ("En <b>Efectos</b>: clic = escuchar un sonido, doble clic = ponerlo en el cabezal. Los efectos de "
-         "imagen se aplican a los clips seleccionados.", "w:docks.effects", None),
+        ("El panel <b>«Transiciones y efectos»</b> (su interruptor, arriba a la izquierda) es solo lo visual: <b>⧉ Transiciones"
+         "</b>, <b>✦ Efectos</b>, <b>🎨 Filtros</b> (color y aspecto) y <b>▭ Figuras geométricas</b> (tapar / censurar "
+         "con desenfoque o pixelado, y figuras de color). Se aplican a los clips seleccionados.", "w:docks.effects",
+         None),
+        ("Los <b>🔊 Sonidos</b> (clic = escuchar, doble clic = ponerlo en el cabezal, 🌐 buscar en internet) están "
+         "en su panel <b>«Sonidos»</b> (interruptor a la izquierda).", "w:docks.sounds", None),
         ("Los efectos del clip (destello, fundidos, temblor) se ajustan en el <b>Inspector</b>.",
          "w:inspector.effects_box", None),
     ]),
@@ -237,8 +252,16 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
         ("Con un clip de audio seleccionado, el <b>Inspector</b> muestra su volumen, balance y "
          "<b>ecualizador</b>. «🎧 Escuchar con EQ» repite unos segundos mientras ajustas.",
          "w:inspector.btn_monitor", None),
-        ("<b>«🎚 Audio»</b> abre el audio inteligente: mejorar la voz, bajar la música cuando hablas y "
-         "volumen final para YouTube.", "w:page_buttons.fairlight", None),
+        ("El panel <b>«Limpieza y mezcla»</b> (interruptor a la derecha) tiene el sonido en orden: <b>1 · "
+         "Limpieza</b> de la voz, <b>2 · Mezcla y música</b> (mejorar la voz, bajar la música cuando hablas), <b>3 · "
+         "Sonoridad</b> (volumen final para YouTube) y <b>4 · Cortes de audio</b> (revisar los cortes con aviso). El "
+         "volumen y el ecualizador de cada clip, en el <b>Inspector</b> (su pestaña Audio).",
+         "w:docks.audio", None),
+        ("El panel <b>«Voz y texto»</b> (interruptor a la izquierda) va en el orden de trabajo de la voz: <b>1 · "
+         "Transcribir</b> (qué archivo es tu narración, grabarla o que la lea la IA), <b>2 · Transcripción</b> (el "
+         "texto), <b>3 · Subtítulos</b> y <b>4 · Voz IA</b>.", "w:docks.voz_texto", None),
+        ("El panel <b>«Palabras clave»</b> (interruptor a la derecha) tiene tres pestañas: <b>Dijiste…</b> (cada "
+         "palabra clave y sus momentos), <b>Carpetas</b> y <b>Buscar material</b>.", "w:docks.palabras", None),
     ]),
     ("aprendizaje", "◈ Aprendizaje de mi estilo", "aprender estilo perfil preferencias privacidad confianza", [
         ("Arriba a la derecha, <b>«◈ Aprendizaje IA»</b>: actívalo si quieres que la IA aprenda cómo editas "
@@ -247,7 +270,7 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
     ]),
     ("mis_efectos", "⭐ Mis efectos para la IA", "efectos favoritos ia propone aprende palomita destello whoosh "
      "sonido transicion automatico", [
-        ("En <b>Efectos → ⭐ Mis efectos para la IA</b> elige tus efectos favoritos (o clic derecho en cualquier "
+        ("En <b>Transiciones y efectos → ⭐ Mis efectos para la IA</b> elige tus efectos favoritos (o clic derecho en cualquier "
          "efecto → ⭐) y pulsa «◈ Proponer dónde ponerlos».", "w:effects.b_propose", None),
         ("Cada propuesta sale en la lista y como rombo dorado en la línea de tiempo: <b>✓</b> la pone, <b>✗</b> la "
          "descarta, <b>🎯</b> la pone en los clips que elijas. Aprende de cada respuesta.", "w:effects.prop_tree", None),
@@ -331,6 +354,21 @@ def _resolve_attr(root, path: str):
     return obj
 
 
+def _es_acordeon(w) -> bool:
+    from .paneles_agrupados import Acordeon
+    return isinstance(w, Acordeon)
+
+
+def _abrir_seccion(acordeon, clave: str, traer_panel: bool):
+    """Abre la sección del acordeón; con traer_panel, por la ventana (su interruptor, el panel en su sitio y delante)."""
+    win = acordeon.window()
+    abrir = getattr(win, "abrir_seccion", None)
+    if traer_panel and callable(abrir) and acordeon.nombre in getattr(win, "docks", {}):
+        abrir(acordeon.nombre, clave)
+    if acordeon.abierta() != clave:
+        acordeon.abrir(clave, guardar=False)
+
+
 def reveal(widget: QWidget, traer_panel: bool = True):
     """Hace visible un control: abre su panel y las pestañas y secciones que lo contienen. traer_panel=False: el panel
     no se muestra ni se pone delante (solo se abren su pestaña o su sección y se lleva a la vista)."""
@@ -340,7 +378,11 @@ def reveal(widget: QWidget, traer_panel: bool = True):
         chain.append(w)
         w = w.parentWidget()
     for i, w in enumerate(chain):
-        if isinstance(w, QDockWidget):
+        if i >= 1 and _es_acordeon(w):                # (una sección de «Voz y texto» / «Limpieza y mezcla»)
+            clave = w.clave_de(chain[i - 1])
+            if clave is not None:
+                _abrir_seccion(w, clave, traer_panel)
+        elif isinstance(w, QDockWidget):
             if traer_panel:
                 w.show()
                 w.raise_()
@@ -475,9 +517,10 @@ class Highlighter(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         # Solo un CONTORNO alrededor (nada de rellenar: lo de dentro se ve igual que siempre)
         rr = QRectF(r).adjusted(-4, -4, 4, 4).intersected(QRectF(self.rect()).adjusted(2, 2, -2, -2))
-        line = QColor(ORANGE)
+        from .theme import acento
+        line = acento()
         line.setAlphaF(0.9 * self.alpha)
-        glow = QColor(ORANGE)
+        glow = acento()
         glow.setAlphaF(0.22 * self.alpha)
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(glow, 6))
@@ -501,8 +544,9 @@ class GuidePanel(QWidget):
         self._hl: list[Highlighter] = []
         lay = QVBoxLayout(self)                 # (sin ancho mínimo: se adapta a cualquier ancho, ↔ responsive)
         lay.setContentsMargins(8, 8, 8, 8)
-        intro = QLabel("Elige qué quieres aprender. Te llevo a cada opción y la marco en <span style='color:"
-                       "#e8742f'>naranja</span>.")
+        from .theme import ACCENT
+        intro = QLabel("Elige qué quieres aprender. Te llevo a cada opción y la marco con un "
+                       f"<span style='color:{ACCENT}'>recuadro de color</span>.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.search = QLineEdit()
@@ -537,7 +581,8 @@ class GuidePanel(QWidget):
         self.image = QLabel()
         self.image.setAlignment(Qt.AlignCenter)
         self.image.setMinimumHeight(60)
-        self.image.setStyleSheet("border: 1px solid rgba(232,116,47,0.45); border-radius: 6px; padding: 4px;")
+        from .theme import acento_rgba
+        self.image.setStyleSheet(f"border: 1px solid {acento_rgba(0.45)}; border-radius: 6px; padding: 4px;")
         self.image.setToolTip("Así se ve esta opción en tu pantalla")
         cl.addWidget(self.image)
         row = QHBoxLayout()
@@ -614,7 +659,14 @@ class GuidePanel(QWidget):
 
     # ------------------------------------------------------------- objetivo
     def resolve(self, target: str, do: str | None = None):
-        """De «w:…», «ed:…» o «menu:…» al control real (abriendo lo necesario)."""
+        """De «w:…», «ed:…» o «menu:…» al control real (abriendo lo necesario). «w:a|b» = el primero de ellos que se
+        vea (p. ej. el medidor, que se esconde en un visor estrecho → su fila del transporte)."""
+        kind, _, path = target.partition(":")
+        if "|" in path:
+            cands = [self.resolve(f"{kind}:{p_}", do if i == 0 else None) for i, p_ in enumerate(path.split("|"))]
+            cands = [c for c in cands if c is not None]
+            vistos = [c for c in cands if not isinstance(c, QWidget) or c.isVisibleTo(c.window())]
+            return (vistos or cands or [None])[0]
         if do and do != "_show_shortcuts":
             fn = getattr(self.win, do, None)
             if callable(fn) and not (do == "open_thumbnail" and self._thumb_open()):
@@ -647,6 +699,12 @@ class GuidePanel(QWidget):
         target, do = self.current()
         if target is None:
             return
+        if "|" in target:                              # (se abren todos: el primero que quede a la vista)
+            kind, _, path = target.partition(":")
+            for p_ in path.split("|"):
+                o = self.resolve(f"{kind}:{p_}", do)
+                if isinstance(o, QWidget):
+                    reveal(o)
         obj = self.resolve(target, do)
         if obj is None:
             self.image.setText("<i>(Esta opción aparece cuando está disponible)</i>")

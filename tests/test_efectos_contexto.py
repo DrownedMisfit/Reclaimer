@@ -80,6 +80,15 @@ def wait_job(app, panel, secs=30):
     assert panel._ctx_job is None, "la búsqueda no terminó"
 
 
+def _todas(menu):           # (todas las opciones, también las de los submenús: «Más ▸», «IA ▸»…)
+    out = []
+    for x in menu.actions():
+        out.append(x)
+        if x.menu() is not None:
+            out += _todas(x.menu())
+    return out
+
+
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
@@ -153,8 +162,8 @@ def main():
     tl.set_selection([A, B, F])
     found = {}
     menu = tl.build_clip_menu(p.clips[A], tl.mapToGlobal(QPoint(300, 200)))    # (armado, sin enseñarlo)
-    for act in menu.actions():
-        if act.text().startswith("✨ Efectos según lo que digo"):
+    for act in _todas(menu):                 # (a la vista en una imagen; en «Más ▸» en un video)
+        if act.text().startswith("Efectos según lo que digo"):
             found["act"] = act
             found["tip"] = act.toolTip()
     assert "act" in found, "falta la opción en el clic derecho"

@@ -8,6 +8,24 @@ import os
 import sys
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -433,6 +451,14 @@ def main():
     # una transcripción— se paran antes de salir: si no, Python se cierra con ellos vivos y sale con código 127)
     from editoria.ui.task_window import stop_all
     stop_all(15000)
+    win.analyzer.shutdown()
+    win.ctrl.shutdown(15000)
+    # (stop_all espera como mucho 1,5 s por trabajo; «🎯 Afinar palabras» puede estar CARGANDO su modelo —eso no se
+    #  puede cortar— y Python salía con el hilo vivo → código 127. Se espera a que acaben de verdad, hasta 60 s)
+    from editoria.ui.jobs import live_jobs
+    t_fin = time.time() + 60
+    while time.time() < t_fin and any(j.isRunning() for j in live_jobs()):
+        pump(app, 0.1)
     print("TODO OK — capturas en", out)
 
 

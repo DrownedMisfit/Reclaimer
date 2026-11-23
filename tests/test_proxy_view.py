@@ -91,19 +91,24 @@ def main():
         print("✓ al pasar a «Un cuarto» en pausa, el visor muestra la imagen (no se queda en negro)")
     else:
         print("· (sin pantalla real no se pinta el video: comprobado solo el cambio de archivo)")
-    # Automático: en «Completa» también se preparan solas las copias «Media» y «Un cuarto» (sin prisa)
+    # (desde el 07/11) en «Completa» NO se prepara ninguna copia sola (solo la de la calidad que se usa), salvo que
+    # pidas tenerlas listas de antemano («copias en Completa»): entonces la «Media», sin prisa
     win.proxy_level_for_test = None
     win.set_proxy_level("full")
     pm = win.proxies
+    pm.set_extra(False)
     pm.set_auto(True)
-    assert set(t[4] for t in pm.pending()) >= {"half"}, pm.pending()
+    assert pm.pending() == [], ("en «Completa», ninguna copia sin pedirla", pm.pending())
+    pm.set_extra(True)
+    assert set(t[4] for t in pm.pending()) == {"half"}, pm.pending()
     t0 = time.time()
     while (pm.job is not None or pm.pending()) and time.time() - t0 < 120:
         pm.ensure()
         pump(app, 0.3)
     assert proxies.has_proxy(m.path, "half") and proxies.has_proxy(m.path, "quarter")
+    pm.set_extra(False)
     pm.set_auto(False)
-    print("✓ copias ligeras automáticas: en «Completa» se preparan «Media» y «Un cuarto» para cambiar al momento")
+    print("✓ copias ligeras: en «Completa» ninguna sola; con «tenerlas listas», la «Media» (y la «Un cuarto» de antes)")
     ctrl.undo_stack.setClean()
     ctrl._media_dirty = False
     win.close()

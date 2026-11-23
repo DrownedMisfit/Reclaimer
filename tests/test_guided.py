@@ -58,18 +58,17 @@ def main():
     pump(app, 0.3)
     ctrl = win.ctrl
     try:
-        # 1) El botón de página va después de «Editar»
-        keys = [k for k, _i, _l in win.PAGES]
-        assert keys.index("guided") == keys.index("scenes") + 1 == keys.index("edit") + 2, keys   # (🎬 Escenas va entre medias)
-        assert win.page_buttons["guided"].text() == "Montaje guiado"
-        print("✓ «Montaje guiado» está justo después de «Editar» en la barra de páginas")
+        # 1) (agrupación 20/11) «🧭 Montaje guiado» es un botón de la barra de menús, a la izquierda de 🔄 Reinicio
+        acts = win.menuBar().actions()
+        i_g = acts.index(win.act_guiado)
+        assert "Montaje guiado" in win.act_guiado.text() and "Reinicio" in acts[i_g + 1].text(), [a.text() for a in acts]
+        print("✓ «Montaje guiado» está en la barra de menús, a la izquierda de «Reinicio»")
 
-        # 2) Entrar en la página: marcada, y el panel guiado y 🎬 Clips a la vista a la vez
-        win.go_page("guided")
+        # 2) Entrar en la página: marcada y el panel guiado a la vista (🔑 Palabras clave ya tiene su página)
+        win.act_guiado.trigger()
         pump(app, 0.2)
-        assert win.page_buttons["guided"].isChecked() and not win.page_buttons["edit"].isChecked()
-        assert visible(win, "guided") and visible(win, "clips"), (visible(win, "guided"), visible(win, "clips"))
-        print("✓ al entrar: el panel guiado y 🎬 Clips están a la vista a la vez")
+        assert visible(win, "guided") and not visible(win, "clips"), (visible(win, "guided"), visible(win, "clips"))
+        print("✓ al pulsarlo: el panel guiado a la vista (el de palabras clave no: vive en «Voz y texto»)")
 
         # 3) Los 7 pasos, cada uno con su botón
         g = win.guided
@@ -101,7 +100,7 @@ def main():
         assert len(ctrl.project.markers) == n_antes + 1
         win.go_page("edit")
         pump(app, 0.1)
-        assert win.page_buttons["edit"].isChecked() and not win.page_buttons["guided"].isChecked()
+        assert win.page_buttons["edit"].isChecked()
         assert any(m.label == "prueba guiado" for m in ctrl.project.markers)
         print("✓ el marcador añadido en Montaje guiado sigue al pasar a Editar")
 

@@ -175,7 +175,7 @@ def main():
         win.go_page("scenes")
         pump(app, 0.4)
         pg = win._scenes_widget
-        assert pg.material.tabText(2) == "⚡ Prehechas"
+        assert pg.material.tabText(2) == "Prehechas"
         pg._llenar_imagenes()
         for i in range(pg.lista_img.count()):
             it = pg.lista_img.item(i)
@@ -206,7 +206,10 @@ def main():
         pg.tl.t = 0.3
         pg._accion_en(act, "habla")
         assert pg.aplicar()
-        clips = ctrl.scene_clips(ctrl.project, pg.escena["id"])
+        from editoria.core import escena_clip
+        assert len(ctrl.scene_clips(ctrl.project, pg.escena["id"])) == 1, "un solo clip de escena"
+        q = escena_clip.expandir(ctrl.project)            # (lo que pintan y suenan el visor y la exportación)
+        clips = [c for c in q.clips.values() if c.note == scenes.nota(pg.escena["id"])]
         assert clips and any(ctrl.project.media[c.media_id].path == sfx.path_for("disparo") for c in clips)
         ctrl.undo_stack.undo()
         assert not ctrl.scene_clips(ctrl.project, pg.escena["id"])
@@ -330,7 +333,9 @@ def main():
         act = escena["actores"][0]
         fase = next(f for f in act["fases"] if f.get("mano"))
         a0 = float(escena["a"]) + scenes.inicio_de(act, fase)
-        clip = next(cc for cc in ctrl.scene_clips(ctrl.project, escena["id"]) if abs(cc.start - a0) < 1e-3)
+        from editoria.core import escena_clip                # (un clip de escena: se mira lo desplegado)
+        clip = next(cc for cc in escena_clip.expandir(ctrl.project).clips.values()
+                    if cc.note == scenes.nota(escena["id"]) and abs(cc.start - a0) < 1e-3)
         for t in (1.0, 1.7, 2.4, 2.9):
             box = transform.layout_value_at(clip.layout_kf, float(escena["a"]) + t - clip.start)
             esp = scenes.caja_en(escena, act, t)

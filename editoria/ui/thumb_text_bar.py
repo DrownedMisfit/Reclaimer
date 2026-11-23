@@ -239,6 +239,7 @@ class TextBar(QFrame):
 
     @staticmethod
     def _pinta(btn: QPushButton, c: str):
+        btn.setProperty("color_contenido", True)       # (color del texto: el acento de la interfaz no lo toca)
         btn.setStyleSheet(f"QPushButton#tltool {{ background: {c}; border: 1px solid #555; border-radius: 4px; }}")
 
     def _menu_colores(self, aplicar, campo: str) -> QMenu:

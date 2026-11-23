@@ -144,8 +144,9 @@ def _video_args(hw_on: bool) -> list[str]:
     if hw_on:   # la tarjeta gráfica: ~3× más rápido y casi sin usar el procesador (sigues editando fluido)
         from . import hw
         return hw.proxy_args(hw.video_encoder("h264")) + ["-g", "15", "-pix_fmt", "yuv420p"]
+    from . import energia                # 🔋 (con la batería, 2 hilos; nunca más de 4)
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-g", "15", "-keyint_min", "15",
-            "-pix_fmt", "yuv420p", "-threads", "4"]
+            "-pix_fmt", "yuv420p", "-threads", str(min(4, energia.hilos_ffmpeg()))]
 
 
 def make_proxies(path: str, height: int, levels: list[str], cancelled=None, progress=None,
@@ -176,7 +177,8 @@ def make_proxies(path: str, height: int, levels: list[str], cancelled=None, prog
         args = [media_tools.ffmpeg(), "-nostdin", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]
         if hw:
             args += ["-hwaccel", "d3d11va"]               # también leer el video con la gráfica
-        args += ["-i", path, "-filter_complex", graph]
+        from . import energia                # 🔋 decodificar con la mitad de los núcleos como mucho (2 con la batería)
+        args += ["-threads", str(energia.hilos_ffmpeg()), "-i", path, "-filter_complex", graph]
         for k, lv in enumerate(want):
             args += ["-map", f"[v{k}]", "-map", "0:a?"] + _video_args(hw)
             args += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", tmps[lv]]

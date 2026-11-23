@@ -185,8 +185,10 @@ def main():
         if os.path.exists(mp4):
             os.remove(mp4)
         dlg.out.setText(mp4)
-        real = FX.ENCODERS[("h264", "gpu")]
-        FX.ENCODERS[("h264", "gpu")] = "codificador_que_no_existe"
+        # (la tarjeta gráfica se elige en core/hw.py: se simula una que falla, haya o no tarjeta en este PC)
+        from editoria.core import hw as _HW
+        real = _HW.video_encoder
+        _HW.video_encoder = lambda codec: "codificador_que_no_existe"
         try:
             dlg._start()
             t0 = time.time()
@@ -195,7 +197,7 @@ def main():
                 if dlg._retried_cpu and dlg.proc is None:
                     break
         finally:
-            FX.ENCODERS[("h264", "gpu")] = real
+            _HW.video_encoder = real
         assert dlg._retried_cpu, "se reintentó con el procesador"
         assert os.path.exists(mp4) and "Listo" in dlg.status.text(), (dlg.status.text(), dlg._log[-8:])
         info = json.loads(subprocess.run([media_tools.ffprobe(), "-v", "error", "-show_streams", "-of", "json", mp4],

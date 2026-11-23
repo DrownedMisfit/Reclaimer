@@ -45,20 +45,45 @@ def _crop_at(path: str, t: float) -> tuple[int, int, int, int] | None:
     return (w, h, x, y) if w > 8 and h > 8 else None
 
 
-def detect(path: str, duration: float = 0.0) -> list[float] | None:
-    key = f"{media_tools.cache_key(path)}_v{VERSION}.json"
-    cf = os.path.join(str(cache_dir("barras")), key)
+def _cache_file(path: str) -> str:
+    return os.path.join(str(cache_dir("barras")), f"{media_tools.cache_key(path)}_v{VERSION}.json")
+
+
+def cached(path: str) -> tuple[bool, list[float] | None]:
+    """(¿ya se miró?, la zona con imagen)."""
     try:
-        with open(cf, encoding="utf-8") as f:
-            return json.load(f)["area"]
+        with open(_cache_file(path), encoding="utf-8") as f:
+            return True, json.load(f)["area"]
     except (OSError, ValueError, KeyError):
-        pass
+        return False, None
+
+
+def sample_times(duration: float) -> list[float]:
+    """Los momentos que se miran (2 s a partir de cada uno; también los usa la lectura única)."""
+    d = max(0.0, duration - 2.0)
+    return [d * (i + 0.5) / SAMPLES for i in range(SAMPLES)] if d > 0 else [0.0]
+
+
+def detect(path: str, duration: float = 0.0) -> list[float] | None:
+    hit, area = cached(path)
+    if hit:
+        return area
+    from ..ai import lectura_unica     # ⚡ una sola lectura del video para todos los análisis (ai/lectura_unica.py)
+    if lectura_unica.usar(path, duration, "barras"):
+        lectura_unica.asegurar_o_seguir(path, duration, ["barras"], None, None)
+        hit, area = cached(path)
+        if hit:
+            return area
     W, H = _probe_size(path)
+    crops = [_crop_at(path, t) for t in sample_times(duration)] if W > 0 and H > 0 else []
+    return save_area(path, crops, W, H)
+
+
+def save_area(path: str, crops: list, W: int, H: int) -> list[float] | None:
+    """La zona con imagen a partir de lo que dijo cropdetect en cada momento (w, h, x, y o None); se guarda."""
     area = None
     if W > 0 and H > 0:
-        d = max(0.0, duration - 2.0)
-        times = [d * (i + 0.5) / SAMPLES for i in range(SAMPLES)] if d > 0 else [0.0]
-        crops = [c for c in (_crop_at(path, t) for t in times) if c is not None and c[0] * c[1] >= 0.15 * W * H]
+        crops = [c for c in crops if c is not None and c[0] * c[1] >= 0.15 * W * H]
         x0 = y0 = x1 = y1 = 0
         if crops:
             # Cada borde, hacia fuera pero sin fiarse de un momento suelto: una escena oscura recorta de más y una
@@ -78,7 +103,7 @@ def detect(path: str, duration: float = 0.0) -> list[float] | None:
                 t_, b = (t_, b) if topb else (0.0, 0.0)
                 area = [round(l, 4), round(t_, 4), round(1 - l - r, 4), round(1 - t_ - b, 4)]
     try:
-        with open(cf, "w", encoding="utf-8") as f:
+        with open(_cache_file(path), "w", encoding="utf-8") as f:
             json.dump({"area": area}, f)
     except OSError:
         pass

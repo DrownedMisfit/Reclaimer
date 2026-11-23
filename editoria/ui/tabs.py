@@ -7,7 +7,7 @@ Subpestañas dentro de un panel (como Resolve: todo detrás de pestañas, sin un
 """
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 
 # Icono de cada sección (las que tenían pestaña: el nombre sigue igual para el código, el icono solo se ve)
@@ -176,15 +176,34 @@ class Escalonado(QWidget):
                 self.currentChanged.emit(i)
         self._estirar()
 
+    def quiere_crecer(self) -> bool:
+        """¿Aprovecha alto extra? Solo si tiene abierta una sección que crece y que de verdad enseña algo que crece
+        (una lista, un texto…): con sus subsecciones plegadas, no (el usuario, 20/11: con «Efectos» abierta y todo
+        plegado quedaba un hueco enorme antes de «Filtros»)."""
+        return any(self._grow[k] and s.is_open() and not s.isHidden() and quiere_crecer(s._pagina)
+                   for k, s in enumerate(self._secs))
+
+    def _revisar_crecer(self):
+        """(lo llama avisar_contenido: algo de dentro se plegó, se abrió o cambió) → se reparte otra vez el alto."""
+        t = getattr(self, "_t_crecer", None)
+        if t is None:
+            from PySide6.QtCore import QTimer
+            t = self._t_crecer = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(0)
+            t.timeout.connect(self._estirar)
+        t.start()
+
     def _estirar(self):
-        """La sección que crece (listas largas) se queda con el alto que sobra; si no hay ninguna abierta, el hueco
-        va al final (las secciones, arriba)."""
+        """La sección que crece (listas largas) se queda con el alto que sobra; si no hay ninguna abierta —o la abierta
+        solo tiene subsecciones plegadas—, el hueco va al final: las secciones, arriba y seguidas, sin huecos."""
         alguna = False
         for k, s in enumerate(self._secs):
-            crece = self._grow[k] and s.is_open()
+            crece = self._grow[k] and s.is_open() and quiere_crecer(s._pagina)
             alguna |= crece
             self._v.setStretch(k, 1 if crece else 0)
         self._v.setStretch(len(self._secs), 0 if alguna else 1)
+        avisar_contenido(self.parentWidget())       # (el Escalonado o el panel de fuera reparten también)
 
     def _a_la_vista(self, s):
         from PySide6.QtWidgets import QScrollArea
@@ -198,6 +217,50 @@ class Escalonado(QWidget):
                 pass
 
 
+def quiere_crecer(w: QWidget) -> bool:
+    """¿Hay en w, a la vista, algo que aproveche alto extra (una lista, un texto largo, una tabla…)? Los espaciadores y
+    las zonas con desplazamiento que solo envuelven otro contenido no cuentan; dentro de un Escalonado decide él (sus
+    secciones plegadas o que no crecen no piden alto). Lo usan los Escalonados, los paneles agrupados (Acordeon) y la
+    ventana para dar el alto libre a lo que lo usa y ceder el resto (sin huecos)."""
+    from PySide6.QtWidgets import QAbstractScrollArea, QScrollArea, QSizePolicy
+    if w is None:
+        return False
+    if isinstance(w, Escalonado):
+        return w.quiere_crecer()
+    mira = getattr(w, "quiere_crecer", None)
+    if callable(mira):
+        return bool(mira())
+    vistos: dict = {}
+    for a in w.findChildren(QAbstractScrollArea):
+        if isinstance(a, QScrollArea) or not a.isVisibleTo(w):
+            continue
+        if a.maximumHeight() < 2000 or not (a.sizePolicy().verticalPolicy().value & QSizePolicy.PolicyFlag.ExpandFlag.value):
+            continue                                 # (alto fijo o que no crece: no aprovecha más)
+        p, esc = a.parentWidget(), None
+        while p is not None and p is not w:
+            if isinstance(p, Escalonado):
+                esc = p                              # (el más de fuera dentro de w)
+            p = p.parentWidget()
+        if esc is None:
+            return True
+        if esc not in vistos:
+            vistos[esc] = esc.quiere_crecer()
+        if vistos[esc]:
+            return True
+    return False
+
+
+def avisar_contenido(w: QWidget | None):
+    """Algo se plegó, se abrió o cambió de tamaño dentro de w: el primero de fuera que reparte alto (un Escalonado, un
+    panel agrupado, la ventana) lo vuelve a repartir."""
+    while w is not None:
+        f = getattr(w, "_revisar_crecer", None)
+        if callable(f):
+            f()
+            return
+        w = w.parentWidget()
+
+
 def explain(label: QLabel, target: QWidget):
     """Sin textos largos a la vista: la explicación se ve al pasar el ratón por target."""
     text = label.text()
@@ -208,9 +271,11 @@ def explain(label: QLabel, target: QWidget):
 
 def untitle(*groups):
     """Las cajas ya están en su sección (con su título): el título y el marco sobran (y así cabe más estrecho)."""
+    from .diseno import grupo_sin_titulo
     for g in groups:
         g.setTitle("")
         g.setFlat(True)
+        grupo_sin_titulo(g)                          # (sin el hueco que reservaba el título)
         lay = g.layout()
         if lay is not None:
             lay.setContentsMargins(2, 2, 2, 2)
@@ -241,15 +306,22 @@ class Section(QWidget):
         self.head.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.head.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.head.setCursor(Qt.PointingHandCursor)
-        self.head.setStyleSheet("QToolButton#sectionhead { background: #26282e; border: none; border-radius: 4px; "
-                                "padding: 6px 8px; text-align: left; font-weight: 600; color: #d8dbe2; }"
-                                "QToolButton#sectionhead:hover { background: #2e3138; }")
+        from . import diseno as D                   # (🎨 LA cabecera de sección: 24 px, como el acordeón y el Inspector)
+        D.cabecera_estandar(self.head, "QToolButton#sectionhead")
         self.head.toggled.connect(self._clic)       # (clic del usuario: se abre o cierra y se recuerda)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(4)
         v.addWidget(self.head)
-        v.addWidget(body, 1)
+        # (una sola rejilla: el contenido, con SANGRIA_SECCION bajo su cabecera; las secciones de dentro quedan así
+        #  un poco más a la derecha que las de fuera, con el mismo alto)
+        self._marco = QWidget()
+        mv = D.fila_fija(QHBoxLayout(self._marco))   # (la sangría con un espacio fijo: responsive recorta los márgenes)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.setSpacing(0)
+        D.espacio_sangria(mv)                        # (cede si no hay ancho; se rehace al cambiar «Letra»)
+        mv.addWidget(body, 1)
+        v.addWidget(self._marco, 1)
         self.set_open(opened, save=False)
 
     def is_open(self) -> bool:
@@ -268,6 +340,9 @@ class Section(QWidget):
             self.head.blockSignals(False)
         cambia = self.body.isHidden() == on
         self.body.setVisible(on)
+        marco = getattr(self, "_marco", None)
+        if marco is not None and marco.isHidden() == on:
+            marco.setVisible(on)                    # (plegada: sin el hueco de la separación)
         if save and self._key:
             QSettings("EditorIA", "EditorIA").setValue(self._key, on)
         if cambia:
@@ -320,9 +395,10 @@ def plegar_grupos(pagina: QWidget, clave: str, abiertas=()) -> list:
     if lay is None:
         return []
     hechas = []
-    for i in range(lay.count()):
-        w = lay.itemAt(i).widget()
-        if not isinstance(w, QGroupBox) or not w.title():
+    from .responsive import widgets_en               # (sin itemAt: ver «lo que hay en un layout» en responsive.py)
+    for w in widgets_en(lay):
+        i = lay.indexOf(w)
+        if not isinstance(w, QGroupBox) or not w.title() or i < 0:
             continue
         titulo = w.title()
         limpio = re.sub(r"[^\wáéíóúñü ]+", "", titulo, flags=re.I).strip() or titulo
@@ -330,6 +406,8 @@ def plegar_grupos(pagina: QWidget, clave: str, abiertas=()) -> list:
         lay.removeWidget(w)
         w.setTitle("")
         w.setFlat(True)
+        from .diseno import grupo_sin_titulo
+        grupo_sin_titulo(w)                           # (sin el hueco que reservaba el título)
         caja = QWidget()                              # (lo que se pliega; el grupo dentro, con su propia visibilidad)
         cv = QVBoxLayout(caja)
         cv.setContentsMargins(0, 0, 0, 0)

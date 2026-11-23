@@ -47,10 +47,10 @@ class ScriptDialog(QDialog):
         lay = QVBoxLayout(self)
 
         lay.addWidget(QLabel("Escribe o pega el guion: una oración por línea. Etiquetas entre corchetes: "
-                             "[CLIP: fortnite]  [IMG: titular.png]  [MÚSICA: tensa]  [NOTA: …]"))
+                             "[CLIP: lugar]  [IMG: titular.png]  [MÚSICA: tensa]  [NOTA: …]"))
         self.script = QPlainTextEdit()
         self.script.setPlaceholderText("Hola a todos, bienvenidos a este análisis.\n"
-                                       "El combate se siente bastante lento. [CLIP: fortnite]\n")
+                                       "El combate se siente bastante lento. [CLIP: lugar]\n")
         self.script.setMinimumHeight(140)
         lay.addWidget(self.script)
 

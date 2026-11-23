@@ -171,8 +171,11 @@ def main():
         panel.carpeta = lambda: carpeta
         assert "voz_ia" in win.docks and "voz_ia" in win.ICONO_PANEL
         ventana = next(a.menu() for a in win.menuBar().actions() if a.text() == "&Ventana")
-        assert win.docks["voz_ia"].toggleViewAction() in ventana.actions(), "en el menú Ventana"
-        assert win.docks["voz_ia"].toggleViewAction().text() == "🗣 Voz IA"
+        # (agrupación 20–22/11: Voz IA es la sección 4 de «Voz y texto»; el menú Ventana abre ese panel)
+        assert win.docks["voz_texto"].toggleViewAction() in ventana.actions(), "«Voz y texto» en el menú Ventana"
+        win.open_voz_ia()
+        pump(app, 0.3)
+        assert win.docks["voz_texto"].isVisible() and win.voz_texto.abierta() == "voz_ia", "abre su sección"
         assert panel.voz.currentData() == tts.VOZ_DEFECTO == "narrador_documental", "el narrador de documental por defecto"
         assert getattr(win, "_btn_voz_ia_tr", None) is not None, "acceso en 🎙 Transcribir"
 
@@ -260,9 +263,12 @@ def main():
         print("✓ diccionario aplicado a lo que se lee (los subtítulos siguen con lo escrito)")
 
         # ---- 📱 Vertical con «💬 Subtítulos auto»: se ponen solos con la narración IA
+        for k_ in win.TAB_MANAGED:          # (lo de fábrica de la pestaña, no lo que dejaste tú en la tuya)
+            QSettings("EditorIA", "EditorIA").remove(f"paneles_pestana/short/{k_}")
         win.workspaces.switch("short")
         pump(app, 0.4)
-        assert win.docks["voz_ia"].toggleViewAction().isChecked(), "en Vertical, el panel está puesto"
+        # (Voz IA vive en «Voz y texto»: en Vertical ese panel está puesto y su acceso, en la barra de Vertical)
+        assert win.docks["voz_texto"].toggleViewAction().isChecked(), "en Vertical, «Voz y texto» está puesto"
         textos = [b.property("texto_completo") or b.text()                # (en estrecho, solo su icono)
                   for b in win.preview.shorts_bar.findChildren(QPushButton)]
         assert "🗣 Que lo lea la IA" in textos, textos
@@ -393,10 +399,10 @@ def main():
         print("✓ voz CC BY: «.creditos.json» junto a la narración y apartado «🗣 Voz:» en los créditos del video")
 
         # ---- acceso desde la barra de Vertical
-        win.docks["voz_ia"].hide()
+        win.docks["voz_texto"].hide()
         next(b for b in win.preview.shorts_bar.findChildren(QPushButton) if (b.property("texto_completo") or b.text()) == "🗣 Que lo lea la IA").click()
         pump(app, 0.2)
-        assert win.docks["voz_ia"].isVisible(), "«🗣 Que lo lea la IA» abre el panel"
+        assert win.docks["voz_texto"].isVisible() and win.voz_texto.abierta() == "voz_ia",             "«🗣 Que lo lea la IA» abre su panel"
         print("✓ «🗣 Que lo lea la IA» abre el panel")
     finally:
         win.ctrl.undo_stack.setClean()

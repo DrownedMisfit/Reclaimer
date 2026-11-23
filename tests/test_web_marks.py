@@ -227,7 +227,13 @@ def main():
     pump(app, 0.4)
     box = mp.frame.parentWidget()
     assert mp.grid.height() > box.height() and not mp.ask_card.isVisible()
-    assert mp.frame.width() >= 170
+    # (20/11: «Aparición seleccionada» está escondida hasta elegir un resultado; elegido, con su imagen entera)
+    caja_ap = getattr(mp, "_caja_aparicion", None)
+    if caja_ap is not None and caja_ap.isHidden():
+        mp.grid.setCurrentRow(0)
+        pump(app, 0.3)
+        assert caja_ap.isVisible(), "al elegir un resultado aparece «Aparición seleccionada»"
+    assert mp.frame.width() >= 170, mp.frame.width()
     confs = [mp.grid.item(i).data(Qt.UserRole + 2) for i in range(mp.grid.count())]
     assert any(c is not None for c in confs), "barras de identificación"
     # La lista no salta sola al principio al marcar ✓/✗; «⤒ Inicio» sí sube

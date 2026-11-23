@@ -13,6 +13,24 @@ import sys
 import tempfile
 import time
 
+# 🔒 datos y caché de la prueba en una carpeta temporal (nunca en F:\Reclaimer\datos real; se borra al acabar). Los
+#    modelos ya descargados se leen de datos\modelos (no se bajan otra vez).
+def _aislar_datos():
+    import atexit
+    import shutil
+    import tempfile
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmproot = os.path.join(raiz, "_pruebas_tmp")
+    os.makedirs(tmproot, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="reclaimer_aislada_", dir=tmproot)
+    atexit.register(shutil.rmtree, tmp, True)
+    os.environ["LOCALAPPDATA"] = tmp
+    os.environ["EDITORIA_DATOS"] = os.path.join(tmp, "EditorIA")
+    os.environ.setdefault("EDITORIA_MODELOS", os.path.join(raiz, "datos", "modelos"))
+
+
+_aislar_datos()
+
 _RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["EDITORIA_TARJETA_MOTOR"] = "1"           # (esta prueba es justo la de la tarjeta)
 sys.path.insert(0, _RAIZ)
@@ -60,6 +78,12 @@ def main():
 
     from editoria.ai.base import Cancelled
     from editoria.core.paths import temp_dir
+    # ⚡ el servidor de voz deja el modelo cargado: la 2.ª transcripción ya no paga la carga
+    assert motor_ia.servidor_voz().activo(), "el servidor de voz debía seguir abierto con el modelo cargado"
+    t2 = time.perf_counter()
+    T.transcribe(samples, "equilibrado", "es", block=15.0)
+    print(f"✓ con el modelo ya cargado: {time.perf_counter() - t2:.1f} s (antes {dt:.1f} s con la carga)")
+    motor_ia.servidor_voz().cerrar()          # (para probar «Cancelar» en plena carga del modelo)
     marca = {"t": None}
 
     def cancelar():
