@@ -1663,15 +1663,38 @@ class ThumbnailEditor(QMainWindow):
         self.props = QWidget()
         self.props_lay = QVBoxLayout(self.props)
         self.props_lay.setAlignment(Qt.AlignTop)
-        right = QScrollArea()
+        right = self._props_area = QScrollArea()
         right.setWidgetResizable(True)
         right.setWidget(self.props)
-        right.setMinimumWidth(320)
+        # 🧰 la columna derecha: arriba el panel de herramientas (Mi estilo, Comparar A y B…: el mismo anfitrión que el
+        # editor, ui/herramientas.py) y debajo las propiedades, plegables mientras haya una herramienta abierta
+        columna = self._columna = QWidget()
+        columna.setMinimumWidth(320)
+        cl = QVBoxLayout(columna)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4)
+        self._props_cab = QPushButton()
+        self._props_cab.setObjectName("flat")
+        self._props_cab.setCheckable(True)
+        self._props_cab.setChecked(True)
+        self._props_cab.setStyleSheet("QPushButton { text-align: left; padding: 3px 6px; }")
+        self._props_txt = "Propiedades (nada elegido)"
+        self._props_cab.setText("▾ " + self._props_txt)
+        self._props_cab.setToolTip("Las opciones de la capa elegida. Clic: plegarlas o desplegarlas (plegadas, la "
+                                   "herramienta de arriba usa toda la columna)")
+        self._props_cab.toggled.connect(self._plegar_props)
+        self._props_cab.hide()                              # (sin herramienta abierta, las propiedades lo ocupan todo)
+        cl.addWidget(self._props_cab)
+        cl.addWidget(right, 1)
+        from . import herramientas as _H
+        self.herramientas = _H.instalar_en_columna(self, columna)
+        self.herramientas.llenar = lambda: not self._props_cab.isChecked()
+        self.herramientas.cambio.connect(self._herramientas_cambio)
         split = QSplitter(Qt.Horizontal)
         split.addWidget(left)
         split.addWidget(self._build_layers_panel())
         split.addWidget(self.canvas)
-        split.addWidget(right)
+        split.addWidget(columna)
         split.setSizes([360, 200, 820, 340])
         split.setStretchFactor(2, 1)
         self._split = split
@@ -2140,11 +2163,41 @@ class ThumbnailEditor(QMainWindow):
         QTimer.singleShot(0, self._style_label)
         return w
 
+    # ----------------------------------------------------------- 🧰 herramientas de la columna derecha
+    def _plegar_props(self, abierta: bool):
+        self._props_cab.setText(("▾ " if abierta else "▸ ") + self._props_txt)
+        self._props_area.setVisible(abierta)
+        self.herramientas.recolocar()
+
+    def _herramientas_cambio(self):
+        claves = self.herramientas.claves()
+        hay = bool(claves)
+        nuevas = set(claves) - getattr(self, "_herr_vistas", set())
+        self._herr_vistas = set(claves)
+        self._props_cab.setVisible(hay)
+        if nuevas and self._props_cab.isChecked():       # (se abre una herramienta que no cabe entera con las
+            col = self._columna                          #  propiedades debajo: ellas se pliegan —un clic las
+            if self.herramientas.alto_contenido(col.width()) + 220 > col.height():   # despliega—; si cabe, las dos)
+                self._props_cab.setChecked(False)
+        if not hay and not self._props_cab.isChecked():  # (sin herramienta: las propiedades, como siempre)
+            self._props_cab.setChecked(True)
+
     def open_style(self):
+        """🎨 Mi estilo: pestaña de la columna derecha, sin bloquear. Al cambiar (analizar, usar o no) y al cerrarla,
+        se rehacen la línea del estilo y las propuestas."""
+        from .herramientas import abrir_dialogo
         from .thumb_style_dialog import StyleDialog
-        StyleDialog(self).exec()
-        self._style_label()
-        self._fill_suggestions()
+
+        def rehacer(*_a):
+            self._style_label()
+            self._fill_suggestions()
+
+        def fabrica():
+            dlg = StyleDialog(self)
+            dlg.cambiado.connect(rehacer)
+            return dlg
+        return abrir_dialogo(self, "mi_estilo", fabrica, "Mi estilo de miniaturas", "Mi estilo", "palette",
+                             al_terminar=rehacer)
 
     def _style_label(self):
         from .thumb_style_dialog import load
@@ -3946,8 +3999,11 @@ class ThumbnailEditor(QMainWindow):
         par = self._ab.get(self.doc["format"], {})
         if "A" not in par or "B" not in par:
             return
-        dlg = CompareDialog(self, par["A"], par["B"], self._title(), self.use_ab)
-        dlg.exec()
+        from .herramientas import abrir_dialogo
+        self.herramientas.cerrar("comparar_ab", por_usuario=False)   # (con otras A y B: las de ahora)
+        return abrir_dialogo(self, "comparar_ab",
+                             lambda: CompareDialog(self, par["A"], par["B"], self._title(), self.use_ab, apilado=True),
+                             "Comparar A y B", "Comparar", "columns-2")
 
     def use_ab(self, which: str) -> bool:
         """Pone la versión A o B en la miniatura (Ctrl+Z vuelve a lo de antes)."""
@@ -4495,6 +4551,9 @@ class ThumbnailEditor(QMainWindow):
                 w.setParent(None)
                 w.deleteLater()
         lay = self.cur()
+        if getattr(self, "_props_cab", None) is not None:
+            self._props_txt = "Propiedades (nada elegido)" if lay is None else f"Propiedades · {lay['name']}"
+            self._props_cab.setText(("▾ " if self._props_cab.isChecked() else "▸ ") + self._props_txt)
         if lay is None:
             lb = QLabel("Nada elegido")                               # (20/11: una línea; la guía, al tooltip)
             lb.setToolTip("Elige algo en el lienzo (o en «Capas») para ver sus opciones.\n\nEmpieza por «Material»: "

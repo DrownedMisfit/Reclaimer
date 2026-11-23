@@ -733,6 +733,8 @@ class ClipsPanel(InternetMixin, QWidget):
                                       "clic derecho = menú · arrastra o suelta archivos aquí.")
         self.lista_carpeta.itemDoubleClicked.connect(lambda it: self._poner_mis([it.data(Qt.UserRole)]))
         self.lista_carpeta.soltado.connect(lambda rutas, _f: self._soltar_archivos(rutas))
+        from .miniaturas import activar_scrub      # (🖼 al pasar el ratón por un video: sus fotogramas en la casilla)
+        activar_scrub(self.lista_carpeta, lambda it: it.data(Qt.UserRole))
         mv.addWidget(self.lista_carpeta, 1)
 
         fb = QHBoxLayout()
@@ -1775,10 +1777,15 @@ class ClipsPanel(InternetMixin, QWidget):
         self._aviso(f"✓ «{term}» actualizado en el glosario.")
 
     def _abrir_glosario(self):
-        dlg = GlosarioDialog(self)
-        dlg.exec()
-        if dlg.cambiado:
-            self.recalcular()
+        from .herramientas import abrir_dialogo
+        caja = {}
+
+        def fabrica():
+            caja["dlg"] = GlosarioDialog(self)
+            return caja["dlg"]
+        return abrir_dialogo(self, "glosario", fabrica, "Glosario de palabras clave", "Glosario", "book-open",
+                             al_terminar=lambda _r: self.recalcular()
+                             if getattr(caja.get("dlg"), "cambiado", False) else None)
 
     def _elegir_mencion(self, fila: int, buscar: bool = True):
         """Muestra los momentos y la carpeta de la mención. buscar=True (la eligió el usuario): va al primer momento

@@ -111,11 +111,10 @@ def main():
             pump(app, 0.1)
         it = next(ed.clips.item(i) for i in range(ed.clips.count()) if ed.clips.item(i).data(Qt.UserRole) == mid)
         assert not it.icon().isNull(), "cada clip con su miniatura"
-        ed._hover_clip(it)
-        assert ed._big.isVisible() and ed._big.pixmap().width() >= 300, "al pasar el ratón: la miniatura en grande"
+        # (23/11: sin miniatura grande flotante; al pasar el ratón, sus fotogramas en la casilla: ui/miniaturas.py)
+        assert ed.clips._scrub._ruta_de(it) == ctrl.project.media[mid].path, "al pasar el ratón: sus fotogramas"
         ed.close()
-        assert not ed._big.isVisible()
-        print("✓ «Clips» con miniaturas; al pasar el ratón se ve en grande")
+        print("✓ «Clips» con miniaturas; al pasar el ratón, sus fotogramas en la misma casilla")
         v1 = [t for t in ctrl.project.tracks if t.kind == TRACK_VIDEO][-1]
         ids = [c for c in ctrl.add_media([mid, mid, mid], v1.id, 0.0)
                if ctrl.project.track(ctrl.project.clips[c].track_id).kind == TRACK_VIDEO]

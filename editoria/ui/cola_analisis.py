@@ -19,6 +19,7 @@
   cola().subir(clave, prioridad) · cancelar(trabajo o clave) · cancelar_todo() · pausar(motivo, sí/no) · cerrar()
   analizar_archivo(path, duración, prioridad, quiero) -> Trabajo (la lectura única de ai/lectura_unica.py)
   AlImportar(ctrl): empieza a analizar lo que importas o descargas (prioridad MEDIA). Abrir un proyecto no analiza nada.
+  pausa_automatica() -> ¿reproduciendo o exportando? (el scrub de las miniaturas, ui/miniaturas.py, se apaga)
 """
 from __future__ import annotations
 
@@ -482,6 +483,11 @@ def exportacion_empieza(proc):
 
 def existe() -> bool:
     return bool(_COLA)
+
+
+def pausa_automatica() -> bool:
+    """¿Se está reproduciendo o exportando? (lo de la interfaz que gasta CPU —el scrub de las miniaturas— espera)."""
+    return _AVISOS.get("reproducción", 0) > 0 or _AVISOS.get("exportación", 0) > 0
 
 
 def _soltar_cola(claves) -> list[str]:

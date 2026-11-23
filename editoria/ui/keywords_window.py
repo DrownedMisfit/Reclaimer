@@ -526,8 +526,8 @@ class KeywordsWindow(QWidget):
         g.itemDoubleClicked.connect(lambda it: self.poner(True, [it.data(Qt.UserRole)]))
         g.soltado.connect(lambda rutas, _f: self._anadir(rutas))
         g.installEventFilter(self)                          # ⌫ Retroceso borra; Supr ya no (ver eventFilter)
-        from .miniaturas import activar_vista_grande        # 🔍 vista grande al pasar el ratón (programador 2)
-        activar_vista_grande(g, lambda it: it.data(Qt.UserRole))
+        from .miniaturas import activar_scrub               # 🖼 al pasar el ratón: los fotogramas en la casilla
+        activar_scrub(g, lambda it: it.data(Qt.UserRole))
         v.addWidget(g)
         return caja, g
 

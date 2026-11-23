@@ -236,12 +236,15 @@ class QueueDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         lay.addWidget(self.table, 1)
         quick = QHBoxLayout()
-        quick.addWidget(QLabel("Añadir rápido:"))
+        self._lbl_rapido = QLabel("Añadir rápido:")
+        quick.addWidget(self._lbl_rapido)
+        self._rapidos: list[QPushButton] = []
         for text, kind in (("🔊 Solo audio (WAV)", "audio"), ("⟦ ⟧ Tramo marcado", "range"),
                            ("🎞 El video en 4K", "4k")):
             b = QPushButton(text)
             b.clicked.connect(lambda _=False, k=kind: self.quick_add(k))
             quick.addWidget(b)
+            self._rapidos.append(b)
         quick.addStretch()
         lay.addLayout(quick)
         row = QHBoxLayout()
@@ -258,6 +261,7 @@ class QueueDialog(QDialog):
         b_close.clicked.connect(self.close)
         for b in (self.b_run, b_rm, b_clear, b_open):
             row.addWidget(b)
+        self._acciones, self._b_close, self._lay = [self.b_run, b_rm, b_clear, b_open], b_close, lay
         row.addStretch()
         row.addWidget(b_close)
         lay.addLayout(row)
@@ -265,6 +269,23 @@ class QueueDialog(QDialog):
         self.status.setObjectName("dim")
         lay.addWidget(self.status)
         queue.changed.connect(self.refresh)
+        self.refresh()
+
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11), en ~300 px: la tabla sin la columna del archivo
+        (va en el tooltip de cada fila), los botones en rejilla de dos y sin «Cerrar» (ya está la ✕)."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        from . import compacto
+        self._compacta = True
+        self.table.setColumnHidden(1, True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for b in self._rapidos:
+            b.setToolTip("Añadir rápido a la cola")
+        compacto.ocultar(self._lbl_rapido, self._b_close)
+        i = self._lay.indexOf(self.table) + 1
+        compacto.rejilla(self._lay, self._rapidos, 2, i)
+        compacto.rejilla(self._lay, self._acciones, 2, i + 1)
         self.refresh()
 
     def _run(self):
@@ -310,6 +331,8 @@ class QueueDialog(QDialog):
                 prog += f" ({j['secs']} s)"
             for col, text in enumerate((what, o["path"], STATUS.get(j["status"], j["status"]), prog)):
                 it = QTableWidgetItem(text)
+                if col == 0:
+                    it.setToolTip(o["path"])            # (en el panel, la columna del archivo no se ve)
                 if col == 2 and j["status"] == "error":
                     it.setToolTip(j.get("error", ""))
                 self.table.setItem(i, col, it)

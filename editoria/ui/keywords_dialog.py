@@ -90,7 +90,19 @@ class KeywordsDialog(QDialog):
         b_close.clicked.connect(self.close)
         bottom.addWidget(b_close)
         lay.addLayout(bottom)
+        self._b_close, self._lay = b_close, lay
         self.hits: list[dict] = []
+
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11), en ~300 px: «En…» debajo de lo que buscas, la
+        lista sin la columna del archivo y los botones de abajo uno debajo de otro, sin «Cerrar»."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        from . import compacto
+        self._lay.insertWidget(self._lay.indexOf(self.tree), self.scope)
+        self.tree.setColumnHidden(1, True)
+        compacto.ocultar(self._b_close)
+        compacto.apilar(self._lay, [self.b_put, self.b_marks])
 
     # ------------------------------------------------------------ qué archivos
     def _targets(self) -> list[tuple[str, str]]:

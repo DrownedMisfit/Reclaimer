@@ -78,6 +78,9 @@ class ShortcutsDialog(QDialog):
             it.setData(0, Qt.UserRole, key)
             g.addChild(it)
             ed = QKeySequenceEdit(action.shortcut())
+            campo = ed.findChild(QLineEdit)                # (vacía: «Pulsa el atajo», corto y en español)
+            if campo is not None:
+                campo.setPlaceholderText("Pulsa el atajo")
             self._tip_extras(ed, action)
             ed.setMaximumSequenceLength(1) if hasattr(ed, "setMaximumSequenceLength") else None
             ed.editingFinished.connect(lambda k=key: self._changed(k))
@@ -183,6 +186,29 @@ class ShortcutsDialog(QDialog):
         self._tip_extras(self.editors[key], action)
         self.msg.setText(f"↺ «{key.split('/', 1)[1].replace('&', '')}» vuelve a "
                          f"{seq.toString(QKeySequence.NativeText) or 'sin atajo'}")
+
+    def compactar(self):
+        """🧰 En el panel de herramientas (~300 px): la orden se estira, el atajo y ↺ a su medida; sin barra
+        horizontal; la orden y el atajo enteros, en el tooltip."""
+        from PySide6.QtWidgets import QHeaderView
+        t = self.tree
+        t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        t.setTextElideMode(Qt.ElideRight)
+        hd = t.header()
+        hd.setStretchLastSection(False)
+        hd.setSectionResizeMode(0, QHeaderView.Stretch)
+        hd.setSectionResizeMode(1, QHeaderView.Fixed)
+        hd.setSectionResizeMode(2, QHeaderView.Fixed)
+        t.setColumnWidth(1, 96)
+        t.setColumnWidth(2, 28)
+        for i in range(t.topLevelItemCount()):
+            g = t.topLevelItem(i)
+            for j in range(g.childCount()):
+                it = g.child(j)
+                it.setToolTip(0, it.text(0))
+        for ed in self.editors.values():
+            txt = ed.keySequence().toString(QKeySequence.NativeText)
+            ed.setToolTip((f"Atajo: {txt}" + chr(10) if txt else "") + (ed.toolTip() or ""))
 
     @staticmethod
     def _tip_extras(ed, action):

@@ -106,56 +106,48 @@ def prueba_lista_e_ir(app, win):
 
 
 def prueba_exportar(app, win):
-    from editoria.ui import audit_dialog as AD
-    from editoria.ui.export_dialog import ExportDialog
+    """(lote 2) La revisión previa y Exportar van en el panel de herramientas, sin bloquear: «Revisar» (reject) no
+    exporta; «Exportar igual» (accept) abre Exportar; «No volver a mostrar» se guarda."""
     st = QSettings("EditorIA", "EditorIA")
-    n = {"revision": 0, "exporta": 0}
+    h = win.herramientas
 
-    def revision_cancel(self):
-        n["revision"] += 1
-        return 0                                                   # «Revisar»: no exporta
+    def exporta_abierta():
+        pump(app, 0.2)
+        si = h.abierta("exportar")
+        if si:
+            h.cerrar("exportar")
+            pump(app, 0.1)
+        return si
 
-    def revision_igual(self):
-        n["revision"] += 1
-        return 1                                                   # «Exportar igual»
-
-    def revision_no_mostrar(self):
-        n["revision"] += 1
-        self.no_mostrar.setChecked(True)
-        return 1
-
-    def exporta(self):
-        n["exporta"] += 1
-        return 0
+    def revision():
+        pump(app, 0.1)
+        return h.widget("revision_exportar") if h.abierta("revision_exportar") else None
 
     st.setValue("exportar/revisar_antes", "true")
-    with mock.patch.object(AD.AuditDialog, "exec", revision_cancel), \
-            mock.patch.object(ExportDialog, "exec", exporta):
-        win.export()
-    assert n == {"revision": 1, "exporta": 0}, n
-    with mock.patch.object(AD.AuditDialog, "exec", revision_igual), \
-            mock.patch.object(ExportDialog, "exec", exporta):
-        win.export()
-    assert n == {"revision": 2, "exporta": 1}, n
-    with mock.patch.object(AD.AuditDialog, "exec", revision_no_mostrar), \
-            mock.patch.object(ExportDialog, "exec", exporta):
-        win.export()
-    assert n == {"revision": 3, "exporta": 2}, n
+    win.export()
+    dlg = revision()
+    assert dlg is not None, "con avisos sale la revisión (en el panel)"
+    dlg.reject()                                                   # «Revisar»: no exporta
+    assert not exporta_abierta() and not h.abierta("revision_exportar")
+    win.export()
+    revision().accept()                                            # «Exportar igual»
+    assert exporta_abierta(), "«Exportar igual» abre Exportar"
+    win.export()
+    dlg = revision()
+    dlg.no_mostrar.setChecked(True)
+    dlg.accept()
+    assert exporta_abierta()
     assert str(st.value("exportar/revisar_antes")) == "false"
     print("✓ Con avisos: sale la revisión primero; «Revisar» no exporta; «Exportar igual» sí")
     print("✓ «No volver a mostrar» se guarda (exportar/revisar_antes = false)")
 
-    with mock.patch.object(AD.AuditDialog, "exec", revision_igual), \
-            mock.patch.object(ExportDialog, "exec", exporta):
-        win.export()                                               # con la casilla desactivada: no sale
-    assert n == {"revision": 3, "exporta": 3}, n
+    win.export()                                                   # con la casilla desactivada: no sale
+    assert revision() is None and exporta_abierta()
     st.setValue("exportar/revisar_antes", "true")
     from editoria.ai import audit as AU
-    with mock.patch.object(AD.AuditDialog, "exec", revision_igual), \
-            mock.patch.object(ExportDialog, "exec", exporta), \
-            mock.patch.object(AU, "run_audit", return_value=([], 10)):
+    with mock.patch.object(AU, "run_audit", return_value=([], 10)):
         win.export()                                               # sin avisos: exporta directo
-    assert n == {"revision": 3, "exporta": 4}, n
+    assert revision() is None and exporta_abierta()
     print("✓ Con la casilla desactivada no sale; sin avisos importantes exporta directo")
     st.remove("exportar/revisar_antes")
 

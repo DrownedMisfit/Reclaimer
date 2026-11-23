@@ -85,11 +85,13 @@ class DescriptionDialog(QDialog):
         self.sec_tags = self._seccion(bl, "#️⃣ Hashtags sugeridos (de las menciones y los temas)", fila,
                                       activa=bool(tags), habilitada=bool(tags))
         bl.addStretch(1)
+        self._bl, self._fila_tags = bl, fila
 
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setWidget(cuerpo)
         area.setFrameShape(QScrollArea.NoFrame)
+        self._area = area
 
         # ---- vista previa y botones
         self.warn = QLabel("")
@@ -112,10 +114,12 @@ class DescriptionDialog(QDialog):
         btns.addWidget(b_save)
         btns.addStretch(1)
         btns.addWidget(b_close)
+        self._b_close = b_close
 
         lay = QVBoxLayout(self)
         lay.addWidget(area, 1)
-        lay.addWidget(QLabel("Vista previa (así quedará en la descripción):"))
+        self._lbl_vista = QLabel("Vista previa (así quedará en la descripción):")
+        lay.addWidget(self._lbl_vista)
         lay.addWidget(self.preview)
         lay.addWidget(self.warn)
         lay.addLayout(btns)
@@ -131,6 +135,30 @@ class DescriptionDialog(QDialog):
         self._update()
 
     # ------------------------------------------------------------------ piezas
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11), en ~300 px: nombres cortos de las secciones (el
+        largo, en el tooltip), los hashtags en dos columnas y sin «Cerrar» (ya está la ✕)."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        from . import compacto
+        for cb, txt in ((self.sec_par, "Párrafo inicial"), (self.sec_caps, "Capítulos"),
+                        (self.sec_cred, "Créditos de lo bajado"), (self.sec_pie, "Pie fijo"),
+                        (self.sec_tags, "Hashtags")):
+            compacto.corto(cb, txt)
+        compacto.corto(self._lbl_vista, "Vista previa")
+        compacto.ocultar(self._b_close)
+        if self._tag_cbs:
+            self._fila_tags.hide()
+            caja = compacto.rejilla(self._bl, self._tag_cbs, 2, self._bl.indexOf(self._fila_tags) + 1)
+            caja.setEnabled(self.sec_tags.isChecked())
+            self.sec_tags.toggled.connect(caja.setEnabled)
+        self.chapters.compactar()
+        if not self.sec_cred.isEnabled():               # (sin clips bajados: solo la línea de la sección, sin caja vacía)
+            self.cred.hide()
+            self.sec_cred.setToolTip(self.cred.placeholderText())
+        from PySide6.QtCore import Qt
+        self._area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # (nada se sale por la derecha)
+
     def _seccion(self, bl, titulo: str, cuerpo: QWidget, activa: bool, habilitada: bool = True) -> QCheckBox:
         cb = QCheckBox(titulo)
         cb.setChecked(activa)

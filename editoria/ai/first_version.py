@@ -110,14 +110,41 @@ def broll_items(slots: list[dict], media: dict, start_at_zero: bool = True,
             items.append({"media_id": c["media_id"], "start": a, "duration": dur, "source_in": src2,
                           "note": f"B-roll IA: {c['reason']}"})
             break
-    # Si queda un hueco (nada libre, o clip corto): el plano siguiente empieza antes, o el anterior se alarga
+    # Si queda un hueco (nada libre, o clip corto): el plano siguiente empieza antes, o el anterior se alarga; si
+    # ninguno de los dos tiene más material libre, un trozo SIN USAR de otro clip del B-roll (nunca negro: 23/11, el
+    # hueco de test_auto salía cuando los dos vecinos ya estaban gastados aunque sobraba material de otros clips)
+    rellenos = []
     for k in range(len(items) - 1):
         x, y = items[k], items[k + 1]
         gap = y["start"] - (x["start"] + x["duration"])
         if gap > 0.04:
-            if not _try_grow(taken, y, media, before=gap, after=0.0):
-                _try_grow(taken, x, media, before=0.0, after=gap)
-    return items
+            if not (_try_grow(taken, y, media, before=gap, after=0.0)
+                    or _try_grow(taken, x, media, before=0.0, after=gap)):
+                r = _relleno_libre(taken, slots, media, x["start"] + x["duration"], gap)
+                if r is not None:
+                    rellenos.append(r)
+    return sorted(items + rellenos, key=lambda it: it["start"])
+
+
+def _relleno_libre(taken: dict, slots: list[dict], media: dict, start: float, dur: float) -> dict | None:
+    """Un trozo de `dur` s todavía sin usar de algún video del B-roll (de los candidatos de la propuesta), para un hueco
+    que ningún vecino puede cubrir. None si ya no queda nada libre en ninguno."""
+    vistos = []
+    for s in slots:
+        for c in s.get("candidates") or []:
+            if c["media_id"] not in vistos:
+                vistos.append(c["media_id"])
+    for mid in vistos:
+        m = media.get(mid)
+        if m is None or m.kind != "video" or not m.duration or m.duration < dur:
+            continue
+        src = broll_selection.find_free(taken, mid, 0.0, dur, m.duration)
+        if src is None:
+            continue
+        broll_selection.claim(taken, mid, src, dur)
+        return {"media_id": mid, "start": start, "duration": dur, "source_in": src,
+                "note": "B-roll IA: relleno sin repetir"}
+    return None
 
 
 def ken_burns(c, is_image: bool, k: int) -> list[dict]:

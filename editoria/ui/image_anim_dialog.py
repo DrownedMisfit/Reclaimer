@@ -207,6 +207,7 @@ class ImageAnimDialog(QDialog):
         lay = QHBoxLayout(self)
         lay.addWidget(self.view, 0, Qt.AlignTop)
         lay.addLayout(der, 1)
+        self._lay = lay
 
         self._llenar_medios(media_id)
         self.media.currentIndexChanged.connect(self._cargar_imagen)
@@ -216,6 +217,26 @@ class ImageAnimDialog(QDialog):
         self._timer.timeout.connect(self._tick)
         self._tiempo = 0.0
         self._timer.start()
+
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11), en ~300 px: la vista previa arriba (a escala,
+        el recuadro se sigue arrastrando igual) y las opciones debajo."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        from PySide6.QtGui import QTransform
+        from PySide6.QtWidgets import QBoxLayout
+        from . import diseno as D
+        # (tope de ancho Y de alto: en un proyecto vertical la vista ocupaba todo el panel y no se veía «Poner»)
+        s = min(1.0, D.px(270) / float(self.W), D.px(130) / float(self.H))
+        self.view.setTransform(QTransform.fromScale(s, s))
+        self.view.setFixedSize(int(self.W * s) + 4, int(self.H * s) + 4)
+        self._lay.setDirection(QBoxLayout.TopToBottom)
+        self._lay.setAlignment(self.view, Qt.AlignHCenter | Qt.AlignTop)
+        self.anims.setMaximumHeight(D.px(88))          # (la lista de animaciones se desplaza sola)
+        self.momentos.setMaximumHeight(D.px(90))
+        for w in (self.palabra, self.momentos):         # (solo con «Donde digo una palabra clave»)
+            w.setVisible(self.en_palabra.isChecked())
+            self.en_palabra.toggled.connect(w.setVisible)
 
     # ------------------------------------------------------------- datos
     def _fondo(self) -> QPixmap | None:
@@ -384,14 +405,27 @@ def _opacidad(op_kf: list[dict], t: float) -> float:
 
 
 def abrir(win, media_id: str | None = None):
-    """Abre la ventana (no bloquea la edición) y, al poner, selecciona lo creado."""
-    d = ImageAnimDialog(win, media_id)
-    d.setAttribute(Qt.WA_DeleteOnClose)
+    """Abre la herramienta (no bloquea la edición) y, al poner, selecciona lo creado. 🧰 (lote 1, 23/11) Como
+    pestaña del panel de herramientas; si ya estaba abierta con otra imagen, se rehace con la nueva."""
+    h = getattr(win, "herramientas", None)
+    if h is not None and (h.abierta("animar") or h.guardada("animar")):
+        viejo = h.widget("animar")
+        if getattr(viejo, "_media_pedida", None) != media_id:
+            h.cerrar("animar", por_usuario=False)
 
-    def listo(_r):
-        if d.creados:
-            win.timeline.set_selection(d.creados)
-    d.finished.connect(listo)
-    d.show()
-    return d
+    def crear():
+        d = ImageAnimDialog(win, media_id)
+        d._media_pedida = media_id
+
+        def listo(_r):
+            if d.creados:
+                win.timeline.set_selection(d.creados)
+        d.finished.connect(listo)
+        return d
+    if h is None:
+        d = crear()
+        d.setAttribute(Qt.WA_DeleteOnClose)
+        d.show()
+        return d
+    return h.dialogo("animar", crear, "Animar imagen", "Animar", "image")
 

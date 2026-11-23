@@ -21,6 +21,8 @@ CACHE: list[tuple[str, str, str, str, str]] = [
      "Se recalculan al abrir el proyecto (segundos)."),
     ("miniaturas", "Miniaturas de la biblioteca", "La imagen pequeña de cada archivo.", "si",
      "Se vuelven a crear al abrir el proyecto."),
+    ("tira_scrub", "Fotogramas al pasar el ratón", "Los de las miniaturas de video de las rejillas.", "si",
+     "Se vuelven a sacar la próxima vez que pases el ratón por ese video."),
     ("momentos", "Imágenes del buscador de momentos", "Las miniaturas de los resultados.", "si", "Se vuelven a crear."),
     ("transiciones", "Vistas previas", "Lo de «▶ Ver la transición» y «▶ Ver cómo queda».", "si", "Nada."),
     ("color", "Tablas de color", "Las que se usan al exportar el color de los clips.", "si", "Se recrean al exportar."),

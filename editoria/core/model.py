@@ -452,6 +452,8 @@ class Project:
     review_ok: list[str] = field(default_factory=list)
     # 🎬 Escenas animadas (core/scenes.py): {id: escena}; sus clips llevan la nota «🎬 <id>» (van al deshacer también)
     scenes: dict = field(default_factory=dict)
+    # 🎙 «Edita desde tu voz» (core/edita_voz.py): paso, voz elegida y lo transcrito; se guarda, NO va al deshacer
+    edita_voz: dict = field(default_factory=dict)
 
     def marked_range(self) -> tuple[float, float] | None:
         """(entrada, salida) si hay un tramo marcado válido. Falta una marca = desde el inicio / hasta el final."""
@@ -540,6 +542,8 @@ class Project:
         d["favorites"] = self.favorites
         d["thumbnails"] = self.thumbnails
         d["marks"] = [self.mark_in, self.mark_out]
+        if self.edita_voz:
+            d["edita_voz"] = json.loads(json.dumps(self.edita_voz))
         return d
 
     @classmethod
@@ -554,6 +558,7 @@ class Project:
         p.favorites = [f for f in d.get("favorites", []) if f.get("media_id") in p.media]
         p.thumbnails = dict(d.get("thumbnails", {}))
         p.mark_in, p.mark_out = (list(d.get("marks") or [None, None]) + [None, None])[:2]
+        p.edita_voz = dict(d["edita_voz"]) if isinstance(d.get("edita_voz"), dict) else {}
         from . import curves                       # 〰 proyectos de antes: cada pieza, solo los puntos de su tramo
         curves.podar(p)
         return p

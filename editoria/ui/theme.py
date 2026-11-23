@@ -551,14 +551,21 @@ def load_fonts() -> list[str]:
     return out
 
 
+def poner_traductor(app) -> None:
+    """Los textos propios de Qt (Aceptar/Cancelar de las preguntas, diálogos de color y archivos, «Pulsa el atajo»…)
+    en español: el traductor de Qt que trae PySide6 (qtbase_es.qm), una sola vez por aplicación."""
+    if app is None or hasattr(app, "_qt_es"):
+        return
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    app._qt_es = QTranslator(app)
+    if app._qt_es.load("qtbase_es", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(app._qt_es)
+
+
 def apply_dark_theme(app: QApplication) -> None:
     if not getattr(app, "_fonts_loaded", False):
         app._fonts_loaded = load_fonts()
-    if not hasattr(app, "_qt_es"):            # los diálogos de Qt (color, archivos, Aceptar/Cancelar…) en español
-        from PySide6.QtCore import QLibraryInfo, QTranslator
-        app._qt_es = QTranslator(app)
-        if app._qt_es.load("qtbase_es", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
-            app.installTranslator(app._qt_es)
+    poner_traductor(app)
     if not hasattr(app, "_wheel_guard"):
         app._wheel_guard = _WheelGuard(app)
         app.installEventFilter(app._wheel_guard)

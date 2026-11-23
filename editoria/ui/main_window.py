@@ -285,6 +285,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        from .theme import poner_traductor                 # (los textos de Qt en español también sin el tema: pruebas)
+        poner_traductor(QApplication.instance())
         self.ctrl = ProjectController(self)
         from .workspaces import Workspaces
         self.workspaces = Workspaces(self)   # 🗂 pestañas: Video de YouTube · Edits · Shorts (cada una su proyecto)
@@ -549,8 +551,9 @@ class MainWindow(QMainWindow):
             self._colocar_junto("sounds", ("audio_mix", "effects", "ai", "media"))
         self.settings.setValue("paneles/sonidos_v1", "true")
         QTimer.singleShot(0, self.apply_tab_panels)            # 🗂 los paneles de la pestaña con la que se abre
-        QTimer.singleShot(0, self._ajustar_paneles)            # ↔ nada cortado por la derecha en ningún panel
-        QTimer.singleShot(0, self.timeline.setFocus)           # (S, Supr, Ctrl+Z… van al editor desde el principio)
+        # (↔ nada cortado por la derecha en ningún panel: _ajustar_paneles lo programa apply_font_scale, más abajo; ⚡
+        #  23/11: antes se programaba también aquí y corría dos veces seguidas al abrir, ~100 ms cada una)
+        QTimer.singleShot(0, self.timeline.setFocus)          # (S, Supr, Ctrl+Z… van al editor desde el principio)
         for key, tb in (("top", self._top_bar()), ("paneles", self._barra_paneles()), ("pages", self._page_bar())):
             if key == "paneles":
                 self.addToolBarBreak(Qt.TopToolBarArea)   # (su propia fila, debajo de la de arriba)
@@ -617,6 +620,12 @@ class MainWindow(QMainWindow):
         self.preview.canvas.transform_cancel.connect(self._tf_cancel)
         from . import menu_rapido                       # ⚡ menú rápido del clip en el hueco del visor (22/11)
         self.menu_rapido = menu_rapido.instalar(self)
+        from . import herramientas                      # 🧰 las herramientas como pestañas a la derecha del visor (fase 5)
+        self.herramientas = herramientas.de(self)
+        from . import edita_voz                         # 🎙 «Edita desde tu voz»: el botón de arriba y su panel (23/11)
+        self.edita_voz = edita_voz.instalar(self)
+        from . import borde_alto                        # ◧ arrastrar el borde de un lado = todo el alto (fase 6)
+        self.borde_alto = borde_alto.instalar(self)
         self.preview.canvas.subtitle_edit.connect(self._subtitle_edit_from_viewer)
         self.engine.time_changed.connect(lambda _t: self._update_transform_edit())
         self.ctrl.project_changed.connect(self._update_transform_edit)
@@ -1057,6 +1066,44 @@ class MainWindow(QMainWindow):
                 a.setChecked(on)
         self._esquina_biblioteca()
 
+    def derecha_alto(self) -> bool:
+        """(23/11, fase 6) ¿Los paneles de la DERECHA (Inspector…) llegan hasta abajo? Se enciende arrastrando su borde de
+        abajo hacia la línea de tiempo (ui/borde_alto.py) y se apaga arrastrándolo hacia arriba."""
+        return str(self.settings.value("ventana/derecha_alto", "false")).lower() == "true"
+
+    def set_derecha_alto(self, on: bool):
+        self.settings.setValue("ventana/derecha_alto", "true" if on else "false")
+        self._esquina_biblioteca()
+
+    def _esquina_derecha(self, tl, izq_alto: bool):
+        """La esquina de abajo a la derecha, con la misma regla que la izquierda: solo si la barra de la línea de tiempo
+        sigue cabiendo entre los dos lados; si no, la línea de tiempo se queda debajo del Inspector."""
+        sin_limite = 16777215
+        quiero, maximo = Qt.BottomDockWidgetArea, sin_limite
+        if self.derecha_alto() and tl is not None and not tl.isFloating() and \
+                self.dockWidgetArea(tl) == Qt.BottomDockWidgetArea:
+            der = [d for k, d in self.docks.items() if k != "timeline" and not d.isHidden() and not d.isFloating()
+                   and self.dockWidgetArea(d) == Qt.RightDockWidgetArea]
+            if der:
+                necesita = self._tl_ancho_minimo() + 8
+                ocupado = 0
+                if izq_alto:
+                    izq = [d for k, d in self.docks.items() if k != "timeline" and d.isVisible() and not d.isFloating()
+                           and self.dockWidgetArea(d) == Qt.LeftDockWidgetArea]
+                    ocupado = max((d.width() for d in izq), default=0) + 4
+                minimo_der = max(max(self.PANEL_MIN, d.minimumWidth(), d.minimumSizeHint().width()) for d in der)
+                if self.width() - ocupado - minimo_der >= necesita:
+                    quiero, maximo = Qt.RightDockWidgetArea, self.width() - ocupado - necesita
+        for k, d in self.docks.items():
+            if k == "timeline" or d.isFloating() or self.dockWidgetArea(d) != Qt.RightDockWidgetArea:
+                continue
+            if d.maximumWidth() != maximo:
+                d.setMaximumWidth(maximo)
+        if self.corner(Qt.BottomRightCorner) != quiero:
+            self.setCorner(Qt.BottomRightCorner, quiero)
+            QTimer.singleShot(0, self._ensure_timeline_size)
+            QTimer.singleShot(0, self._tl_fit_bar)
+
     def _esquina_biblioteca(self):
         """↔ De entrada la línea de tiempo ocupa todo el ancho de abajo (el usuario: «por defecto la línea del tiempo
         debería estar como estaba antes»). Con «◧ A todo el alto», como DaVinci: los paneles de la izquierda (la
@@ -1088,6 +1135,7 @@ class MainWindow(QMainWindow):
             self.setCorner(Qt.BottomLeftCorner, quiero)
             QTimer.singleShot(0, self._ensure_timeline_size)
             QTimer.singleShot(0, self._tl_fit_bar)       # (revisión: que la barra no se vea cortada ~0,3 s)
+        self._esquina_derecha(tl, quiero == Qt.LeftDockWidgetArea)
         # (encendido pero sin sitio en esta pantalla: el botón, atenuado y diciéndolo en su tooltip)
         sin_efecto = self.biblioteca_alto() and quiero != Qt.LeftDockWidgetArea
         btn = getattr(self, "_btn_alto", None)
@@ -2418,8 +2466,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._tl_fit_bar)
 
     def open_font_size(self):
+        """🔠 Tamaño de letra. 🧰 (lote 1, 23/11) Pestaña del panel de herramientas (Aceptar / Cancelar como antes)."""
         from .font_dialog import FontSizeDialog
-        FontSizeDialog(self).exec()
+        self.herramientas.dialogo("letra", lambda: FontSizeDialog(self), "Tamaño de letra", "Letra", "type",
+                                  boton=getattr(self, "btn_font", None))
 
     def example_dir(self) -> str:
         return os.path.join(os.path.expanduser("~"), "Videos", "Reclaimer", "Proyecto de ejemplo")
@@ -2626,7 +2676,11 @@ class MainWindow(QMainWindow):
         lay.addWidget(logo)
         lay.addSpacing(4)
         lay.addWidget(brand)
-        lay.addSpacing(14)
+        lay.addSpacing(10)
+        from .edita_voz import BotonEditaVoz            # 🎙 el botón insignia, a la altura del logo (ui/edita_voz.py)
+        self.btn_edita_voz = BotonEditaVoz(bar)
+        lay.addWidget(self.btn_edita_voz)
+        lay.addSpacing(10)
         self.btn_show_media = QPushButton("🗂  Medios")
         self.btn_show_media.setObjectName("flat")
         self.btn_show_media.setToolTip("Mostrar el panel de medios")
@@ -2780,15 +2834,30 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_interruptores)
         return fila
 
+    # (fase 5) nombre corto de los interruptores largos: si no caben con su nombre, antes que quedarse en el icono
+    NOMBRE_CORTO = {"A todo el alto": "Alto", "Palabras clave": "Palabras", "Limpieza y mezcla": "Limpieza",
+                    "Edit musical": "Edit", "Transiciones y efectos": "Efectos", "Clips del edit": "Clips"}
+
     def _medir_interruptores(self, botones=None):
-        """Ancho de cada interruptor con su nombre y con solo el icono (con la letra de ahora); su mínimo, el icono."""
+        """Ancho de cada interruptor con su nombre, con su nombre corto y con solo el icono (con la letra de ahora);
+        su mínimo, el icono."""
         todos = list(getattr(self, "interruptores", {}).values()) + \
             [x for x in [getattr(self, "_btn_alto", None)] if x]
         for b in botones if botones is not None else todos:
             estilo = b.toolButtonStyle()
             b.ensurePolished()
+            if not b.property("nombre"):
+                b.setProperty("nombre", b.text())
+            nombre = str(b.property("nombre"))
+            corto = self.NOMBRE_CORTO.get(nombre, nombre)
+            b.setProperty("corto", corto)
+            texto = b.text()
             b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            b.setText(nombre)
             b.setProperty("ancho_nombre", b.sizeHint().width())
+            b.setText(corto)
+            b.setProperty("ancho_corto", b.sizeHint().width())
+            b.setText(texto)
             b.setToolButtonStyle(Qt.ToolButtonIconOnly)
             b.setProperty("ancho_icono", b.sizeHint().width())
             b.setMinimumWidth(b.sizeHint().width())      # (nunca obliga a ensanchar la ventana: como mínimo, su icono)
@@ -2877,11 +2946,14 @@ class MainWindow(QMainWindow):
         botones = [b for b in self.interruptores.values() if not b.isHidden()] + \
             [x for x in [getattr(self, "_btn_alto", None)] if x]
         extra = sum(int(b.property("ancho_nombre")) - int(b.property("ancho_icono")) for b in botones)
+        extra_corto = sum(int(b.property("ancho_corto") or b.property("ancho_nombre")) - int(b.property("ancho_icono"))
+                          for b in botones)
         lay = bar.layout()
         # (el mínimo de la barra con todos en solo icono, sin tocarlos: así no baila)
         base = lay.minimumSize().width() - sum(b.minimumWidth() for b in botones) +             sum(int(b.property("ancho_icono")) for b in botones)
         cabe = base + extra + 24 <= bar.width()
-        estilo = Qt.ToolButtonTextBesideIcon if cabe else Qt.ToolButtonIconOnly
+        cabe_corto = not cabe and base + extra_corto + 24 <= bar.width()    # (nombre corto antes que solo el icono)
+        estilo = Qt.ToolButtonTextBesideIcon if (cabe or cabe_corto) else Qt.ToolButtonIconOnly
         # (con nombre, el que cede es el nombre del proyecto —se acorta con «…»—, no un interruptor: con un nombre de
         #  proyecto largo se cortaban en «M…s». Se le pone como máximo lo que sobra; el mínimo de cada interruptor
         #  sigue siendo su icono, así la ventana se puede estrechar y entonces pasan a solo icono)
@@ -2894,6 +2966,10 @@ class MainWindow(QMainWindow):
         try:
             for b in list(self.interruptores.values()) + [x for x in [getattr(self, "_btn_alto", None)] if x]:
                 minimo = int(b.property("ancho_icono"))       # (también los escondidos: igual al volver a salir)
+                if b.property("nombre"):
+                    texto = str(b.property("corto") if cabe_corto else b.property("nombre"))
+                    if b.text() != texto:
+                        b.setText(texto)
                 if b.toolButtonStyle() != estilo:
                     b.setToolButtonStyle(estilo)
                 if b.minimumWidth() != minimo:
@@ -3399,7 +3475,6 @@ class MainWindow(QMainWindow):
             lambda: (self.right_tabs.setCurrentWidget(self.ai_panel), self.ai_panel.detect_topics()))
         act(m, "🎬 Proponer B-roll", None,
             lambda: (self.right_tabs.setCurrentWidget(self.ai_panel), self.ai_panel.propose()))
-        act(m, "🔬 Entender mi biblioteca a fondo…", None, self.open_understand)
         act(m, "◈ Analizar a fondo lo seleccionado en Medios", None, self.analyze_selected_full)
         act(m, "🔎 Buscar momentos en mis medios…", "Ctrl+Shift+F", lambda: self.open_moments(""))
         act(m, "⧉ Comparación…", None, self.open_compare)
@@ -3409,7 +3484,7 @@ class MainWindow(QMainWindow):
         act(m, "✂ Shorts desde este video…", None, lambda: __import__(
             "editoria.ui.shorts_dialog", fromlist=["open_shorts_dialog"]).open_shorts_dialog(self))
         m.addSeparator()
-        act(m, "✨ Primera versión automática…", "Ctrl+Shift+A", self.open_auto)
+        act(m, "Edita desde tu voz", "Ctrl+Shift+A", self.open_auto)   # (23/11: la autoedición vive ahí)
         act(m, "📜 Montaje desde el guion…", None, lambda: __import__(
             "editoria.ui.script_dialog", fromlist=["open_script_dialog"]).open_script_dialog(self))
         act(m, "Buscar clips por contenido", "Ctrl+F",
@@ -3607,17 +3682,11 @@ class MainWindow(QMainWindow):
             return
         if note:
             self.statusBar().showMessage(note, 6000)
-        viejo = getattr(self, "_silence_dialog", None)
-        try:
-            if viejo is not None and viejo.isVisible():
-                viejo.close()                         # (una sola a la vez: la nueva, con lo seleccionado ahora)
-        except RuntimeError:
-            pass
-        # Sin bloquear: con la ventana abierta te mueves y escuchas en la línea de tiempo para comprobar los cortes
-        self._silence_dialog = SilenceDialog(self, ids)
-        self._silence_dialog.setModal(False)
-        self._silence_dialog.setAttribute(Qt.WA_DeleteOnClose)
-        self._silence_dialog.show()
+        # 🧰 (fase 5) una pestaña del panel de herramientas, sin bloquear: con ella abierta te mueves y escuchas en la
+        # línea de tiempo para comprobar los cortes. Si ya estaba (abierta o guardada), vuelve como estaba.
+        self._silence_dialog = self.herramientas.dialogo(
+            "silencios", lambda: SilenceDialog(self, ids), "Eliminar silencios", "Silencios", "scissors",
+            boton=getattr(self.preview, "quick", {}).get("silence"))
 
     def _fill_gaps_menu(self, m, add=None):
         """⇤ Las opciones de huecos (las mismas en el botón del visor y en el menú Timeline).
@@ -4549,10 +4618,17 @@ class MainWindow(QMainWindow):
     def open_keywords(self, media_ids: list | None = None, scope: str = "timeline"):
         """🗣 Buscar lo que se dice en el audio (ligero). (No confundir con 🔑 Palabras clave = tus carpetas.)"""
         from .keywords_dialog import KeywordsDialog
-        dlg = KeywordsDialog(self, scope, media_ids)
-        dlg.show()
-        dlg.raise_()
-        self._kw_dialog = dlg
+        # 🧰 (lote 1, 23/11) pestaña del panel de herramientas; si ya estaba con otro «En…», se rehace con el nuevo
+        h = self.herramientas
+        previa = h.widget("buscar_dicho") if (h.abierta("buscar_dicho") or h.guardada("buscar_dicho")) else None
+        if previa is not None and getattr(previa, "_pedido", None) != (scope, tuple(media_ids or ())):
+            h.cerrar("buscar_dicho", por_usuario=False)
+
+        def crear():
+            d = KeywordsDialog(self, scope, media_ids)
+            d._pedido = (scope, tuple(media_ids or ()))
+            return d
+        self._kw_dialog = h.dialogo("buscar_dicho", crear, "Buscar lo que se dice", "Buscar dicho", "search")
 
     def burst(self, bars: int, per_beat: int):
         """⚡ Ráfaga: bars compases desde el cabezal (0 = entre las marcas I–O), per_beat cortes por golpe."""
@@ -4622,22 +4698,17 @@ class MainWindow(QMainWindow):
     def open_voice_record(self):
         """🎙 Grabar la voz en off mientras ves el video (la toma cae en la pista de voz, en el cabezal)."""
         from .voice_record import VoiceRecordDialog
-        dlg = getattr(self, "_voice_rec", None)
-        try:
-            if dlg is not None and dlg.isVisible():
-                dlg.raise_()
-                dlg.activateWindow()
-                return
-        except RuntimeError:
-            pass
-        self._voice_rec = VoiceRecordDialog(self)
-        self._voice_rec.setAttribute(Qt.WA_DeleteOnClose)
-        self._voice_rec.show()
+        from .herramientas import abrir_dialogo
+        self._voice_rec = abrir_dialogo(
+            self, "grabar_voz", lambda: VoiceRecordDialog(self), "Grabar voz", "Grabar", "mic",
+            trabajando=lambda: bool(getattr(self.herramientas.widget("grabar_voz"), "recording", False)))
 
     def open_chapters(self):
         """📑 Capítulos para la descripción de YouTube (desde los marcadores o los temas)."""
         from .description_dialog import DescriptionDialog
-        DescriptionDialog(self).exec()
+        # 🧰 (lote 1, 23/11) pestaña del panel de herramientas, sin bloquear
+        self.herramientas.dialogo("descripcion", lambda: DescriptionDialog(self), "Descripción para YouTube",
+                                  "Descripción", "book-open")
 
     def export_frame(self):
         """📸 El fotograma del cabezal como PNG, tal como saldrá en el video (y copiado al portapapeles)."""
@@ -4966,20 +5037,22 @@ class MainWindow(QMainWindow):
         self.moments.search_image(ref, label=f"parecido a «{m.name}» ({src:.0f} s)")
 
     def open_understand(self):
-        from .understand_dialog import UnderstandDialog
-        self.engine.pause()
-        UnderstandDialog(self.ctrl, self).exec()
-        self.ai_panel.refresh()
-        self.moments.refresh_known()
+        """🔬 (23/11) «Entender mi biblioteca a fondo» es ahora «Mirar mis clips a fondo» en «Edita desde tu voz» →
+        paso 3: se abre ahí con la casilla a la vista. (La ventana de siempre sigue en understand_dialog.py.)"""
+        ev = getattr(self, "edita_voz", None)
+        if ev is None:
+            return
+        ev.abrir(3)
+        chk = getattr(getattr(ev, "arma", None), "chk_fondo", None)
+        if chk is not None:
+            self.abrir_para_usar(chk, chk)
 
     def open_auto(self):
-        from .auto_dialog import AutoDialog
-        if self.voice.job is not None or self.ai_panel.job is not None:
-            QMessageBox.information(self, "Primera versión automática",
-                                    "Espera a que termine la tarea de IA que está en marcha.")
-            return
-        self.engine.pause()
-        AutoDialog(self).exec()
+        """✨ (23/11) La «Primera versión automática» vive ahora en «Edita desde tu voz» (Toques finales en el paso 3).
+        Ctrl+Mayús+A lo abre. (La ventana de siempre sigue en auto_dialog.py.)"""
+        ev = getattr(self, "edita_voz", None)
+        if ev is not None:
+            ev.abrir()
 
     def open_tasks(self):
         """◈ Tareas de la IA: al lado del visor (o donde lo hayas arrastrado)."""
@@ -4990,7 +5063,9 @@ class MainWindow(QMainWindow):
     def open_shortcuts(self):
         from .shortcuts_dialog import ShortcutsDialog
         self.engine.pause()
-        ShortcutsDialog(self.shortcut_actions, self).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "atajos", lambda: ShortcutsDialog(self.shortcut_actions, self), "Atajos de teclado",
+                      "Atajos", "keyboard")
 
     def _fit_to_screen(self):
         """La ventana siempre dentro de lo que se ve (encima de la barra de tareas de Windows)."""
@@ -5400,13 +5475,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("🎵 Elige la canción y el estilo a la derecha y los clips a la izquierda; "
                                          "luego «Crear edit».", 7000)
             return
-        EditDialog(self.ctrl, self).exec()
-        self.timeline.fit()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "edit_musical", lambda: EditDialog(self.ctrl, self), "Crear edit musical", "Edit",
+                      "music", al_terminar=lambda _r: self.timeline.fit())
 
     def open_compare(self):
         from .compare_dialog import CompareDialog
         self.engine.pause()
-        CompareDialog(self.ctrl, self.engine.time, self).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "comparar", lambda: CompareDialog(self.ctrl, self.engine.time, self),
+                      "Comparar con el original", "Comparar", "columns-2")
 
     def open_tracking(self, clip_id: str):
         from ..ai.tracking import is_available
@@ -5559,17 +5637,25 @@ class MainWindow(QMainWindow):
     def open_mix(self):
         """🎛 La IA propone cómo debe ir la música (tramo a tramo, con su motivo); no cambia nada hasta que aceptas."""
         from .mix_dialog import MixDialog
-        MixDialog(self).exec()
+        self.herramientas.dialogo("mezcla", lambda: MixDialog(self), "Analizar y proponer mezcla", "Mezcla",
+                                  "sliders-horizontal",
+                                  boton=getattr(getattr(self, "ai_panel", None), "btn_mix", None),
+                                  trabajando=lambda: getattr(self.herramientas.widget("mezcla"), "job", None) is not None)
 
     def open_collect(self):
         """📦 Copia del proyecto con todos sus archivos en una carpeta (respaldo / otro disco / otro PC)."""
         from .collect_dialog import CollectDialog
-        CollectDialog(self).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "reunir", lambda: CollectDialog(self), "Reunir el proyecto en una carpeta", "Reunir",
+                      "folder-open")
 
     def open_generator(self, gen: dict | None = None, clip_ids: list[str] | None = None):
         """🟦 Color sólido o degradado (nuevo en el cabezal, o cambiar el de esos clips)."""
         from .generator_dialog import GeneratorDialog
-        GeneratorDialog(self, gen, clip_ids).exec()
+        from .herramientas import abrir_dialogo
+        self.herramientas.cerrar("generador", por_usuario=False)   # (otro color u otros clips: el de ahora)
+        abrir_dialogo(self, "generador", lambda: GeneratorDialog(self, gen, clip_ids), "Color sólido o degradado",
+                      "Color", "palette")
 
     def add_adjustment(self):
         """🎨 Capa de ajuste en el cabezal (5 s, encima de todo): lo que le pongas (color, efectos) se aplica a todo lo
@@ -6233,7 +6319,9 @@ class MainWindow(QMainWindow):
     def open_diagnostics(self):
         from .diagnostics_dialog import DiagnosticsDialog
         self.engine.pause()
-        DiagnosticsDialog(self).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "diagnostico", lambda: DiagnosticsDialog(self), "Diagnóstico de Reclaimer",
+                      "Diagnóstico", "gauge")
 
     def open_convert(self, fmt: str = "mp4"):
         """🔁 Convertir videos y audios a MP4 / MP3 (arrastrando desde tus carpetas)."""
@@ -6295,13 +6383,13 @@ class MainWindow(QMainWindow):
 
     def open_queue(self):
         from .render_queue import QueueDialog
-        dlg = getattr(self, "_queue_dialog", None)
-        if dlg is None:
-            dlg = self._queue_dialog = QueueDialog(self, self.render_queue)
-        dlg.show()
-        dlg.raise_()
+        # 🧰 (lote 1, 23/11) pestaña del panel de herramientas; mientras exporta cuenta como «trabajando» (no se
+        # cierra por el límite de pestañas)
+        self._queue_dialog = self.herramientas.dialogo(
+            "cola", lambda: QueueDialog(self, self.render_queue), "Cola de exportación", "Cola", "rows-3",
+            trabajando=lambda: bool(getattr(self.render_queue, "running", False)))
 
-    def export(self):
+    def export(self, revisado: bool = False):
         """Antes de exportar se revisa el proyecto; si hay avisos importantes se muestran (audit_dialog.revision_previa)."""
         from .audit_dialog import revision_previa
         previo = getattr(self, "_export_dlg", None)
@@ -6311,18 +6399,29 @@ class MainWindow(QMainWindow):
             en_marcha = False
         if en_marcha:                                # (ya hay una exportación escondida: se enseña esa, no otra)
             previo._oculto = False
-            previo.show()
-            previo.raise_()
+            if self.herramientas.contiene(previo):
+                self.herramientas.al_frente("exportar")
+            else:
+                previo.show()
+                previo.raise_()
             return
-        if revision_previa(self):
-            # (guardado en la ventana: con «🖼 Ir a Miniatura mientras exporta» el diálogo se esconde y sigue vivo)
-            self._export_dlg = ExportDialog(self.ctrl, self)
-            self._export_dlg.exec()
+        if self.herramientas.abierta("exportar") or self.herramientas.guardada("exportar"):
+            self.herramientas.al_frente("exportar")  # (ya estaba: como la dejaste)
+            return
+        if revisado or revision_previa(self):
+            # 🧰 (fase 5) una pestaña del panel de herramientas (guardada en la ventana: con «🖼 Ir a Miniatura
+            # mientras exporta» se esconde y sigue viva; al terminar vuelve con el resultado)
+            self._export_dlg = self.herramientas.dialogo(
+                "exportar", lambda: ExportDialog(self.ctrl, self), "Exportar video", "Exportar", "download",
+                boton=getattr(self, "btn_export", None),
+                trabajando=lambda: bool(getattr(self.herramientas.widget("exportar"), "exportando", lambda: False)()))
 
     def open_audit(self):
         from .audit_dialog import AuditDialog
         self.engine.pause()
-        AuditDialog(self.ctrl, self.engine, self.timeline, self).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "revision", lambda: AuditDialog(self.ctrl, self.engine, self.timeline, self),
+                      "Revisión del proyecto", "Revisión", "list-checks")
 
     def open_quick_review(self, scope: str = "todo"):
         """✓ Revisión guiada (Ctrl+Shift+Q): solo lo dudoso, uno a uno (voz, cortes, avisos y B-roll dudoso; «voz»: solo

@@ -2884,8 +2884,12 @@ class InspectorPanel(QWidget):
             self.btn_view_speed.setEnabled(True)
             self.btn_view_speed.setText("▶ Ver cómo queda")
             if path:
-                self._view_dialog = TransitionPreview(path, "Cómo queda", self.window())
-                self._view_dialog.show()
+                from .herramientas import abrir_dialogo
+                self.window().herramientas.cerrar("ver_como_queda", por_usuario=False) if hasattr(
+                    self.window(), "herramientas") else None
+                self._view_dialog = abrir_dialogo(self, "ver_como_queda",
+                                                  lambda: TransitionPreview(path, "Cómo queda", self.window()),
+                                                  "Cómo queda", "Cómo queda", "film")
         self._view_job.done.connect(lambda path: end(path))
         self._view_job.failed.connect(lambda m: end(msg=m))
         self._view_job.start()

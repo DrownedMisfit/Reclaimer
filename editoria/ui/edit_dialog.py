@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
@@ -159,11 +159,9 @@ class EditDialog(QDialog):
         # no hay barra lateral: antes la lista se desplazaba y se perdían las casillas y el principio del nombre)
         self.clips.setTextElideMode(Qt.ElideMiddle)
         self.clips.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.clips.setMouseTracking(True)                       # miniatura grande al pasar el ratón
-        self.clips.itemEntered.connect(self._hover_clip)
-        self._big = QLabel(self, Qt.ToolTip)
-        self._big.setStyleSheet("background: #111; border: 1px solid #4a8fe0; padding: 2px;")
-        self._big.hide()
+        # (23/11: sin miniatura grande flotante: al pasar el ratón por un video, sus fotogramas en su misma casilla)
+        from .miniaturas import activar_scrub
+        activar_scrub(self.clips, self._ruta_clip)
         self._thumbs: dict[str, str] = {}
         self._thumb_job = None
         self.clips.setToolTip("Los marcados entran en el edit. Doble clic = elegir sus tramos. Arrastra aquí videos o "
@@ -232,6 +230,7 @@ class EditDialog(QDialog):
         btns = QHBoxLayout()
         btns.addStretch(1)
         self.cancel_btn = QPushButton("Cerrar")
+        self.botones_de_trabajo = [self.cancel_btn]  # (🧰 en el panel se queda: mientras crea es «Cancelar»)
         self.cancel_btn.clicked.connect(self._cancel)
         self.go = QPushButton("🎵  Crear edit")
         self.go.setObjectName("primary")
@@ -305,7 +304,6 @@ class EditDialog(QDialog):
         checked = {self.clips.item(i).data(Qt.UserRole) for i in range(self.clips.count())
                    if self.clips.item(i).checkState() == Qt.Checked}
         self.clips.setCurrentItem(None)
-        self._big.hide()
         self.clips.clear()
         for m, txt in filas:
             it = QListWidgetItem(txt)
@@ -391,27 +389,10 @@ class EditDialog(QDialog):
         self._thumb_job.finished.connect(lambda: setattr(self, "_thumb_job", None))
         self._thumb_job.start()
 
-    def _hover_clip(self, it):
-        """Al pasar el ratón por un clip: su miniatura en grande, al lado."""
-        th = self._thumbs.get(it.data(Qt.UserRole)) if it is not None else None
-        if not th:
-            self._big.hide()
-            return
-        pm = QPixmap(th)
-        if pm.isNull():
-            self._big.hide()
-            return
-        self._big.setPixmap(pm.scaled(360, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self._big.adjustSize()
-        r = self.clips.visualItemRect(it)
-        pos = self.clips.viewport().mapToGlobal(r.topLeft())
-        x = pos.x() + 80
-        y = pos.y() - self._big.height() - 6
-        if y < 0:
-            y = pos.y() + r.height() + 6
-        self._big.move(x, y)
-        self._big.show()
-        self._big.raise_()
+    def _ruta_clip(self, it):
+        """El archivo de un clip de la lista (para ver sus fotogramas al pasar el ratón)."""
+        m = self.ctrl.project.media.get(it.data(Qt.UserRole)) if it is not None else None
+        return m.path if m is not None else None
 
     def pick_ranges(self, it):
         """✂ Los tramos de ese video que puede usar la IA (se guardan con el proyecto)."""
@@ -478,8 +459,6 @@ class EditDialog(QDialog):
     def eventFilter(self, obj, e):
         """Soltar archivos de tus carpetas: en «Canción» = la canción; en la lista = clips para el edit."""
         from PySide6.QtCore import QEvent
-        if e.type() == QEvent.Leave and obj is self.clips.viewport():
-            self._big.hide()
         from_list = obj is self.song and e.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop) \
             and getattr(e, "source", lambda: None)() is self.clips
         if from_list:                                   # 🎵 un clip de la lista soltado en «Canción»
@@ -739,7 +718,6 @@ class EditDialog(QDialog):
             self.accept()
 
     def closeEvent(self, e):
-        self._big.hide()
         FXP.hide()
         if self._thumb_job is not None:
             self._thumb_job.cancel()

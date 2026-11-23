@@ -70,8 +70,9 @@ class TransitionPreview(QDialog):
         self.video.setMinimumSize(320, 180)
         self.video.setStyleSheet("background: #000;")
         lay.addWidget(self.video, 1)
-        info = QLabel("Así queda exactamente al exportar (se repite en bucle, sin sonido).")
+        info = self._info = QLabel("Así queda exactamente al exportar (se repite en bucle, sin sonido).")
         info.setObjectName("dim")
+        info.setWordWrap(True)
         lay.addWidget(info)
         close = QPushButton("Cerrar")
         close.clicked.connect(self.close)
@@ -86,6 +87,12 @@ class TransitionPreview(QDialog):
             self.timer.start()
         else:
             self.video.setText("No se pudo leer la vista previa.")
+
+    def compactar(self):
+        """🧰 En el panel de herramientas (~300 px): el video, más pequeño (con su forma); la explicación, al tooltip."""
+        self.video.setMinimumSize(240, 135)
+        self.video.setToolTip(self._info.text())
+        self._info.hide()
 
     def _next(self):
         if not self.frames:

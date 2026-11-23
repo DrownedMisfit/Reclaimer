@@ -123,11 +123,22 @@ class MenuRapido(QWidget):
     def pedir(self, *_a):
         self._t.start()
 
+    def _host(self):
+        return getattr(self.win, "herramientas", None)
+
+    def alto_necesario(self) -> int:
+        """Lo que mide la columna con los botones que se ven (para que el panel de herramientas no sea más alto)."""
+        n = sum(1 for k, b in self.botones.items() if not b.isHidden()) or len(self.botones)
+        sep = D.px(2)
+        return n * (D.px(26) + sep) - sep + 2 * sep + 2 + 2 * D.px(6) + D.px(2)
+
     def actualizar(self):
         c = self._clip_elegido()
         self._clip = c.id if c is not None else None
-        if c is None:
-            self.hide()
+        host = self._host()
+        dentro = host.poner_clip(c is not None) if host is not None else False   # 🧰 delante, en el panel
+        if c is None or (host is not None and not dentro and host.donde == "hueco" and host.visible):
+            self.hide()                    # (sin clip, o la herramienta va delante en el mismo hueco)
             self._geo = None
             return
         p = self.win.ctrl.project
@@ -159,6 +170,8 @@ class MenuRapido(QWidget):
         sb.style().polish(sb)
         self._marcar_modo()
         self._geo = None
+        if host is not None and host.clip_delante():
+            host.recolocar()               # (el panel, al alto de los botones de ESTE clip)
         self.recolocar()
 
     def _marcar_modo(self):
@@ -176,7 +189,14 @@ class MenuRapido(QWidget):
         return False
 
     def _hueco(self) -> QRect | None:
-        """El hueco a la derecha del cuadro, en coordenadas del área de dibujo (None = no hay)."""
+        """El hueco a la derecha del cuadro, en coordenadas del área de dibujo (None = no hay). Con el panel de
+        herramientas abierto en el hueco, su sitio dentro del panel (va delante, en la pestaña «Clip»)."""
+        host = self._host()
+        if host is not None and host.clip_delante():
+            r = host.rect_clip()
+            if r is not None and r.width() > 0:
+                QTimer.singleShot(0, self.recolocar)     # (el panel puede estar recolocándose: otra vez luego)
+                return r
         vp = self.canvas.viewport()
         fr = self.canvas.mapFromScene(self.canvas.frame.rect()).boundingRect()
         izq = max(0, fr.right() + 1)
@@ -221,6 +241,9 @@ class MenuRapido(QWidget):
             b.setGeometry(sep + 1 + col * (ancho_b + sep), sep + 1 + fila * (alto_b + sep), ancho_b, alto_b)
         x = hueco.left() + mi
         y = max(m, min(hueco.height() - h - m, hueco.center().y() - h // 2))
+        host = self._host()
+        if host is not None and host.clip_delante():    # 🧰 dentro del panel: pegado arriba, sin hueco encima
+            x, y = hueco.left() + D.px(2), hueco.top()
         self.setGeometry(x, y, w, h)
         self.show()
         self.raise_()

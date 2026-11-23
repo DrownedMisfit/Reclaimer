@@ -455,8 +455,8 @@ class DescargasGenerales(InternetMixin, QWidget):
                                 "miniatura y su duración, listo para arrastrarlo a la línea de tiempo")
         self.vacio_d.setVisible(False)
         dl.addWidget(self.vacio_d)
-        from .miniaturas import activar_vista_grande              # 🖼 al pasar el ratón: en grande (y animado)
-        activar_vista_grande(self.lista, lambda it: it.data(Qt.UserRole))
+        from .miniaturas import activar_scrub      # 🖼 al pasar el ratón: los fotogramas en la misma casilla
+        activar_scrub(self.lista, lambda it: it.data(Qt.UserRole))
         # (las acciones de siempre, a la vista: poner en el cabezal, a Medios y quitar —lo elegido, abajo—; abrir la
         #  carpeta y releerla, junto a la carpeta. El clic derecho las repite)
         fb = QHBoxLayout()
@@ -683,8 +683,6 @@ class DescargasGenerales(InternetMixin, QWidget):
         """Relee la carpeta general (no toca Medios: la categoría que les pusiste se respeta)."""
         from .descargas_panel import archivos_de
         self._tok += 1
-        from .miniaturas import esconder_vista_grande
-        esconder_vista_grande()                    # (la lista se rehace: la vista grande no se queda colgada)
         self.lista.clear()
         self._items = {}
         rutas = archivos_de(self.raiz, False, hondo=2) if os.path.isdir(self.raiz) else []

@@ -287,8 +287,8 @@ class DescargasPanel(QWidget):
         self.lista.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lista.customContextMenuRequested.connect(self._menu_lista)
         self.lista.installEventFilter(self)
-        from .miniaturas import activar_vista_grande              # 🖼 al pasar el ratón: en grande (y animado)
-        activar_vista_grande(self.lista, lambda it: it.data(Qt.UserRole))
+        from .miniaturas import activar_scrub      # 🖼 al pasar el ratón: los fotogramas en la misma casilla
+        activar_scrub(self.lista, lambda it: it.data(Qt.UserRole))
         partes = QSplitter(Qt.Vertical)
         partes.setChildrenCollapsible(False)
         partes.addWidget(self.arbol)

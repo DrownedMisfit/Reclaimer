@@ -155,7 +155,9 @@ class SaveManager(QObject):
         self.label.setText(txt)
 
     def open_settings(self):
-        SaveSettingsDialog(self, self.win).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self.win, "guardado", lambda: SaveSettingsDialog(self, self.win), "Guardado automático",
+                      "Guardado", "settings-2")
 
 
 class SaveSettingsDialog(QDialog):

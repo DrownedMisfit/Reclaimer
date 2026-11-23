@@ -2364,8 +2364,12 @@ class EffectsPanel(QWidget):
             self._trans_job = None
             self.b_view.setEnabled(True)
             self.trans_status.setText("")
-            self._trans_dialog = TransitionPreview(path, "Transición", self.window())
-            self._trans_dialog.show()
+            from .herramientas import abrir_dialogo
+            self.window().herramientas.cerrar("ver_transicion", por_usuario=False) if hasattr(
+                self.window(), "herramientas") else None          # (la de ahora, no la anterior)
+            self._trans_dialog = abrir_dialogo(self, "ver_transicion",
+                                               lambda: TransitionPreview(path, "Transición", self.window()),
+                                               "Ver la transición", "Transición", "film")
 
         def failed(msg):
             self._trans_job = None

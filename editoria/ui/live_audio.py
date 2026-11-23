@@ -194,11 +194,20 @@ class LiveAudio(QObject):
         self._stop.connect(self._w.stop)
         self._thread.start()
         self._init.emit()
-        self._w.listo.wait(1.5)                # (espera a que abra la tarjeta: unos ms)
+        # (23/11) SÍ se espera aquí a que abra la tarjeta (unos 50 ms): abrirla en su hilo mientras la ventana crea sus
+        # reproductores ponía a QtMultimedia a arrancar en dos hilos a la vez, y con una tarjeta real Reclaimer pudo
+        # quedarse colgado en «Abriendo…» (en las pruebas no hay tarjeta y no se veía).
+        self._w.listo.wait(1.5)
         self.playing = False
 
     @property
+    def listo(self) -> bool:
+        """True si ya se sabe si hay tarjeta (sin esperar)."""
+        return self._w.listo.is_set()
+
+    @property
     def ok(self) -> bool:
+        self._w.listo.wait(1.5)                # (espera a que abra la tarjeta: unos ms)
         return self._w.ok
 
     def set_plan(self, plan: LM.Plan):

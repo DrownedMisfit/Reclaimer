@@ -197,17 +197,11 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "transcripción, en 1 y 2).", "w:subtitles.enabled", None),
         ("Para subirlos aparte a YouTube: <b>«Exportar .srt»</b>.", "w:transcript.btn_srt", None),
     ]),
-    ("auto", "✨ Primera versión automática", "automático autoedición primera versión ia", [
-        ("En el panel <b>IA ✨</b>, la tarjeta <b>«✨ Autoedición»</b> (o "
-         "<b>Ctrl+Mayús+A</b>): eliges tu narración y la IA monta el video casi terminado.",
-         "w:docks.ai", None),
-        ("Todo queda como clips normales: cámbialos a tu gusto o deshazlo entero con <b>Ctrl+Z</b>.",
-         "w:timeline", None),
-    ]),
-    ("entender", "🔬 Que la IA conozca tus clips", "entender biblioteca personajes nombres reconocer", [
-        ("<b>«🔬 Entender mi biblioteca a fondo»</b>: la IA revisa cada segundo de tus videos y aprende quién y "
-         "qué aparece. Ponle a tus imágenes nombres claros («objeto.png»).",
-         "w:ai_panel.btn_understand", None),
+    ("auto", "Edita desde tu voz", "automático autoedición primera versión ia voz armar toques entender clips", [
+        ("El botón <b>«Edita desde tu voz»</b> de arriba (o <b>Ctrl+Mayús+A</b>): eliges tu grabación, pules tu voz "
+         "y <b>«Armar mi video»</b> pone el material; los <b>Toques finales</b> (temas, estilo, música, volumen…) y "
+         "<b>«Mirar mis clips a fondo»</b> están en el paso 3.", "w:btn_edita_voz", None),
+        ("Todo queda como clips normales: cámbialos a tu gusto o deshazlo con <b>Ctrl+Z</b>.", "w:timeline", None),
     ]),
     ("momentos", "🔎 Encontrar un momento concreto", "buscar momento escena aparece imagen referencia", [
         ("<b>«🔎 Buscar momentos»</b> (Ctrl+Mayús+F): describe lo que buscas o dale una imagen de referencia.",

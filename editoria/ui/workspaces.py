@@ -78,13 +78,18 @@ class Workspaces(QObject):
         self.bar.setCurrentIndex(KEYS.index(fmt))
         self._guard = False
 
-    def start(self):
-        """Al abrir Reclaimer: la pestaña donde estabas, con su proyecto."""
-        self.started = True
+    def elegir_al_abrir(self) -> str:
+        """La pestaña donde estabas, elegida (sin abrir aún su proyecto): app.run la pone antes de enseñar la ventana,
+        para que sus paneles salgan bien desde el primer pintado; el proyecto lo abre start() justo después."""
         fmt = str(self.settings.value("espacios/actual", "youtube"))
         self.current = fmt if fmt in KEYS else "youtube"
         self._set_bar(self.current)
-        self.restore(self.current)
+        return self.current
+
+    def start(self):
+        """Al abrir Reclaimer: la pestaña donde estabas, con su proyecto."""
+        self.started = True
+        self.restore(self.elegir_al_abrir())
 
     def _has_work(self) -> bool:
         p = self.ctrl.project

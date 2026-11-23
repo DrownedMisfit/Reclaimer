@@ -53,7 +53,8 @@ def main():
     assert "IA ✨" not in menus, "14/11: la IA, solo en su pestaña"
     ia = [a.text() for a in win.ai_panel.btn_more.menu().actions()]
     voz = [a.text() for a in menus["Voz"].actions()]
-    assert "🎬 Proponer B-roll" in ia and "✨ Primera versión automática…" in ia and "🎵 Crear edit musical…" in ia
+    # (23/11: la «Primera versión automática» vive en «Edita desde tu voz»; Ctrl+Mayús+A lo abre)
+    assert "🎬 Proponer B-roll" in ia and "Edita desde tu voz" in ia and "🎵 Crear edit musical…" in ia
     assert not any("B-roll" in t or "edit musical" in t for t in voz), voz
     print("✓ lo de la IA en la pestaña «IA ✨» → «✨ Más»; «Voz» solo con lo de la voz")
 

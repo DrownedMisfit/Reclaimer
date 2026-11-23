@@ -48,6 +48,7 @@ class FontSizeDialog(QDialog):
             row.addWidget(val)
             self.sliders[key], self.values[key] = sl, val
             title = QLabel(f"<b>{label}</b>")
+            title.setWordWrap(True)                      # (en el panel de herramientas, ~300 px: nada cortado)
             form.addWidget(title)
             form.addLayout(row)
         lay.addLayout(form)
@@ -89,6 +90,12 @@ class FontSizeDialog(QDialog):
     def _reset(self):
         for sl in self.sliders.values():
             sl.setValue(100)
+
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11): el resumen en una línea, sin hueco."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        self.summary.setToolTip("Cómo queda cada parte con los dos controles a la vez")
 
     def reject(self):
         for k, v in self._orig.items():       # Cancelar: como estaba

@@ -1,0 +1,8 @@
+# Cómo se debe pronunciar una palabra:  palabra = como suena
+# Una por línea; no distingue mayúsculas; vale también para varias palabras seguidas.
+# Solo cambia cómo se LEE: los subtítulos y el texto siguen con lo que escribiste.
+YouTube = yutub
+TikTok = tiktok
+online = onlain
+streamer = estrímer
+gamer = guéimer

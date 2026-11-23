@@ -3671,23 +3671,53 @@ class TimelineWidget(QWidget):
         edge = "right" if lado == "arriba" else "left"
         lo, hi = self.ctrl.ripple_limits(cid, edge)
         t0 = c.end if lado == "arriba" else c.start
+        # (los dos finales estimados: el sentido del arrastre decide qué pieza cambia, sea cual sea el punto)
+        ests = {lado: est}
+        try:
+            L, Rc = self.ctrl.project.clips.get(j["left_id"]), self.ctrl.project.clips.get(j["right_id"])
+            st = self._union_estado(j)
+            ea, eb = st["arriba"][1], st["abajo"][1]
+            ests = {"arriba": None if (ea is None or L is None) else L.end + (ea - j["out"]),
+                    "abajo": None if (eb is None or Rc is None) else Rc.start - (j["in"] - eb)}
+        except Exception:
+            pass
         self._drag = {"type": "union_dot", "lado": lado, "cid": cid, "edge": edge, "t0": t0, "t": t0, "lo": lo,
-                      "hi": hi, "est": est, "y": y, "iman": False,
+                      "hi": hi, "est": est, "ests": ests, "y": y, "iman": False, "quitar": False,
+                      "left_id": j["left_id"], "right_id": j["right_id"], "lims": {(cid, edge): (lo, hi)},
                       "x0": self.x_for(t0) if x_raton is None else x_raton}     # (cuenta lo que se mueve el ratón)
         return True
 
-    def _union_move(self, d: dict, x: float):
+    def _union_move(self, d: dict, x: float, quitar: bool = False):
+        """🔴 El SENTIDO decide (23/11): ← recupera el principio de la pieza de la derecha, → el final de la de la
+        izquierda; lo de detrás se empuja. Arrastrar nunca quita audio: solo con Alt (quitar)."""
         fps = max(1.0, float(self.ctrl.project.fps or 30))
-        t = d["t0"] + round((x - d["x0"]) / self.pps * fps) / fps    # (de fotograma en fotograma desde su borde)
-        d["iman"] = False
-        if d["est"] is not None and self.snapping:
-            te = self._union_snap(d["est"], d["lado"])
-            if abs(self.x_for(te) - self.x_for(t)) <= self.SNAP_PX:
-                t, d["iman"] = te, True
+        dt = round((x - d["x0"]) / self.pps * fps) / fps             # (de fotograma en fotograma desde su borde)
         antes = d.get("t", d["t0"])
+        d["iman"] = False
+        dest = self.ctrl.union_destino(d["left_id"], d["right_id"], dt, quitar) if "left_id" in d else None
+        if dest is None:
+            t = d["t0"]
+        else:
+            cid, edge, t = dest
+            if (cid, edge) not in d["lims"]:
+                d["lims"][(cid, edge)] = self.ctrl.ripple_limits(cid, edge)
+            d["lo"], d["hi"] = d["lims"][(cid, edge)]
+            d.update(cid=cid, edge=edge, lado="arriba" if edge == "right" else "abajo", quitar=bool(quitar))
+            d["est"] = d["ests"].get(d["lado"])
+        if d["est"] is not None and self.snapping and dest is not None:
+            te = self._union_snap(d["est"], d["lado"])
+            mismo_lado = (te - d["t0"]) * (t - d["t0"]) > 0           # (el imán no cambia el sentido del arrastre)
+            if mismo_lado and abs(self.x_for(te) - self.x_for(t)) <= self.SNAP_PX:
+                t, d["iman"] = te, True
         d["t"] = min(max(t, d["lo"]), d["hi"])
         n = self._union_frames(d)
-        self.setToolTip(f"{n:+d} fotogramas" + (" · ∩ final estimado de la palabra" if d["iman"] else ""))
+        if n == 0:
+            que = ""
+        elif d["quitar"]:
+            que = " · quita del " + ("final de la izquierda" if d["lado"] == "arriba" else "principio de la derecha")
+        else:
+            que = " · recupera el " + ("final de la izquierda" if d["lado"] == "arriba" else "principio de la derecha")
+        self.setToolTip(f"{n:+d} fotogramas" + que + (" · ∩ final estimado de la palabra" if d["iman"] else ""))
         self._union_vista(d)
         # ⚡ solo se repinta de la unión hacia la derecha (lo que cambia), no toda la línea de tiempo
         xs = min(self.x_for(d["t0"]), self.x_for(antes), self.x_for(d["t"])) - 12
@@ -5047,6 +5077,11 @@ class TimelineWidget(QWidget):
             self.set_selection(self.selected - set(group) if clip.id in self.selected
                                else self.selected | set(group))
             return
+        # 👆 Ya elegido junto a otros: al SOLTAR sin arrastrar se queda solo ese (su imagen y su sonido si había más;
+        # si solo estaban ellos dos, solo el que pulsaste). Arrastrando, se mueven todos como siempre.
+        estrechar = None
+        if clip.id in self.selected and len(self.selected) > 1 and not alt:
+            estrechar = list(group) if set(group) != self.selected else [clip.id]
         if clip.id not in self.selected or (alt and len(self.selected) > 1):
             self.set_selection(group)
         if zone in ("left", "right"):
@@ -5063,7 +5098,7 @@ class TimelineWidget(QWidget):
                           "partners": partners, "linked": self.linked and not alt}
         else:
             tr0 = self.ctrl.project.track(clip.track_id)
-            self._drag = {"type": "move", "anchor": clip.id, "x0": pos.x(), "y0": pos.y(),
+            self._drag = {"type": "move", "anchor": clip.id, "x0": pos.x(), "y0": pos.y(), "estrechar": estrechar,
                           "ids": sorted(self.selected), "dt": 0.0, "dtrack": 0,
                           "track0": self.track_index_at(pos.y()), "kind0": tr0.kind if tr0 else None}
 
@@ -5305,8 +5340,8 @@ class TimelineWidget(QWidget):
                 self._sil_move(d, pos)
             return
         if d is not None and d["type"] == "union_dot":       # 🔴 arrastrando un punto de unión
-            self._union_move(d, pos.x())                    # (repinta él solo lo que cambia: de la unión a la derecha)
-            return
+            self._union_move(d, pos.x(), bool(e.modifiers() & Qt.AltModifier))   # (Alt = quitar; repinta solo
+            return                                                                 #  de la unión a la derecha)
         if d is None:
             hov = self._grip_rect().contains(pos)
             if hov != getattr(self, "_grip_hover", False):
@@ -5337,10 +5372,9 @@ class TimelineWidget(QWidget):
                 self.update()
             if ud is not None:
                 self.setCursor(Qt.SizeHorCursor)
-                que = ("Final de la pieza de la izquierda: arrastra → para poner más audio, ← para quitar"
-                       if ud[1] == "arriba" else
-                       "Inicio de la pieza de la derecha: arrastra ← para poner más audio, → para quitar")
-                tip = que + ". Lo de detrás se recorre solo (también el video) y se deshace con un Ctrl+Z"
+                tip = ("Punto de unión: arrastra ← para recuperar el principio de la pieza de la derecha, → para "
+                       "recuperar el final de la de la izquierda. Arrastrar nunca quita audio: Alt + arrastrar (o Q / "
+                       "W) quita. Lo de detrás se empuja solo (también el video) y se deshace con un Ctrl+Z")
                 if ud[4]:
                     tip += f"\n🔴 Parece cortada: {ud[6]}" + (" (la línea tenue marca dónde acaba; imán)"
                                                             if ud[5] is not None else "")
@@ -5647,6 +5681,8 @@ class TimelineWidget(QWidget):
             self.update()
             return
         if not d or not d.get("active"):
+            if d and d.get("type") == "move" and d.get("estrechar"):
+                self.set_selection(d["estrechar"])   # 👆 clic SIN arrastrar en uno de varios elegidos: se queda ese
             self.update()
             return
         proj = self.ctrl.project
@@ -5789,6 +5825,13 @@ class TimelineWidget(QWidget):
             from .repetidos_ui import poner_en_menu as _rep_menu
             if _rep_menu(menu, self.ctrl, clip.id, self.repetidos) is not None:
                 menu.addSeparator()
+        if clip:                                           # 🎬 lo puso «Arma tu video»: «Cambiar ▸» sus alternativas
+            try:
+                from .armar_video import poner_en_menu as _armar_menu
+                if _armar_menu(menu, self.ctrl, clip.id) is not None:
+                    menu.addSeparator()
+            except Exception:  # noqa: BLE001 - el menú sale igual
+                pass
         if clip and getattr(self, "_sil_span_sel", None):  # ✂ clic derecho en una franja oscura de la onda: arriba
             self._add_silence_actions(menu, self._sil_span_sel)
         ids = sorted(self.selected)

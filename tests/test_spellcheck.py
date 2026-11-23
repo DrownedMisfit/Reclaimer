@@ -113,7 +113,8 @@ def main():
     finally:
         help_ui.exec_menu = orig
     assert "difícil" in seen["acts"] and any("Añadir" in k for k in seen["acts"]), list(seen["acts"])
-    assert any(k.startswith("Copiar") or "Copy" in k for k in seen["acts"]), list(seen["acts"])   # el menú de siempre
+    # (el menú de siempre; con el traductor de Qt sale «&Copiar»: el & es el atajo con Alt, en pantalla va subrayado)
+    assert any(k.replace("&", "").startswith("Copiar") or "Copy" in k for k in seen["acts"]), list(seen["acts"])
     pump(app, 0.8)                                  # (el texto del clip se guarda al dejar de escribir)
     assert "difícil" in ed.toPlainText(), ed.toPlainText()
     assert "difícil" in ctrl.project.clips[cid].text["content"], ctrl.project.clips[cid].text

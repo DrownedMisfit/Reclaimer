@@ -47,6 +47,37 @@ class ChaptersPanel(QWidget):
         self._avisos: list[str] = []
         self._fill()
 
+    def compactar(self):
+        """🧰 En el panel de herramientas (~300 px): textos cortos (el largo, en el tooltip)."""
+        self.source.setItemText(0, "Lo mejor que haya")
+        self.source.setItemData(0, "Marcadores con nombre o, si no, los temas de la narración", Qt.ToolTipRole)
+        self.table.setHorizontalHeaderLabels(["Empieza", "Capítulo"])
+        self.table.horizontalHeaderItem(1).setToolTip("Nombre del capítulo: doble clic para cambiarlo")
+        # (estado vacío compacto: una línea; con capítulos, la tabla crece con sus filas hasta un tope, sin barra
+        #  horizontal: las columnas se ajustan al ancho)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(0)
+        self.vacio = QLabel("Sin capítulos todavía")
+        self.vacio.setObjectName("dim")
+        self.vacio.setToolTip("Salen de tus marcadores con nombre o, si no hay, de los temas de la narración")
+        self.layout().insertWidget(self.layout().indexOf(self.table) + 1, self.vacio)
+        self._compacto = True
+        self._ajustar()
+
+    TOPE_FILAS = 8
+
+    def _ajustar(self):
+        if not getattr(self, "_compacto", False):
+            return
+        n = self.table.rowCount()
+        self.vacio.setVisible(n == 0)
+        self.table.setVisible(n > 0)
+        if n:
+            filas = sum(self.table.rowHeight(i) for i in range(min(n, self.TOPE_FILAS)))
+            alto = self.table.horizontalHeader().height() + 2 * self.table.frameWidth() + filas
+            self.table.setFixedHeight(alto)
+
     def _fill(self, *_):
         from .common import fmt_time
         self._loading = True
@@ -60,6 +91,7 @@ class ChaptersPanel(QWidget):
             self.table.setItem(i, 0, it)
             self.table.setItem(i, 1, QTableWidgetItem(title))
         self._loading = False
+        self._ajustar()
         self._update()
 
     def chosen(self) -> list[tuple[float, str]]:

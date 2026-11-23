@@ -390,7 +390,9 @@ class VozIAPanel(QWidget):
             self.status.setText(f"«{palabra}» se leerá «{suena.strip()}». «Muestra» para oírlo.")
 
     def abrir_diccionario(self):
-        DiccionarioDialog(self).exec()
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "diccionario_voz", lambda: DiccionarioDialog(self), "Diccionario de la voz IA",
+                      "Diccionario", "book-open")
 
     def carpeta(self) -> str:
         from ..core.voice_record import takes_dir

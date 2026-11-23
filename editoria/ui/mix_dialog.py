@@ -267,6 +267,15 @@ class MixDialog(QDialog):
         self.b_remove.setEnabled(False)
         self.status.setText("Mezcla de la IA quitada (Ctrl+Z la vuelve a poner).")
 
+    def compactar(self):
+        """🧰 En el panel de herramientas: sin el tamaño de ventana de antes (820×640)."""
+        self.resize(0, 0)
+
+    def done(self, r):
+        if self.job is not None:                 # (también al cerrar su pestaña: el análisis se para)
+            self.job.cancel()
+        super().done(r)
+
     def closeEvent(self, e):
         if self.job is not None:
             self.job.cancel()

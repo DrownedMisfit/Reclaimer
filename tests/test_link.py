@@ -115,6 +115,18 @@ def main():
     assert p.track(ac.track_id).kind == TRACK_AUDIO
     print(f"✓ clic selecciona los dos y al arrastrar se mueven juntos ({start0:.1f} → {vc.start:.1f} s)")
 
+    # --- 2b) Con los dos elegidos, clic (sin arrastrar) en uno: se queda solo ese; clic en el otro: otra vez los dos
+    assert tl.selected == {vc.id, ac.id}, tl.selected
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, center(ac))
+    assert tl.selected == {ac.id}, tl.selected
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, center(vc))
+    assert tl.selected == {vc.id, ac.id}, tl.selected
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, center(vc))
+    assert tl.selected == {vc.id}, tl.selected
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, center(ac))
+    assert tl.selected == {vc.id, ac.id}, tl.selected
+    print("✓ con los dos elegidos, un clic en uno deja solo ese (sin clic fuera); clic en el otro: los dos")
+
     # --- 3) Recortar el borde derecho del video recorta también el sonido
     r = tl.clip_rect(vc)
     a = QPoint(int(r.right() - 2), int(r.center().y()))

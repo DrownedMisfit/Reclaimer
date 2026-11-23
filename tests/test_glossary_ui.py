@@ -202,11 +202,9 @@ def prueba_dialogo():
         visto["ok"] = True
         dlg.done(0)                      # al cerrar se guarda
 
-    GLOSARIO_ACCION = accion
-    try:
-        win.clips._abrir_glosario()
-    finally:
-        GLOSARIO_ACCION = None
+    dlg = win.clips._abrir_glosario()                # (lote 2: pestaña del panel de herramientas, sin exec)
+    assert dlg is not None and not dlg.isWindow(), "el glosario se abre como pestaña"
+    accion(dlg)
     assert visto.get("ok"), "el diálogo no se abrió"
     g = KG.load()
     assert "pradera lunar" not in g["si"], g["si"]

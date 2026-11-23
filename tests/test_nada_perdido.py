@@ -211,10 +211,10 @@ def main():
     chk(not D["guided"].isHidden(), "…y abre el Montaje guiado")
     win.go_page("edit")
     pump(app, 0.3)
-    n = len(exportados)
     win.page_buttons["deliver"].click()
     pump(app, 0.3)
-    chk(len(exportados) == n + 1, "abajo, «Entrega» abre la ventana de exportar")
+    chk(win.herramientas.abierta("exportar"), "abajo, «Entrega» abre Exportar (pestaña del panel de herramientas)")
+    win.herramientas.cerrar("exportar")
     chk(any(a.text().startswith("Exportar video") and a.shortcut().toString() == "Ctrl+E" for a in
             win.findChildren(type(win.act_guiado))), "Ctrl+E (Archivo → Exportar video…) sigue")
     chk(not win.btn_quick_export.isHidden(), "⚡ Exportar rápido sigue arriba (otra función: exporta sin preguntar)")

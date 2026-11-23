@@ -2,8 +2,9 @@
 😂 Panel «Memes»: tu biblioteca de memes, la MISMA en todos tus proyectos (ver core/memes.py).
 
   arriba:  buscador (nombre o etiqueta) · tipo (videos / imágenes / sonidos) · con o sin audio · «Añadir archivos…»
-  medio:   rejilla de miniaturas con la duración pequeña; arrastrar a la línea de tiempo; doble clic = en el cabezal
-  vista previa del elegido (o del que tiene el ratón encima): imagen grande, datos y «Ver» (sin sonido en pruebas)
+  medio:   rejilla de miniaturas con la duración pequeña; arrastrar a la línea de tiempo; doble clic = en el cabezal;
+           al pasar el ratón por un video, sus fotogramas en la misma casilla (ui/miniaturas.py); los datos, en el
+           tooltip; «Ver» lo reproduce aquí mismo (sin sonido en pruebas)
   abajo:   Poner en el cabezal · Renombrar · Etiquetas · Quitar (a la Papelera, preguntando) · Abrir carpeta
 
 Para la ventana y otros paneles:
@@ -16,7 +17,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QMimeData, QObject, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
@@ -96,9 +97,19 @@ class AgregarMemeDialog(QDialog):
                 "audio": self.audio.isChecked()}
 
 
-def _pedir(parent, nombre: str, con_audio: bool, puede_audio: bool, titulo: str) -> dict | None:
-    dlg = AgregarMemeDialog(nombre, con_audio, puede_audio, parent, titulo)
-    return dlg.valores() if dlg.exec() == QDialog.Accepted else None
+def _pedir(parent, nombre: str, con_audio: bool, puede_audio: bool, titulo: str, luego) -> None:
+    """🧰 Nombre, etiquetas y audio en el panel de herramientas (sin bloquear): al aceptar, luego(valores)."""
+    from .herramientas import abrir_dialogo
+    caja = {}
+
+    def fabrica():
+        caja["dlg"] = AgregarMemeDialog(nombre, con_audio, puede_audio, parent, titulo)
+        return caja["dlg"]
+
+    def al_terminar(r):
+        if r == QDialog.Accepted and caja.get("dlg") is not None:
+            luego(caja["dlg"].valores())
+    abrir_dialogo(parent, "memes_agregar", fabrica, titulo, "Memes", "star", al_terminar=al_terminar)
 
 
 def _en_segundo_plano(parent, fn, texto_ok: str):
@@ -130,11 +141,10 @@ def agregar_clip(parent, ctrl, clip_id: str, preguntar: bool = True, **valores):
     reversa = bool(getattr(c, "reverse", False))
     puede_audio = m.kind == KIND_AUDIO or (m.kind == KIND_VIDEO and bool(m.has_audio))
     congelado = velocidad <= 0 and m.kind == KIND_VIDEO and not solo_audio
-    if preguntar:
-        valores = _pedir(parent, m.name.rsplit(".", 1)[0][:60], True, puede_audio and not congelado,
-                         "Agregar el clip a memes") or {}
-        if not valores:
-            return None
+    if preguntar:                                    # (se pregunta en el panel; al aceptar, sigue sin preguntar)
+        _pedir(parent, m.name.rsplit(".", 1)[0][:60], True, puede_audio and not congelado, "Agregar el clip a memes",
+               lambda v: agregar_clip(parent, ctrl, clip_id, preguntar=False, **v) if v else None)
+        return None
     if velocidad <= 0 and not congelado:
         velocidad = 1.0                              # (un sonido «congelado» no existe: a su velocidad normal)
     desde = float(c.source_in)
@@ -156,11 +166,10 @@ def agregar_medios(parent, ctrl, media_ids: list[str], preguntar: bool = True, *
         _aviso(parent, "Eso ya está en tus memes (o no se encuentra el archivo).")
         return None
     puede_audio = any(m.kind == KIND_AUDIO or (m.kind == KIND_VIDEO and m.has_audio) for m in ms)
-    if preguntar:
-        valores = _pedir(parent, ms[0].name.rsplit(".", 1)[0][:60] if len(ms) == 1 else "", True, puede_audio,
-                         "Agregar a memes") or {}
-        if not valores:
-            return None
+    if preguntar:                                    # (se pregunta en el panel; al aceptar, sigue sin preguntar)
+        _pedir(parent, ms[0].name.rsplit(".", 1)[0][:60] if len(ms) == 1 else "", True, puede_audio,
+               "Agregar a memes", lambda v: agregar_medios(parent, ctrl, media_ids, preguntar=False, **v) if v else None)
+        return None
 
     def todo(cancelado):
         hechos = []
@@ -268,28 +277,16 @@ class MemesPanel(QWidget):
         self.rejilla.setToolTip("Arrastra un meme a la línea de tiempo · doble clic = en el cabezal · clic derecho = "
                                 "más opciones")
         self.rejilla.itemDoubleClicked.connect(lambda it: self.poner_en_cabezal([it.data(Qt.UserRole)]))
-        self.rejilla.currentItemChanged.connect(lambda it, _p: self._previa(it))
         self.rejilla.itemSelectionChanged.connect(self.parar)
-        self.rejilla.itemEntered.connect(self._previa)
         self.rejilla.setContextMenuPolicy(Qt.CustomContextMenu)
         self.rejilla.customContextMenuRequested.connect(self._menu)
         v.addWidget(self.rejilla, 1)
-        from .miniaturas import activar_vista_grande              # 🖼 al pasar el ratón: en grande (y animado)
-        activar_vista_grande(self.rejilla, lambda it: (it.data(Qt.UserRole) or {}).get("ruta"))
-        # vista previa
-        self.previa = QLabel()
-        self.previa.setAlignment(Qt.AlignCenter)
-        self.previa.setMinimumHeight(60)
-        self.previa.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.previa.setVisible(False)             # (sin meme elegido, sin hueco)
-        self.previa_info = QLabel("")
-        self.previa_info.setObjectName("dim")
-        self.previa_info.setWordWrap(True)
-        self.previa_info.setVisible(False)
-        self.caja_video = QVBoxLayout()
-        v.addWidget(self.previa)
+        # (23/11: sin vista grande flotante ni imagen grande debajo: al pasar el ratón por un video, sus fotogramas en
+        #  la misma casilla —ui/miniaturas.py—; nombre, duración, audio y ruta, en el tooltip de la casilla)
+        from .miniaturas import activar_scrub
+        activar_scrub(self.rejilla, lambda it: (it.data(Qt.UserRole) or {}).get("ruta"))
+        self.caja_video = QVBoxLayout()           # (el «Ver»: el reproductor aparece aquí al pulsarlo)
         v.addLayout(self.caja_video)
-        v.addWidget(self.previa_info)
         f3 = QHBoxLayout()                       # (estrecho: responsive baja los iconos a la línea siguiente)
         f3.setSpacing(D.px(D.M1))
         self.btn_cabezal = D.BotonPrincipal("Poner en el cabezal", "arrow-down-to-line")
@@ -328,8 +325,6 @@ class MemesPanel(QWidget):
     def refrescar(self):
         sel = {m["id"] for m in self.elegidos()}
         self._tok += 1
-        from .miniaturas import esconder_vista_grande
-        esconder_vista_grande()                    # (la rejilla se rehace: la vista grande no se queda colgada)
         self.rejilla.clear()
         self._items = {}
         lista = MEMES.buscar(self.buscador.text(), self.filtro_tipo.currentData(), self.filtro_audio.currentData())
@@ -338,7 +333,9 @@ class MemesPanel(QWidget):
             it = QListWidgetItem(m.get("nombre") or os.path.basename(m["ruta"]))
             it.setData(Qt.UserRole, m)
             tags = ", ".join(m.get("etiquetas") or [])
-            it.setToolTip(f"{m.get('nombre')}\n" + (f"Etiquetas: {tags}\n" if tags else "")
+            dur = float(m.get("duracion") or 0)
+            it.setToolTip(f"{m.get('nombre')}\n" + (f"Duración: {_mmss(dur)}\n" if dur else "")
+                          + (f"Etiquetas: {tags}\n" if tags else "")
                           + ("Con audio" if m.get("audio") else "Sin audio") + f" · {m['ruta']}")
             self.rejilla.addItem(it)
             self._items[m["ruta"]] = it
@@ -402,37 +399,6 @@ class MemesPanel(QWidget):
             it.setIcon(con_duracion(pm, dur))
         except RuntimeError:
             pass
-
-    def _previa(self, it):
-        m = it.data(Qt.UserRole) if it is not None else None
-        if not m:
-            self.previa.clear()
-            self.previa_info.setText("")
-            self.previa.setVisible(False)
-            self.previa_info.setVisible(False)
-            return
-        pm = QPixmap()
-        if m.get("tipo") == KIND_IMAGE:
-            r = QImageReader(m["ruta"])
-            r.setAutoTransform(True)
-            tam = r.size()
-            if tam.isValid():
-                r.setScaledSize(tam.scaled(QSize(320, 180), Qt.KeepAspectRatio))
-            img = r.read()
-            pm = QPixmap.fromImage(img) if not img.isNull() else pm
-        else:
-            from .clips_panel import _miniatura_ruta
-            png = _miniatura_ruta(m["ruta"])
-            if os.path.isfile(png):
-                pm = QPixmap(png).scaled(QSize(320, 180), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.previa.setPixmap(pm) if not pm.isNull() else self.previa.clear()
-        self.previa.setVisible(not pm.isNull())
-        dur = float(m.get("duracion") or 0)
-        tags = ", ".join(m.get("etiquetas") or [])
-        self.previa_info.setText(" · ".join(x for x in (
-            m.get("nombre", ""), _mmss(dur) if dur else "", "con audio" if m.get("audio") else "sin audio",
-            tags) if x))
-        self.previa_info.setVisible(True)
 
     def parar(self):
         """Para el «Ver» y suelta el archivo (si no, Windows no deja quitarlo ni moverlo)."""

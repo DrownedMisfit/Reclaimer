@@ -1601,6 +1601,13 @@ class FilaFluida(QWidget):
     def count(self) -> int:
         return len(self._ws)
 
+    def removeWidget(self, w: QWidget):          # noqa: N802
+        """Lo saca de la fila (sigue siendo hijo hasta que se reparente o se borre)."""
+        if w in self._ws:
+            self._ws.remove(w)
+            w.removeEventFilter(self)
+            self._al_cambiar()
+
     def setSpacing(self, espacio: int):          # noqa: N802
         self._esp = int(espacio)
         self._al_cambiar()
@@ -1683,6 +1690,11 @@ class FilaFluida(QWidget):
     def event(self, e):
         if e.type() == QEvent.LayoutRequest:     # (un hijo cambió de tamaño)
             self._al_cambiar()
+        elif e.type() == QEvent.ChildRemoved:    # (un hijo se borra o se va a otro sitio: fuera de la fila, antes
+            hijo = e.child()                     #  de que quede un objeto ya borrado en la lista)
+            if any(w is hijo for w in self._ws):
+                self._ws = [w for w in self._ws if w is not hijo]
+                self._al_cambiar()
         return super().event(e)
 
     def eventFilter(self, obj, e):               # noqa: N802

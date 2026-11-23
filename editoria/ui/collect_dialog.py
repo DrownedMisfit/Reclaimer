@@ -70,6 +70,7 @@ class CollectDialog(QDialog):
         self.b_go.setObjectName("primary")
         self.b_go.clicked.connect(self._go)
         self.b_close = QPushButton("Cerrar")
+        self.botones_de_trabajo = [self.b_close]     # (🧰 en el panel se queda: mientras copia es «Cancelar»)
         self.b_close.clicked.connect(self._close)
         btns.addWidget(self.b_open)
         btns.addStretch(1)

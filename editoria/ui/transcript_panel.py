@@ -328,7 +328,8 @@ class TranscriptPanel(QWidget):
             self._rebuild()
         self._cap_lazy()
         self._sum_lazy()
-        self._refresh_hits(reset=False)
+        if self.search.text().strip() or self._hits:     # (sin búsqueda no hay marcas 🔎 que rehacer: no se borran
+            self._refresh_hits(reset=False)               #  las de la regla al cambiar de narración)
 
     def refresh(self):
         """Cambiaron las reglas de qué se quita (casillas de ⚡): se vuelve a dibujar lo tachado."""

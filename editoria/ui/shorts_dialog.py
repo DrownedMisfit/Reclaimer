@@ -65,6 +65,7 @@ class ShortsDialog(QDialog):
         self.btn_open.clicked.connect(self._open_last)
         btn_close = QPushButton("Cerrar")
         btn_close.clicked.connect(self.accept)
+        self._btn_close, self._lay = btn_close, lay
         pie.addWidget(self.btn_all)
         pie.addWidget(self.btn_open)
         pie.addStretch(1)
@@ -72,6 +73,15 @@ class ShortsDialog(QDialog):
         lay.addLayout(pie)
 
         self._load()
+
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11): los botones de abajo, uno debajo de otro (en
+        ~300 px no caben en fila) y sin «Cerrar» (ya está la ✕)."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        from . import compacto
+        compacto.ocultar(self._btn_close)
+        compacto.apilar(self._lay, [self.btn_all, self.btn_open])
 
     # ------------------------------------------------------------ propuestas
     def _load(self):
@@ -170,7 +180,11 @@ class ShortsDialog(QDialog):
             self.accept()
 
 
-def open_shorts_dialog(win) -> None:
-    """Abre la ventana (modal). Sin ventanas en las pruebas: se usa ShortsDialog directamente."""
-    dlg = ShortsDialog(win)
-    dlg.exec()
+def open_shorts_dialog(win):
+    """🧰 (lote 1, 23/11) Pestaña del panel de herramientas, sin bloquear. Sin ventanas en las pruebas: se usa
+    ShortsDialog directamente."""
+    h = getattr(win, "herramientas", None)
+    if h is None:
+        ShortsDialog(win).exec()
+        return None
+    return h.dialogo("shorts", lambda: ShortsDialog(win), "Shorts desde este video", "Shorts", "scissors")

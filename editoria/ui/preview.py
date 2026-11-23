@@ -4899,7 +4899,7 @@ class PlaybackEngine(QObject):
         if _QA0.instance() is not None:
             _QA0.instance().aboutToQuit.connect(self.shutdown_video)
         if str(_QS("EditorIA", "EditorIA").value("audio/en_directo", "true")).lower() == "true":
-            self.live = self._crear_live()
+            self.live = self._crear_live(esperar=False)
         self.zones = None
         try:                                          # ⧉ transiciones reales en el visor (renderizadas en segundo plano)
             from .zone_preview import ZonePreview
@@ -5630,16 +5630,21 @@ class PlaybackEngine(QObject):
         self._timer.setInterval(15 if self._own_video else 30)
         self._sync()
 
-    def _crear_live(self):
-        """Abre la mezcla en directo (None si no hay tarjeta o falla: el visor usa sus reproductores)."""
+    def _crear_live(self, esperar: bool = True):
+        """Abre la mezcla en directo (None si no hay tarjeta o falla: el visor usa sus reproductores).
+        ⚡ esperar=False (al arrancar): la tarjeta se abre en su hilo mientras se monta la ventana y se comprueba en
+        cuanto arranca el bucle de eventos (_comprobar_live), antes de que puedas darle a ▶."""
         try:
             from .live_audio import LiveAudio
             live = LiveAudio(self)
         except Exception:  # noqa: BLE001
             return None
-        if not live.ok:
-            live.close()
-            return None
+        if esperar or live.listo:
+            if not live.ok:
+                live.close()
+                return None
+        else:
+            QTimer.singleShot(0, self, self._comprobar_live)
         live.mixer.monitor = _ganancia_escucha()      # (🔊 volumen de escucha de la barra)
         from PySide6.QtWidgets import QApplication as _QA
         if _QA.instance() is not None:
@@ -5647,6 +5652,19 @@ class PlaybackEngine(QObject):
         import atexit
         atexit.register(live.close)                  # (también si se sale sin el bucle de Qt: pruebas, cierres raros)
         return live
+
+    def _comprobar_live(self):
+        """(arranque) La tarjeta ya respondió: sin salida de audio, fuera la mezcla en directo (suenan los
+        reproductores de siempre, como antes cuando se comprobaba al crearla)."""
+        live = self.live
+        if live is None or live.ok:
+            return
+        live.close()
+        self.live = None
+        try:
+            self._sync()
+        except Exception:  # noqa: BLE001
+            pass
 
     @property
     def mute_all(self) -> bool:

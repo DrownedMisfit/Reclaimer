@@ -51,7 +51,9 @@ def _pcm(path: str, k: int) -> np.ndarray:
 
 
 def _corr(x: np.ndarray, y: np.ndarray) -> float:
-    if x.std() < 1e-6 or y.std() < 1e-6:
+    n = min(len(x), len(y))                 # (las pistas pueden diferir en unas muestras: el relleno del AAC)
+    x, y = x[:n], y[:n]
+    if n < 2 or x.std() < 1e-6 or y.std() < 1e-6:
         return 0.0
     return float(np.corrcoef(x, y)[0, 1])
 

@@ -29,6 +29,7 @@ class IntroOutroDialog(QDialog):
                      "proyecto. Si el archivo no está en Medios, se importa al ponerlo.")
         tip.setWordWrap(True)
         lay.addWidget(tip)
+        self._tip = tip
         row = QHBoxLayout()
         row.addWidget(QLabel("Tipo de proyecto:"))
         self.fmt = QComboBox()
@@ -40,9 +41,12 @@ class IntroOutroDialog(QDialog):
         row.addStretch()
         lay.addLayout(row)
         grid = QGridLayout()
+        self._etiquetas: list[QLabel] = []
         self.edits: dict[str, QLineEdit] = {}
         for r, (quien, titulo) in enumerate((("intro", "Intro (al principio)"), ("outro", "Outro (al final)"))):
-            grid.addWidget(QLabel(titulo), r, 0)
+            et = QLabel(titulo)
+            self._etiquetas.append(et)
+            grid.addWidget(et, r, 0)
             ed = QLineEdit()
             ed.setReadOnly(True)
             ed.setPlaceholderText("(ninguno)")
@@ -62,6 +66,16 @@ class IntroOutroDialog(QDialog):
         botones.rejected.connect(self.reject)
         lay.addWidget(botones)
         self._cargar()
+
+    def compactar(self):
+        """🧰 Como pestaña del panel de herramientas (lote 1, 23/11): la explicación al tooltip y los nombres cortos."""
+        from . import compacto as _compacto
+        _compacto.ajustar_zonas(self)     # (el contenido de cada zona, al ancho visible menos la barra)
+        self.setToolTip(self._tip.text())
+        self._tip.hide()
+        for et, txt in zip(self._etiquetas, ("Intro", "Outro")):
+            et.setToolTip(et.text())
+            et.setText(txt)
 
     def _cargar(self):
         intro, outro = self._vals[self._fmt]
@@ -90,7 +104,12 @@ class IntroOutroDialog(QDialog):
 
 
 def open_dialog(win):
-    IntroOutroDialog(win).exec()
+    """🧰 (lote 1, 23/11) Pestaña del panel de herramientas, sin bloquear (Guardar = como antes)."""
+    h = getattr(win, "herramientas", None)
+    if h is None:
+        IntroOutroDialog(win).exec()
+        return None
+    return h.dialogo("intro_outro", lambda: IntroOutroDialog(win), "Mi intro y mi outro", "Intro", "film")
 
 
 def put_now(win, fmt: str | None = None):

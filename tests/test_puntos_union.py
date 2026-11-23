@@ -197,22 +197,23 @@ def main():
     tl.grab().copy(0, 0, min(tl.width(), 1600), min(tl.height(), 300)).save(os.path.join(capturas, "puntos.png"))
     print("✓ rojo donde la palabra sigue tras el corte o la voz suena en el borde; gris discreto en las uniones limpias")
 
-    def mover(x, y):
+    def mover(x, y, mods=Qt.NoModifier):
         ev = QMouseEvent(QEvent.MouseMove, QPointF(x, y), QPointF(tl.mapToGlobal(QPoint(int(x), int(y)))),
-                         Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+                         Qt.LeftButton, Qt.LeftButton, mods)
         tl.mouseMoveEvent(ev)
 
-    def arrastrar(k, dx, captura=None):
+    def arrastrar(k, dx, captura=None, alt=False):
         x, y = pts[k][0], pts[k][1]
-        QTest.mousePress(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(round(x)), int(round(y))))
+        mods = Qt.AltModifier if alt else Qt.NoModifier          # (Alt + arrastrar = quitar audio)
+        QTest.mousePress(tl, Qt.LeftButton, mods, QPoint(int(round(x)), int(round(y))))
         assert (tl._drag or {}).get("type") == "union_dot", tl._drag
-        mover(x + dx / 2, y)
-        mover(x + dx, y)
+        mover(x + dx / 2, y, mods)
+        mover(x + dx, y, mods)
         d = dict(tl._drag)
         if captura:
             tl.repaint()
             tl.grab().copy(0, 0, min(tl.width(), 1600), min(tl.height(), 300)).save(os.path.join(capturas, captura))
-        QTest.mouseRelease(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(round(x + dx)), int(round(y))))
+        QTest.mouseRelease(tl, Qt.LeftButton, mods, QPoint(int(round(x + dx)), int(round(y))))
         pump(app, 0.1)
         return d
 
@@ -261,6 +262,31 @@ def main():
     print("✓ punto de abajo +3 fotogramas: la pieza de la derecha gana 0.100 s por delante sin moverse, lo de detrás se "
           "recorre eso, el video igual; un Ctrl+Z")
 
+    # 3b) 23/11: el SENTIDO decide, sea cual sea el punto; arrastrar nunca quita audio (solo con Alt)
+    def dura():
+        return [round(c.duration, 4) for c in piezas_de(a1)]
+    D0 = dura()
+    d = arrastrar((2.05, "arriba"), -(tres + 1))               # punto de ARRIBA hacia ← = principio de la derecha
+    assert d["cid"] == piezas_de(a1)[1].id and d["edge"] == "left" and tl._union_frames(d) == 3, d
+    assert cerca(dura()[0], D0[0]) and cerca(dura()[1], D0[1] + 0.1) and cerca(piezas_de(a1)[2].start, A0[2].start + 0.1)
+    ctrl.undo_stack.undo()
+    pump(app, 0.05)
+    assert foto() == antes
+    d = arrastrar((2.05, "abajo"), tres + 1)                   # punto de ABAJO hacia → = final de la izquierda
+    assert d["cid"] == piezas_de(a1)[0].id and d["edge"] == "right" and tl._union_frames(d) == 3, d
+    assert cerca(dura()[0], D0[0] + 0.1) and cerca(dura()[1], D0[1])
+    ctrl.undo_stack.undo()
+    pump(app, 0.05)
+    assert foto() == antes
+    for k_, dx_, quien in (((2.05, "arriba"), -(tres + 1), 0), ((2.05, "abajo"), tres + 1, 1)):
+        d = arrastrar(k_, dx_, alt=True)                        # Alt: ← quita del final de la izquierda, → del principio
+        assert tl._union_frames(d) == -3 and cerca(dura()[quien], D0[quien] - 0.1), (k_, d, dura())
+        ctrl.undo_stack.undo()
+        pump(app, 0.05)
+        assert foto() == antes
+    print("✓ el sentido decide: ← recupera el principio de la derecha y → el final de la izquierda desde cualquiera de "
+          "los dos puntos; arrastrar nunca quita audio, Alt + arrastrar sí; un Ctrl+Z cada uno")
+
     # 4) el imán: cerca del final estimado de la palabra, se pega (al fotograma de después)
     tl.repaint()
     pts = {(round(j["t"], 3), lado): (x, y, rojo, est, mot) for j, lado, x, y, rojo, est, mot in tl._union_puntos()}
@@ -298,7 +324,7 @@ def main():
     msgs.clear()
     rot_dur = ctrl.project.clips[rot.id].duration
     p3_ini = piezas_de(a1)[2].start
-    arrastrar((2.05, "arriba"), -(tres + 1))
+    arrastrar((2.05, "arriba"), -(tres + 1), alt=True)
     assert foto() != con_escena and not msgs, msgs
     capas = [c for c in ctrl.project.clips.values() if c.text is not None]
     assert cerca(sum(c.duration for c in capas), rot_dur - 0.1), [(c.start, c.duration) for c in capas]
@@ -409,13 +435,13 @@ def main():
     tl.repaint()
     pts = {(round(j["t"], 3), lado): (x, y, rojo, est, mot) for j, lado, x, y, rojo, est, mot in tl._union_puntos()}
     msgs.clear()
-    d = arrastrar((round(O + 5.0, 3), "abajo"), tres + 1)
+    d = arrastrar((round(O + 5.0, 3), "abajo"), tres + 1, alt=True)
     assert tl._union_frames(d) == -3 and not msgs, (d, msgs)
     assert cerca(piezas_de(an)[2].duration, N0[2].duration - 0.1) and mapa() == m0, mapa()
     ctrl.undo_stack.undo()
     pump(app, 0.05)
     assert foto() == base4
-    print("✓ arrastre de verdad del punto de abajo −3 en la 2.ª unión: subtítulos y B-roll siguen sobre la misma palabra")
+    print("✓ arrastre de verdad del punto de abajo con Alt −3 en la 2.ª unión: subtítulos y B-roll siguen sobre la misma palabra")
 
     # un texto bloqueado detrás (otra pista): avisa y no toca nada, con +3 y con −3
     ctrl._edit("bloquear subtítulo", lambda pp: setattr(pp.clips[subs[1].id], "locked", True))

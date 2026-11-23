@@ -367,8 +367,8 @@ class MaterialPorFrases(QWidget):
         self.lista.itemClicked.connect(self._clic)
         self.lista.accion.connect(self._accion)
         self.lista.setVisible(False)
-        from . import miniaturas
-        miniaturas.activar_vista_grande(self.lista, self._dato_vista)
+        from . import miniaturas                  # (al pasar el ratón por un video: sus fotogramas en la casilla)
+        miniaturas.activar_scrub(self.lista, self._dato_vista)
         cv.addWidget(self.lista)
 
         self.cabecera.toggled.connect(self._abrir)
@@ -797,6 +797,11 @@ class MaterialPorFrases(QWidget):
                                   f"quita).", "eye-off")
                 self._oferta_seguir = (cid, zona, ruta, desde, desde + dur) if mueve else None
                 self.btn_seguir.setVisible(mueve)
+                if mueve and not self.cabecera.isChecked():   # (el aviso y «Seguir», a la vista aunque la sección
+                    self.cabecera.blockSignals(True)          #  estuviera plegada; no se recuerda abierta)
+                    self.cabecera.setChecked(True)
+                    self.cabecera.blockSignals(False)
+                    self._abrir(True, guardar=False)
                 self._ir(e["tl"])
         self._poner_en_cola(trabajo, "Buscando qué tapar…", listo, "censurar")
 
@@ -888,6 +893,7 @@ class MaterialPorFrases(QWidget):
             self._ir(self.resumen[dato[1]]["tl"])
 
     def _dato_vista(self, it):
+        """El archivo de la casilla (el scrub solo cambia las de video; las imágenes se quedan como están)."""
         dato = it.data(ROL) if it is not None else None
         if not dato:
             return None
@@ -913,8 +919,6 @@ class MaterialPorFrases(QWidget):
         return f"Trozo {_mmss(seccion[0])}–{_mmss(seccion[1])}"
 
     def _refrescar_lista(self):
-        from . import miniaturas
-        miniaturas.esconder_vista_grande()
         lista = self.lista
         lista.setUpdatesEnabled(False)
         lista.clear()

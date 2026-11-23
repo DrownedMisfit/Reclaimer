@@ -10,7 +10,7 @@ import time
 
 from PySide6.QtCore import QProcess, QSettings, Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QSizePolicy,
                                QProgressBar, QPushButton, QSpinBox, QVBoxLayout)
 
 from ..core import media as media_tools
@@ -29,6 +29,7 @@ def _default_export_dir() -> str:
 class ExportDialog(QDialog):
     def __init__(self, ctrl, parent=None):
         super().__init__(parent)
+        self._win = parent             # (la ventana: en el panel de herramientas, parent() ya es el panel)
         self.ctrl = ctrl
         self.setWindowTitle("Exportar video")
         self.setMinimumWidth(560)
@@ -86,21 +87,25 @@ class ExportDialog(QDialog):
         # Destino de un clic
         from PySide6.QtWidgets import QButtonGroup, QWidget
         self.targets = QButtonGroup(self)
-        trow = QHBoxLayout()
+        from .diseno import FilaFluida
+        trow = FilaFluida(espacio=6)               # (si no caben en una fila —en el panel de herramientas—, en dos)
         for key, label, apps in [(k, t["name"], t.get("apps", "")) for k, t in TARGETS.items()] +                 [("custom", "⚙ Personalizado", "tú eliges todo")]:
             b = QPushButton(label)
             b.setCheckable(True)
             b.setMinimumHeight(38)
             b.setProperty("target", key)
             self.targets.addButton(b)
-            col = QVBoxLayout()                       # el botón y, debajo, para qué apps sirve
+            caja = QWidget()
+            col = QVBoxLayout(caja)                   # el botón y, debajo, para qué apps sirve
+            col.setContentsMargins(0, 0, 0, 0)
             col.setSpacing(2)
             col.addWidget(b)
             pie = QLabel(apps)
             pie.setObjectName("dim")
             pie.setAlignment(Qt.AlignCenter)
             col.addWidget(pie)
-            trow.addLayout(col)
+            pie.setWordWrap(True)
+            trow.addWidget(caja)
         self.targets.buttonClicked.connect(lambda b: self._apply_target(b.property("target")))
         self.target_info = QLabel("")
         self.target_info.setWordWrap(True)
@@ -138,7 +143,7 @@ class ExportDialog(QDialog):
             self.only_marked.setText(f"Solo el tramo marcado ({fmt_time(rng[0])} → {fmt_time(rng[1])})")
         else:
             self.only_marked.setToolTip("Marca un tramo en la línea de tiempo con I (entrada) y O (salida).")
-        form2 = QFormLayout()
+        form2 = self._form2 = QFormLayout()
         form2.addRow("Subtítulos", self.subs)
         from ..core import chapters as _CH                  # 📍 capítulos dentro del MP4
         hay_cap = len(_CH.candidates(p)) >= 1
@@ -189,6 +194,7 @@ class ExportDialog(QDialog):
         self.progress.setRange(0, 1000)
         self.progress.setTextVisible(True)
         self.progress.setFormat("")
+        self.progress.setVisible(False)            # (solo mientras exporta: sin una barra vacía de adorno)
         self.status = QLabel(f"Duración del video: {fmt_time(p.duration())}")
         self.status.setObjectName("dim")
         self.log_view = QPlainTextEdit()
@@ -217,16 +223,14 @@ class ExportDialog(QDialog):
         self.btn_mini.clicked.connect(self._a_miniatura)
         self._oculto = False
         buttons = QHBoxLayout()
-        buttons.addWidget(self.btn_open)
-        buttons.addWidget(self.btn_mini)
-        buttons.addStretch()
-        buttons.addWidget(self.btn_close)
-        buttons.addWidget(self.btn_queue)
-        buttons.addWidget(self.btn_export)
+        self._fila_botones = FilaFluida(espacio=6, alinear_derecha=True)   # (estrecho: en dos filas, nunca cortados)
+        for b in (self.btn_open, self.btn_mini, self.btn_close, self.btn_queue, self.btn_export):
+            self._fila_botones.addWidget(b)
+        buttons.addWidget(self._fila_botones, 1)
 
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel("<b>¿Para dónde es?</b>"))
-        lay.addLayout(trow)
+        lay.addWidget(trow)
         lay.addWidget(self.target_info)
         lay.addWidget(self.advanced)
         lay.addLayout(form2)
@@ -396,7 +400,7 @@ class ExportDialog(QDialog):
                              chapters=self.capitulos.isChecked() and self.capitulos.isEnabled())
 
     def _enqueue(self):
-        win = self.parent()
+        win = self._win
         opts = self._options()
         rng = self.ctrl.project.marked_range() if self.only_marked.isChecked() else None
         name = self.preset.currentText() + (" · tramo" if rng else "")
@@ -408,9 +412,17 @@ class ExportDialog(QDialog):
         opts = self._options()
         os.makedirs(os.path.dirname(opts.path) or ".", exist_ok=True)
         if os.path.exists(opts.path):
+            host = getattr(self, "herramientas", None)
+            if host is not None:                     # 🧰 en el panel: la pregunta es una barra «Sí / No» dentro
+                host.confirmar(f"Ya existe «{os.path.basename(opts.path)}». ¿Reemplazarlo?",
+                               lambda o=opts: self._empezar(o), si="Reemplazar", no="No")
+                return
             r = QMessageBox.question(self, "Sobrescribir", f"Ya existe:\n{opts.path}\n\n¿Reemplazarlo?")
             if r != QMessageBox.Yes:
                 return
+        self._empezar(opts)
+
+    def _empezar(self, opts):
         QSettings("EditorIA", "EditorIA").setValue("exportar/carpeta", os.path.dirname(opts.path))
         self._retried_cpu = False
         self._run(opts)
@@ -463,9 +475,11 @@ class ExportDialog(QDialog):
         self.proc.finished.connect(self._finished)
         self._t0 = time.time()
         export_runner.start(self.proc, args, work)
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
         self.btn_export.setEnabled(False)
         self.btn_close.setText("Cancelar")
-        self.btn_mini.setVisible(hasattr(self.parent(), "go_page"))
+        self.btn_mini.setVisible(hasattr(self._win, "go_page"))
         self.status.setText(f"Exportando en {self.proc.n} trozos a la vez…" if parallel else "Exportando…")
 
     def _read(self):
@@ -484,14 +498,15 @@ class ExportDialog(QDialog):
                     left = elapsed / frac - elapsed
                     self.status.setText(f"Exportando… {fmt_time(secs, False)} de {fmt_time(self.total, False)}"
                                         f" · quedan ~{int(left)} s")
-                    if self._oculto and self.parent() is not None:      # (en Miniatura: el avance, abajo)
-                        self.parent().statusBar().showMessage(f"⬆ {frac * 100:.0f} % · " + self.status.text(), 5000)
+                    if self._oculto and self._win is not None:      # (en Miniatura: el avance, abajo)
+                        self._win.statusBar().showMessage(f"⬆ {frac * 100:.0f} % · " + self.status.text(), 5000)
             elif not line.startswith(("frame=", "fps=", "stream_", "bitrate=", "total_size=",
                                       "out_time=", "dup_frames=", "drop_frames=", "speed=", "progress=")):
                 self._log.append(line)
                 self._log = self._log[-80:]
 
     def _finished(self, code, _status):
+        self.progress.setVisible(False)
         self.btn_export.setEnabled(True)
         self.btn_close.setText("Cerrar")
         self.btn_mini.setVisible(False)
@@ -551,11 +566,46 @@ class ExportDialog(QDialog):
             self._oculto = False
             self.show()
             self.raise_()
-            win = self.parent()
+            win = self._win
             if win is not None and hasattr(win, "statusBar"):
                 win.statusBar().showMessage("⬆ " + self.status.text().splitlines()[0], 8000)
 
     _cancelled = False
+
+    def compactar(self):
+        """🧰 En el panel de herramientas (estrecho): los destinos se reparten en filas, las casillas parten su texto
+        en líneas (nunca cortado) y lo poco usado (máxima calidad, dejar libre el PC, la descripción) va plegado."""
+        from PySide6.QtWidgets import QFormLayout, QToolButton
+        for fl in self.findChildren(QFormLayout):
+            fl.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        for b in self.targets.buttons():
+            b.setMinimumWidth(0)
+        for chk in (self.subs, self.only_marked, self.capitulos, self.max_q, self.low_prio, self.desc_txt):
+            chk.setToolTip((chk.toolTip() + "\n" if chk.toolTip() else "") + chk.text())
+        cortos = {self.subs: "Subtítulos dentro", self.only_marked: "Solo el tramo I–O",
+                  self.capitulos: "Capítulos dentro", self.max_q: "Máxima calidad (tarda el doble)",
+                  self.low_prio: "Dejar libre el PC", self.desc_txt: "Crear la descripción (.txt)"}
+        for chk, txt in cortos.items():
+            chk.setText(txt)
+        poco = [self.max_q, self.low_prio, self.desc_txt]
+        self._btn_mas = QToolButton()
+        self._btn_mas.setText("Más opciones")
+        self._btn_mas.setCheckable(True)
+        self._btn_mas.setAutoRaise(True)
+        self._btn_mas.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._btn_mas.setArrowType(Qt.RightArrow)
+        self._btn_mas.setToolTip("Máxima calidad, dejar libre el PC mientras exporta y crear la descripción")
+
+        def plegar(on):
+            self._btn_mas.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+            for c in poco:
+                c.setVisible(on)
+                lbl = self._form2.labelForField(c)
+                if lbl is not None:
+                    lbl.setVisible(on)
+        self._btn_mas.toggled.connect(plegar)
+        self._form2.addRow(self._btn_mas)
+        plegar(False)
 
     def exportando(self) -> bool:
         return self.proc is not None
@@ -565,7 +615,7 @@ class ExportDialog(QDialog):
         if self.proc is not None:
             self._oculto = True
             self.hide()
-            win = self.parent()
+            win = self._win
             if win is not None and hasattr(win, "statusBar"):
                 win.statusBar().showMessage("⬆ Sigue exportando; al terminar vuelve la ventana de exportar.", 8000)
             return
@@ -590,7 +640,7 @@ class ExportDialog(QDialog):
 
     def _a_miniatura(self):
         """🖼 Esconde el diálogo (la exportación sigue: FFmpeg va aparte) y abre la página Miniatura."""
-        win = self.parent()
+        win = self._win
         self._oculto = True
         self.hide()
         if win is not None and hasattr(win, "go_page"):

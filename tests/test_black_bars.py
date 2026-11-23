@@ -83,6 +83,9 @@ def main():
     v1 = [t for t in p.tracks if t.kind == TRACK_VIDEO][-1]
     made = ctrl.add_media([ids[0]], v1.id, 0.0) + ctrl.add_media([ids[1]], v1.id, 8.0)
     vc = [i for i in made if p.clips[i].track_id == v1.id]
+    # (en vertical, el video horizontal entra con su relleno automático —bg «none»—: devolver las barras lo deja
+    #  COMO ESTABA antes de quitarlas, no sin encuadre)
+    lay0 = dict(p.clips[vc[0]].layout) if p.clips[vc[0]].layout else None
     win.timeline.selected.clear()
     win.remove_black_bars()                                   # sin selección: todos los videos
     t0 = time.time()
@@ -123,7 +126,7 @@ def main():
     ctrl.undo_stack.redo()
     win.timeline.selected = {vc[0]}
     win.remove_black_bars()                                   # ya sin barras: otra vez = devolverlas
-    assert BB.of(p.clips[vc[0]].layout) is None and p.clips[vc[0]].layout is None
+    assert BB.of(p.clips[vc[0]].layout) is None and p.clips[vc[0]].layout == lay0, (p.clips[vc[0]].layout, lay0)
     print(f"✓ exportado en vertical: borde {tuple(px)} (rojo) sin barras y {tuple(px2)} (negro) con ellas; "
           "Ctrl+Z y pulsarlo otra vez las devuelven")
     ctrl.undo_stack.setClean()

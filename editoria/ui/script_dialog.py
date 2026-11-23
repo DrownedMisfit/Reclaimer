@@ -407,6 +407,6 @@ def _color(hexcode: str):
 
 
 def open_script_dialog(win) -> None:
-    """Abre la ventana (modal)."""
-    dlg = ScriptDialog(win)
-    dlg.exec()
+    """Abre la herramienta (pestaña del panel a la derecha del visor; sin bloquear)."""
+    from .herramientas import abrir_dialogo
+    abrir_dialogo(win, "guion", lambda: ScriptDialog(win), "Montaje desde el guion", "Guion", "square-pen")

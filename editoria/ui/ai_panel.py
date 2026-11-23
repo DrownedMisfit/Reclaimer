@@ -54,9 +54,9 @@ def _dot(color: str) -> QIcon:
 
 
 # Mapa de la IA: (clave, icono y nombre, qué hace)
+# (23/11: «✨ Autoedición» y «🔬 Entender mis clips» viven ahora en «Edita desde tu voz» → paso 3: Toques finales y
+#  «Mirar mis clips a fondo»; sus ventanas siguen existiendo pero ya no se ven aquí)
 AI_CARDS = [
-    ("auto", "✨ Autoedición", "Monta una primera versión completa a partir de tu voz."),
-    ("understand", "🔬 Entender mis clips", "Aprende quién y qué aparece en cada segundo de tus clips."),
     ("moments", "🔎 Buscar momentos", "Encuentra dónde aparece algo y ponlo en la línea de tiempo."),
     ("voice", "🎙 Voz y limpieza", "Transcribe y quita silencios, muletillas y repeticiones."),
     ("topics", "◎ Temas", "Divide tu narración en partes (historia, combate…)."),
@@ -288,6 +288,7 @@ class AIPanel(QWidget):
         self.btn_understand.setToolTip("La IA revisa cada segundo de tus clips y aprende quién y qué aparece, "
                                        "para mostrarlo cuando lo nombras.")
         row2.addWidget(self.btn_understand, 1)
+        self.btn_understand.hide()      # (23/11: es «Mirar mis clips a fondo» en «Edita desde tu voz» → paso 3)
         self.btn_moments = QPushButton("🔎 Buscar momentos…")
         self.btn_moments.setToolTip("Busca dónde aparece algo en tus medios (por texto o por imagen) y ponlo en la "
                                     "línea de tiempo.")
@@ -1127,8 +1128,10 @@ class AIPanel(QWidget):
         t = mapping.map_time(self.ctrl.project, mid, sg.start) if mid else None
         if t is None:
             return
-        if CompareDialog(self.ctrl, t, self, origin=ORIGIN_AI).exec():
-            self.ctrl.mark_suggestions_applied([sg.id])
+        from .herramientas import abrir_dialogo
+        abrir_dialogo(self, "comparar", lambda: CompareDialog(self.ctrl, t, self, origin=ORIGIN_AI),
+                      "Comparar con el original", "Comparar", "columns-2",
+                      al_terminar=lambda r: self.ctrl.mark_suggestions_applied([sg.id]) if r else None)
 
     def _zoom_ignore(self):
         ids = [it.data(0, Qt.UserRole) for it in self.zoom_list.selectedItems()]

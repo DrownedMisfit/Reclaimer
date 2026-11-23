@@ -104,6 +104,11 @@ class _RenameCommand(QUndoCommand):
         self.ctrl.project_changed.emit()
 
 
+# 🎬 Pasos de una misma «sesión» (Arma tu video, que pone su material por trozos mientras se transcribe): se juntan en
+# UN solo paso de deshacer aunque pasen minutos entre uno y otro, mientras nadie edite entre medias (tramo = la sesión)
+MERGE_SESION = 0x5E51
+
+
 class _StateCommand(QUndoCommand):
     """Un paso de deshacer: guarda (comprimido) el estado de la timeline antes y después del cambio.
     El «después» de un paso y el «antes» del siguiente son el mismo objeto: no se guarda dos veces."""
@@ -123,6 +128,12 @@ class _StateCommand(QUndoCommand):
 
     def mergeWith(self, other) -> bool:
         """Cambios seguidos del mismo tipo (p. ej. ajustar el tamaño) DEL MISMO clip cuentan como un solo paso."""
+        if self._merge_id == MERGE_SESION:                  # 🎬 una sesión (Arma tu video por trozos): un solo paso
+            if other.id() != MERGE_SESION or self._tramo is None or getattr(other, "_tramo", None) != self._tramo:
+                return False
+            self._after = other._after
+            self._time = other._time
+            return True
         if other.id() != self._merge_id or other.text() != self.text() or other._time - self._time > 3.0:
             return False
         if getattr(other, "_firma", None) != self._firma:   # otro clip: su propio paso de deshacer
@@ -1163,6 +1174,66 @@ class ProjectController(QObject):
 
         return self._edit(text, fn)
 
+    def poner_voz(self, partes: list[dict], t: float, text: str = "🎙 Poner tu voz") -> list[str]:
+        """🎙 «Edita desde tu voz», paso 1: coloca la voz desde t, una parte detrás de otra, en UN paso de deshacer.
+        partes = [{"media_id": la voz (audio, o el video si su sonido es la voz), "imagen": media_id del video o None}].
+        · Con imagen: el video en su pista y su sonido debajo, vinculado (OBS separado: tu voz en «🎙 Micrófono» y el
+          juego aparte), como al ponerlo desde Medios.
+        · Sin imagen: solo la voz, en la pista «🎙 Micrófono» (sin EQ ni compresor: la de OBS ya viene procesada).
+        Nunca tapa ni borra nada: si el sitio está ocupado, va a una pista libre o nueva."""
+        def fn(p: Project):
+            tt = max(0.0, float(t))
+            hechos: list[str] = []
+            for parte in partes:
+                img = parte.get("imagen")
+                if img and img in p.media:
+                    ids = self._place_media(p, [img], None, tt)
+                    hechos += ids
+                    c0 = p.clips.get(ids[0]) if ids else None
+                    tt = c0.end if c0 is not None else tt
+                    continue
+                m = p.media.get(parte.get("media_id") or "")
+                if m is None:
+                    continue
+                if m.id in self.missing:
+                    raise EditError(f"No se encuentra el archivo «{m.name}».")
+                if m.duration <= 0:
+                    raise EditError(f"Todavía se está leyendo «{m.name}». Prueba en un momento.")
+                tid = self._obs_track_for(p, "voz", tt, tt + m.duration)
+                c = Clip(new_id(), m.id, tid, tt, 0.0, m.duration)
+                p.clips[c.id] = c
+                hechos.append(c.id)
+                tt = c.end
+            if not hechos:
+                raise EditError("No había ninguna voz que poner.")
+            self._tras_colocar(p, hechos)
+            return hechos
+
+        return self._edit(text, fn) or []
+
+    def quitar_voz(self, media_id: str, rangos: list, text: str = "🎙 Pule tu voz") -> int:
+        """🎙 «Pule tu voz»: quita esos tramos del ARCHIVO de la voz ([[a, b], …], segundos del archivo) de la línea de
+        tiempo, cerrando el hueco en todas las pistas (como «Aplicar corte»), en UN paso de deshacer. Lo que ya no
+        está (cortado antes) se salta. Devuelve cuántos tramos de la línea de tiempo se quitaron."""
+        def fn(p: Project):
+            spans = []
+            for a, b in rangos:
+                spans += [(ta, tb) for _c, ta, tb in mapping.map_range(p, media_id, float(a), float(b))]
+            if not spans:
+                raise EditError("Ese trozo ya no está en la línea de tiempo (¿ya se quitó?).")
+            spans.sort()
+            unidos = [list(spans[0])]
+            for ta, tb in spans[1:]:
+                if ta <= unidos[-1][1] + EPS:
+                    unidos[-1][1] = max(unidos[-1][1], tb)
+                else:
+                    unidos.append([ta, tb])
+            for ta, tb in reversed(unidos):        # (de atrás hacia delante: los de antes no se mueven)
+                self._ripple_delete(p, ta, tb)
+            return len(unidos)
+
+        return self._edit(text, fn) or 0
+
     NUEVA_PISTA = "__pista_nueva__"     # (destino de move_clips: una pista nueva de su tipo, en el mismo paso)
 
     def move_clips(self, moves: dict[str, tuple[float, str]], text: str | None = None, merge_id: int = -1):
@@ -1730,6 +1801,26 @@ class ProjectController(QObject):
                                 "unión en otra pista y no se recorre): no lo cambio.")
             return r
         return self._edit(text, fn)
+
+    def union_destino(self, left_id: str, right_id: str, dt: float, quitar: bool = False):
+        """🔴 Qué hace arrastrar un punto de unión dt segundos (23/11): decide el SENTIDO, sea cual sea el punto.
+        · ← (dt < 0): recupera audio del PRINCIPIO de la pieza de la derecha; lo de detrás se empuja.
+        · → (dt > 0): recupera audio del FINAL de la pieza de la izquierda; lo de detrás se empuja.
+        Arrastrar nunca quita audio. Solo con quitar=True (Alt + arrastrar): ← quita del final de la izquierda y →
+        del principio de la derecha. Devuelve (pieza, borde, t) para ripple_trim_sincro, sin limitar, o None."""
+        p = self.project
+        L, R = p.clips.get(left_id), p.clips.get(right_id)
+        if L is None or R is None or abs(dt) < EPS:
+            return None
+        a = abs(float(dt))
+        if dt < 0:
+            return (left_id, "right", L.end - a) if quitar else (right_id, "left", R.start - a)
+        return (right_id, "left", R.start + a) if quitar else (left_id, "right", L.end + a)
+
+    def union_arrastre(self, left_id: str, right_id: str, dt: float, quitar: bool = False):
+        """🔴 Aplica el arrastre de un punto de unión (un Ctrl+Z); ver union_destino."""
+        dest = self.union_destino(left_id, right_id, dt, quitar)
+        return None if dest is None else self.ripple_trim_sincro(*dest)
 
     def roll_limits(self, right_id: str) -> tuple[float, float]:
         p = self.project

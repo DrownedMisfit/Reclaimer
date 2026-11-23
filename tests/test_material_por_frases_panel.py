@@ -208,6 +208,9 @@ def main():
     check(lib.zona_material_frases.isVisibleTo(lib) and panel.parent() is lib.zona_material_frases,
           "va en el sitio de Medios, debajo de «Archivos / Carpeta»")
     check(P.panel_activo() is panel, "panel_activo() la encuentra (para el botón de cada frase)")
+    # (abierta, como de fábrica: los ajustes de la prueba son una copia de los tuyos y la sección puede venir
+    #  plegada —entonces nada de dentro se ve, tampoco el tipo—)
+    panel.cabecera.setChecked(True)
     panel.fuentes = FuentesLocales(rutas_busqueda, os.path.join(out, "bajadas"))
     panel.opciones = {"enc_texto": TextoFalso(), "enc_imagen": ImagenFalsa(), "detector": detector_falso}
     captura(lib, capturas, "2_despues_medios_vacio.png")

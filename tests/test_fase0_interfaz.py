@@ -151,7 +151,9 @@ def main():
         nada_de_otra_pagina(f"{pg}→Editar")
         v = vis()
         # (🧭 Montaje guiado deja su panel en Editar, debajo del Inspector: es un panel de Editar que la página enseña)
-        chk(set(v) - {"guided"} == set(V0) - {"guided"}, f"{pg}→Editar: los mismos paneles ({set(v) ^ set(V0)})")
+        # (🧰 Entrega abre Exportar como pestaña del panel de herramientas: se queda abierta al volver a Editar)
+        libres = {"guided", "herramientas"}
+        chk(set(v) - libres == set(V0) - libres, f"{pg}→Editar: los mismos paneles ({set(v) ^ set(V0)})")
         lat = laterales()
         chk(all(abs(lat[s] - L0[s]) <= 8 for s in L0), f"{pg}→Editar: laterales como al principio ({lat} / {L0})")
 

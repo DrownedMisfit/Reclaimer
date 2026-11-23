@@ -6,7 +6,7 @@
     sus clips siguen viéndose; «Agregar a memes»;
   · (Fable) la categoría que pusiste se respeta (releer no la pisa; «A Medios» solo la pone a los nuevos); mover un
     archivo abierto no congela y explica por qué no se movió; «Carpeta: …» entera (varias líneas); sin textos de
-    palabra clave; la vista grande se esconde (lista rehecha, tecla, ventana desactivada, diálogo encima).
+    palabra clave; al pasar el ratón, los fotogramas en la misma casilla (sin ventanas flotantes).
 Ejecutar:  .venv/Scripts/python.exe tests/test_descargas_generales.py <carpeta_salida>
 """
 from __future__ import annotations
@@ -155,32 +155,33 @@ def main():
         ctrl.undo_stack.undo()
         print("✓ «Descargado»: la carpeta con miniatura; poner en el cabezal (Ctrl+Z)")
 
-        # 🖼 al pasar el ratón: la vista grande (que no se sale de la pantalla) y, si es video, sus fotogramas en bucle
+        # 🖼 al pasar el ratón por un video: sus fotogramas en la MISMA casilla (ninguna ventana flotante). (Los
+        #   movimientos van directos a la lista: con la ventana entera offscreen, QTest se los da a otra ventana)
+        from PySide6.QtCore import QEvent as _QE
+        from PySide6.QtCore import QPointF as _QPF
         from PySide6.QtCore import Qt as _Qt
-        from PySide6.QtGui import QGuiApplication
-        from PySide6.QtTest import QTest
-        from editoria.ui import miniaturas as MINI
+        from PySide6.QtGui import QMouseEvent
         win.docks["descargas_web"].show()
         win.docks["descargas_web"].raise_()
         pan.pestanas.setCurrentIndex(pan.pestanas.count() - 1)
         pump(app, 0.4)
-        r0 = pan.lista.visualItemRect(pan.lista.item(0))
-        QTest.mouseMove(pan.lista.viewport(), r0.center())
-        pump(app, 0.1)
-        QTest.mouseMove(pan.lista.viewport(), r0.center() + __import__("PySide6.QtCore", fromlist=["QPoint"]).QPoint(1, 1))
-        v = MINI.vista()
-        assert esperar(app, lambda: v.isVisible(), 3), "la vista grande sale al pasar el ratón"
-        assert 360 <= v.width() <= 482, v.width()
-        g = QGuiApplication.primaryScreen().availableGeometry()
-        assert g.contains(v.geometry()), (g, v.geometry())
-        assert esperar(app, lambda: len(v.cuadros) >= 6, 20), len(v.cuadros)
-        i0 = v.i
-        assert esperar(app, lambda: v.i != i0, 3), "va pasando fotogramas"
-        assert v.testAttribute(_Qt.WA_ShowWithoutActivating) and not v.isActiveWindow(), "no roba el foco"
-        QTest.mouseMove(pan.lista.viewport(), __import__("PySide6.QtCore", fromlist=["QPoint"]).QPoint(2, 2))
-        pump(app, 0.2)
-        print(f"✓ al pasar el ratón: vista grande de {v.width()} px dentro de la pantalla, sin robar el foco, con "
-              f"{len(v.cuadros)} fotogramas en bucle")
+        vp = pan.lista.viewport()
+
+        def mover(x, y):
+            app.sendEvent(vp, QMouseEvent(_QE.MouseMove, _QPF(x, y), vp.mapToGlobal(_QPF(x, y)), _Qt.NoButton,
+                                          _Qt.NoButton, _Qt.NoModifier))
+        ventanas = {id(w) for w in app.topLevelWidgets() if w.isVisible()}
+        it0 = pan.lista.item(0)
+        k0 = it0.icon().cacheKey()
+        r0 = pan.lista.visualItemRect(it0)
+        mover(r0.center().x(), r0.center().y())
+        assert esperar(app, lambda: pan.lista._scrub.tira is not None, 20), "la tira del video llega"
+        mover(r0.center().x() + 1, r0.center().y())
+        assert it0.icon().cacheKey() != k0, "la casilla enseña un fotograma"
+        assert {id(w) for w in app.topLevelWidgets() if w.isVisible()} <= ventanas, "sin ventanas flotantes"
+        app.sendEvent(vp, _QE(_QE.Leave))
+        assert it0.icon().cacheKey() == k0, "al salir, la miniatura de siempre"
+        print("✓ al pasar el ratón: los fotogramas del video en su misma casilla, sin ventanas flotantes")
         if DG.HAY_INTERNET:
             assert pan.lista_descargas.viewMode() == pan.lista_descargas.ViewMode.IconMode
             assert d.lbl.wordWrap() and "Un video" in d.lbl.text() and not d.mini.pixmap().isNull()
@@ -291,44 +292,6 @@ def main():
         ctrl.add_media([mid], None, 30.0)
         assert DG.usos(ctrl, [ctrl.project.media[mid].path]) == 1, "se avisa: se usa en este proyecto"
         ctrl.undo_stack.undo()
-
-        # 🖼 la vista grande se esconde: lista rehecha, tecla, ventana desactivada, diálogo encima
-        from PySide6.QtCore import QEvent, QPoint
-        from PySide6.QtGui import QKeyEvent
-        from PySide6.QtWidgets import QDialog
-        v = MINI.vista()
-        vig = pan.lista._vigia_vista
-        pan.pestanas.setCurrentIndex(pan.pestanas.count() - 1)
-        pump(app, 0.2)
-
-        def mostrar():
-            vig._mirar_ventana()
-            v.mostrar(video, pan.lista.viewport().mapToGlobal(QPoint(10, 10)))
-            pump(app, 0.05)
-            assert v.isVisible()
-        mostrar()
-        pan.refrescar()
-        assert not v.isVisible(), "lista rehecha"
-        mostrar()
-        app.sendEvent(pan.lista, QKeyEvent(QEvent.KeyPress, 0x01000014, __import__("PySide6.QtCore",
-                                                                                 fromlist=["Qt"]).Qt.NoModifier))
-        assert not v.isVisible(), "tecla"
-        mostrar()
-        app.sendEvent(win, QEvent(QEvent.WindowDeactivate))
-        assert not v.isVisible(), "ventana desactivada"
-        dlg = QDialog(win)
-        dlg.setModal(True)
-        dlg.show()
-        pump(app, 0.1)
-        if pan.lista.count():
-            vig.item = pan.lista.item(0)
-            vig._pos = QPoint(5, 5)
-            vig._abrir()
-            pump(app, 0.05)
-            assert not v.isVisible(), "con un diálogo encima no sale"
-        dlg.close()
-        print("✓ la vista grande se esconde al rehacer la lista, con una tecla, al desactivarse la ventana y no sale "
-              "con un diálogo encima")
 
         # «Agregar a memes»
         from editoria.ui import memes_panel as MP

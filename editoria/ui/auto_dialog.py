@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QHBox
                                QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QVBoxLayout)
 
 from ..ai import broll_selection, clip_analysis, first_version, topic_detection, transcription, voice_cleanup
+from ..ai import toques_finales as TF
 from ..ai.audit import run_audit, summary
 from ..ai.base import Cancelled
 from ..core import equalizer, mapping, subtitles
@@ -483,21 +484,14 @@ class AutoDialog(QDialog):
             return self._skip("narración muy corta")
 
         def done(segments):
-            n = self.ctrl.set_topics(self.mid, segments) or 0
-            names = [m.label for m in self.ctrl.project.markers if m.kind == "topic"]
+            n, names = TF.poner_temas(self.ctrl, self.mid, segments)
             if names:
-                self.report.append("◎ Temas: " + ", ".join(dict.fromkeys(names)) + ".")
+                self.report.append("◎ Temas: " + ", ".join(names) + ".")
             return f"{n} temas"
-        self._bg(lambda prog, canc: topic_detection.detect_topics(words, progress=prog, cancelled=canc),
-                 done, "◎ Buscando de qué hablas en cada parte…")
+        self._bg(lambda prog, canc: TF.detectar_temas(words, prog, canc), done, "◎ Buscando de qué hablas en cada parte…")
 
     def _broll_track(self) -> str | None:
-        p = self.ctrl.project
-        narr_tracks = {c.track_id for c in self._narr_clips()}
-        for t in reversed([t for t in p.tracks if t.kind == TRACK_VIDEO]):
-            if t.id not in narr_tracks and not t.locked:
-                return t.id
-        return None
+        return TF.pista_broll(self.ctrl, self.mid)
 
     def _step_broll(self):
         if not self._opt("broll"):
@@ -595,106 +589,32 @@ class AutoDialog(QDialog):
     def _step_zooms(self):
         if not self._opt("zooms"):
             return self._skip()
-        from ..ai import tracking
-        from ..ai.transform_helpers import punch_keyframes
-        from ..ai.visual_suggestions import find_compare_moments, find_zoom_moments
-        p = self.ctrl.project
-        words = p.transcripts.get(self.mid, {}).get("words", [])
-        zitems = [{"kind": "zoom", "start": d["start"], "end": d["end"], "label": d["label"],
-                   "detail": d["detail"], "data": {"face": d["face"], "strength": d["strength"]}}
-                  for d in find_zoom_moments(words)]
-        comps = [dict(d, kind="compare") for d in find_compare_moments(words)]
-        self.ctrl.set_suggestions(self.mid, zitems + comps, {"zoom", "compare"}, {"zoom": False, "compare": False})
-        self.n_compare = len(comps)
-        ai = self.win.ai_panel
-        plan = []
-        for sg in [x for x in self.ctrl.project.suggestions
-                   if x.kind == "zoom" and x.media_id == self.mid and x.status == "pending"]:
-            t = mapping.map_time(self.ctrl.project, self.mid, sg.start)
-            c = ai._video_clip_at(t) if t is not None else None
-            m = self.ctrl.project.media_of(c) if c else None
-            if c is None or m is None:
-                continue
-            is_img = m.kind == KIND_IMAGE
-            cin = 0.0 if is_img else c.source_in
-            plan.append((sg.id, c.id, self.ctrl.clip_source_time(c.id, t), m.path, m.width, m.height,
-                         is_img, cin, cin + c.duration))
+        plan, n_comp = TF.plan_zooms(self.ctrl, self.mid)          # (ai/toques_finales: la misma que el paso 3)
+        self.n_compare = n_comp
         if not plan:
-            return self._next("sin momentos" + (f" · {len(comps)} comparaciones sugeridas" if comps else ""))
-
-        def work(progress, cancelled):
-            out = []
-            for i, (sid, cid, src, path, w, h, is_img, cin, cout) in enumerate(plan):
-                if cancelled():
-                    raise Cancelled()
-                progress(i / len(plan), f"🔍 Preparando zoom {i + 1}/{len(plan)}…")
-                z, x, y = 1.5, 0.5, 0.5
-                try:
-                    frame = None if is_img else tracking.grab_frame(path, src, 640, w, h)
-                    faces = tracking.detect_faces(frame) if frame is not None else []
-                except Exception:  # noqa: BLE001
-                    faces = []
-                if faces:
-                    fx, fy, fw, fh, _c = faces[0]
-                    x, y = fx + fw / 2, fy + fh / 2
-                    z = max(1.6, min(3.0, 0.4 / max(fh, 1e-3)))
-                out.append((sid, cid, punch_keyframes(src, cin, cout, z, x, y)))
-            return out
+            return self._next("sin momentos" + (f" · {n_comp} comparaciones sugeridas" if n_comp else ""))
 
         def done(items):
-            n = self.ctrl.apply_zoom_suggestions(items) or 0
+            n = TF.poner_zooms(self.ctrl, items)
             msg = f"{n} zooms"
-            if comps:
-                msg += f" · {len(comps)} comparaciones sugeridas"
-                self.report.append(f"⧉ {len(comps)} momentos para una Comparación: revísalos en IA ✨ → "
+            if n_comp:
+                msg += f" · {n_comp} comparaciones sugeridas"
+                self.report.append(f"⧉ {n_comp} momentos para una Comparación: revísalos en IA ✨ → "
                                    "Sugerencias visuales (necesitan que elijas los dos clips).")
             return msg
-        self._bg(work, done, "🔍 Preparando zooms…")
+        self._bg(lambda prog, canc: TF.trabajo_zooms(plan, prog, canc), done, "🔍 Preparando zooms…")
 
     def _step_cinema(self):
         style = self._style()
         if style == "custom" and not self._opt("cinema"):
             return self._skip()
-        p = self.ctrl.project
         tid = self._broll_track()
-        ids = [c.id for c in p.clips_on(tid)] if tid else []
-        if not ids:
+        if not tid or not self.ctrl.project.clips_on(tid):
             return self._skip("no hay B-roll")
-        cuts = [c.start for c in p.clips_on(tid)]
-        starts = []
-        if style in ("cinematic", "custom"):            # cada tema nuevo empieza con su plano (y su transición):
-            for m in p.markers:                         # si cae a mitad de un plano largo, el plano se parte ahí
-                if m.kind != "topic" or m.time <= 1.0 or first_version.snap_to_cuts(m.time, cuts) is not None:
-                    continue
-                c = next((c for c in p.clips_on(tid) if c.start + 1.5 < m.time < c.end - 1.5), None)
-                if c is not None and self.ctrl.split_at_times(c.id, [m.time], "IA · Plano nuevo en el tema"):
-                    cuts.append(m.time)
-            ids = [c.id for c in p.clips_on(tid)]
-        for m in p.markers:
-            if m.kind == "topic" and m.time > 1.0:
-                t = first_version.snap_to_cuts(m.time, cuts)
-                if t is not None and t not in starts:
-                    starts.append(t)
-        ken = style in ("dynamic", "cinematic", "custom")
-        dips = style in ("cinematic", "custom")
-        changes = first_version.cinematic_changes(p, ids, starts, ken=ken, dips=dips,
-                                                  punch_every=3 if style == "dynamic" else 0)
-        n = self.ctrl.batch_clip_props(changes, "IA · Toques de cine")
-        nk = sum(1 for c in changes.values() if "zoom_kf" in c)
-        extra = ""
-        if style == "cinematic" and starts:   # un whoosh en cada cambio de tema
-            from ..core import sfx
-            wid = self.ctrl.import_now([sfx.path_for("whoosh_largo")])
-            if wid:
-                self.ctrl.set_media_props(wid, category="Efectos")
-                fx_tid = self.ctrl.ensure_role_track("efectos")
-                for t in starts:
-                    self.ctrl.add_media(wid, fx_tid, max(0.0, t - 0.7), origin=ORIGIN_AI)
-                extra = f", whoosh en {len(starts)} transiciones"
-        name = dict(STYLES).get(style, "").split(" —")[0]
-        self.report.append(f"🎞 Estilo {name.lower()}: zoom en {nk} planos"
-                           + (f", fundido en {len(starts)} cambios de tema" if dips else "") + extra + ".")
-        self._next(f"{n} planos retocados")
+        linea = TF.poner_estilo(self.ctrl, style, tid, custom_cine=self._opt("cinema"))
+        if linea:
+            self.report.append(linea)
+        self._next(f"{len(self.ctrl.project.clips_on(tid))} planos retocados" if linea else "sin cambios")
 
     def _step_audio(self):
         p = self.ctrl.project
@@ -708,31 +628,9 @@ class AutoDialog(QDialog):
                 self.ctrl.set_track_props(tr.id, "Mejorar la voz", fx=dict(tr.fx, eq=True, deess=True, compress=True))
             notes.append("EQ «Mi voz»")
         music_id = self.music.currentData()
-        if music_id:
-            mt = self.ctrl.project.track(self.ctrl.ensure_role_track("musica"))   # nunca encima de tu voz
-            p = self.ctrl.project
-            if mt.duck_db is None:
-                self.ctrl.set_track_props(mt.id, "Bajar música al hablar", duck_db=-12.0)
-            items = first_version.music_items_fit(p.media[music_id], 0.0, p.duration())   # por compases si hay ritmo
-            created = self.ctrl.insert_ranges(items, mt.id, "IA · Música de fondo", origin=ORIGIN_AI,
-                                              only_gaps=True, volume=0.35)
-            if isinstance(created, list) and created:
-                tramos = sorted((self.ctrl.project.clips[i] for i in created if i in self.ctrl.project.clips),
-                                key=lambda c: c.start)
-                ch: dict = {}
-
-                def fx_of(c):
-                    return ch.setdefault(c.id, {"fx": dict(c.fx or {})})["fx"]
-                fx_of(tramos[0])["fade_in"] = 1.5
-                fx_of(tramos[-1])["fade_out"] = 2.5
-                for a, b in zip(tramos, tramos[1:]):   # la canción vuelve a empezar: fundido cruzado de 1,5 s
-                    if abs(b.start - a.end) < 0.05:
-                        fx_of(a)["fade_out"] = 1.5
-                        fx_of(b)["fade_in"] = 1.5
-                self.ctrl.batch_clip_props(ch, "Fundidos de la música")
-                notes.append("música (baja sola cuando hablas)")
-        if not self.ctrl.project.loudnorm:
-            self.ctrl.set_settings(loudnorm=True)
+        if music_id and TF.poner_musica(self.ctrl, music_id):     # (ai/toques_finales: la misma que el paso 3)
+            notes.append("música (baja sola cuando hablas)")
+        TF.poner_volumen(self.ctrl)
         notes.append("volumen final −14 LUFS")
         self.report.append("🔊 Audio: " + ", ".join(notes) + ".")
         if music_id and self._broll_track():      # con música, en TODOS los estilos: los cortes van a su ritmo
@@ -741,48 +639,30 @@ class AutoDialog(QDialog):
 
     def _snap_to_music(self, music_id: str, notes: list[str]):
         """Con música de fondo: los cortes del B-roll caen en sus golpes (mejor al empezar compás o en los fuertes)."""
-        from ..ai import music_analysis, rhythm
         path = self.ctrl.project.media[music_id].path
 
         def work(progress, cancelled):
             progress(0.0, "🥁 Escuchando el ritmo de la música…")
-            return rhythm.analyze(path)
+            return TF.ritmo(path)
 
         def done(res):
-            self.ctrl._on_rhythm(music_id, res)
-            p = self.ctrl.project
-            mt = p.track(self.ctrl._role_track(p, "musica", create=False) or "")
-            vt = self._broll_track()
-            if mt is None or vt is None:
-                return ", ".join(notes)
-            clips = p.clips_on(vt)
-            cuts = [a.end for a, b in zip(clips, clips[1:]) if abs(b.start - a.end) < 0.01]
-            rt = self.ctrl.rhythm_on_timeline([c.id for c in p.clips_on(mt.id)])
-            targets = music_analysis.snap_points(cuts, rt["beats"] or self.ctrl.beats_on_timeline(mt.id),
-                                                 prefer=rt["downbeats"] + rt["strong"] + rt["drops"])
-            n = self.ctrl.snap_cuts(vt, targets) if targets else 0
-            self.report.append(f"🥁 {n or 0} cortes llevados al ritmo de la música ({res['tempo']:g} BPM).")
-            return ", ".join(notes) + f" · {n or 0} cortes a ritmo"
+            n = TF.cortes_a_ritmo(self.ctrl, music_id, res, self._broll_track())
+            self.report.append(f"🥁 {n} cortes llevados al ritmo de la música ({res['tempo']:g} BPM).")
+            return ", ".join(notes) + f" · {n} cortes a ritmo"
         self._bg(work, done, "🥁 Llevando los cortes al ritmo de la música…")
 
     def _step_subs(self):
         if not self._opt("subs"):
             return self._skip()
-        p = self.ctrl.project
-        from ..core.subtitles import SHORTS
-        preset = SHORTS if p.format in ("short", "edit") else p.subtitles.preset
-        props = dict(SUB_PRESETS.get(preset, {}), preset=preset, enabled=True, media_id=self.mid)
-        self.ctrl.set_subtitle_style("IA · Subtítulos", **props)
-        self._next(preset)
+        self._next(TF.poner_subtitulos(self.ctrl, self.mid))
 
     def _step_audit(self):
         if not self._opt("audit"):
             return self._skip()
-        self.ctrl.ensure_timeline_peaks(wait=True)   # la revisión de cortes necesita la voz de cada clip
-        issues, checked = run_audit(self.ctrl.project, self.ctrl.missing, self.ctrl.peaks, self.ctrl.clip_vecs)
+        issues, resumen = TF.revision(self.ctrl)
         self.issues = issues
         warn = [i for i in issues if i.get("severity") in ("error", "warning")]
-        self.report.append("⚕ " + summary(issues, checked))
+        self.report.append("⚕ " + resumen)
         self.btn_audit.setVisible(bool(issues))
         self._next(f"{len(warn)} avisos" if warn else "todo bien")
 

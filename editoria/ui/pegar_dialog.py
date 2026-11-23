@@ -129,4 +129,6 @@ def abrir(ctrl, overlay_id: str, t: float, parent=None):
     """Abre la ventana (desde el clic derecho del clip o el Inspector)."""
     if overlay_id not in ctrl.project.clips:
         return
-    PegarDialog(ctrl, overlay_id, t, parent).exec()
+    from .herramientas import abrir_dialogo
+    abrir_dialogo(parent, "pegar", lambda: PegarDialog(ctrl, overlay_id, t, parent), "Pegar a lo que se mueve",
+                  "Pegar", "link")

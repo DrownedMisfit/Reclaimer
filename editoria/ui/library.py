@@ -413,6 +413,8 @@ class LibraryPanel(QWidget):
         self.tree = MediaTree()
         self.tree.setItemDelegateForColumn(0, _AccionesFila(self, self.tree))   # (⤓ 🗑 al pasar el ratón)
         self.tree.resolve_paths = lambda rutas: self._importar_rutas(rutas)
+        from .miniaturas import activar_scrub      # (🖼 al pasar el ratón por la miniatura de un video: sus fotogramas)
+        activar_scrub(self.tree, self._ruta_fila)
         # 😂 la biblioteca de memes cambia → Medios al día
         self._t_memes = QTimer(self)
         self._t_memes.setSingleShot(True)
@@ -1196,6 +1198,11 @@ class LibraryPanel(QWidget):
             job.deleteLater()
 
     # ----------------------------------------------------------- acciones
+    def _ruta_fila(self, item) -> str | None:
+        """El archivo de una fila (de Medios o de una palabra clave): para ver sus fotogramas al pasar el ratón."""
+        m = self.ctrl.project.media.get(item.data(0, ROLE_MEDIA)) if item.data(0, ROLE_MEDIA) else None
+        return m.path if m is not None else (item.data(0, ROLE_PATH) or None)
+
     def _accion_fila(self, accion: str, mid: str, index=None):
         """⤓ / 🗑 de una fila (al pasar el ratón): poner ese archivo en el cabezal o quitarlo de Medios."""
         if not mid or mid not in self.ctrl.project.media:

@@ -308,6 +308,9 @@ def main():
     lay = QVBoxLayout(caja)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.addWidget(vp)
+    # (en la ventana, «Limpieza» va dentro de una sección plegable de «Limpieza y mezcla», que la esconde si está
+    #  cerrada: escondida, la caja no la coloca y se queda con su tamaño de antes —640 × 480—. Aquí, a la vista)
+    vp.show()
     from editoria.ui import responsive as R
     R.adaptar(caja)
     for ancho in (200, 280, 360, 520):
