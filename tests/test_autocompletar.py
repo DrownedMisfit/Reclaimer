@@ -160,12 +160,10 @@ def test_panel(out):
     assert vc == [(0.0, 0.0, 3.0), (20.0, 6.0, 2.0), (26.0, 6.0, 2.0)], vc
     used0 = [(c.source_in, c.source_in + c.src_len) for c in p.clips_on(v1.id)]
 
-    t = win.ai_panel.tabs
-    t.setCurrentIndex(next(i for i in range(t.count()) if t.tabText(i) == "Inicio"))
-    win.show_panel(win.ai_panel)
+    win.abrir_herramienta_ia("autocompletar")   # (24/11: sin pestaña IA: Edita desde tu voz › Más herramientas)
     ac = win.ai_panel.autocompletar
     pump(app, 0.4)
-    assert ac.isVisible(), "✨ Autocompletar, a la vista en IA ✨ → Inicio"
+    assert ac.isVisible(), "✨ Autocompletar, a la vista (Más herramientas → pestaña del panel de herramientas)"
     assert ac.set_media(vmid) and ac.media_id() == vmid
     ac.refresh()
     s = ac.summary.text()
@@ -333,8 +331,7 @@ def test_panel(out):
     for tab in ("edit", "short", "youtube"):
         assert win.workspaces.switch(tab), tab
         pump(app, 0.3)
-        win.show_panel(win.ai_panel)
-        t.setCurrentIndex(next(i for i in range(t.count()) if t.tabText(i) == "Inicio"))
+        win.abrir_herramienta_ia("autocompletar")
         pump(app, 0.4)
         assert win.ai_panel.autocompletar is ac and ac.isVisible(), tab
         ac.refresh()

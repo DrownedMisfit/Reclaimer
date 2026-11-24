@@ -49,6 +49,7 @@ class KeywordsDialog(QDialog):
                        "instantáneo.")
         self.setToolTip(tip.toolTip())
         lay.addWidget(tip)
+        self._tip = tip
         row = QHBoxLayout()
         self.query = QLineEdit()
         self.query.setPlaceholderText("la traición, un coche, explosión…")
@@ -62,7 +63,7 @@ class KeywordsDialog(QDialog):
             self.scope.addItem(f"En {len(media_ids)} archivo(s) elegido(s)", "given")
         self.scope.setCurrentIndex(max(0, self.scope.findData("given" if media_ids else scope)))
         row.addWidget(self.scope)
-        self.b_go = QPushButton("🗣 Buscar")
+        self.b_go = QPushButton("🗣 Buscar")  # (dentro de Medios lo esconde incrustar())
         self.b_go.setObjectName("primary")
         self.b_go.clicked.connect(self.search)
         row.addWidget(self.b_go)
@@ -103,6 +104,19 @@ class KeywordsDialog(QDialog):
         self.tree.setColumnHidden(1, True)
         compacto.ocultar(self._b_close)
         compacto.apilar(self._lay, [self.b_put, self.b_marks])
+
+    def incrustar(self):
+        """🔎 (23/11) Dentro de Medios, modo «Lo que se dice»: la caja de Medios manda; aquí «En…», lo encontrado y
+        sus acciones, compacto."""
+        from PySide6.QtCore import Qt as _Qt
+        self.setWindowFlags(_Qt.Widget)
+        self.setModal(False)
+        self.setMinimumSize(0, 0)
+        self.incrustado = True
+        self.compactar()
+        for w in (self._tip, self.query, self.b_go):
+            w.hide()
+        self.layout().setContentsMargins(0, 2, 0, 0)
 
     # ------------------------------------------------------------ qué archivos
     def _targets(self) -> list[tuple[str, str]]:

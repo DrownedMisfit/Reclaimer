@@ -537,6 +537,9 @@ class PanelEditaVoz(QFrame):
             self.paginas[n] = ph
             self.pila.addWidget(ph)
         lay.addWidget(self.pila, 1)
+        from .mas_herramientas import seccion          # 🧰 lo de la pestaña IA de antes (24/11): plegado, al final
+        self.mas_herramientas = seccion(ev.win)
+        lay.addWidget(self.mas_herramientas)
         self.estilo()
 
     def heightForWidth(self, w: int) -> int:            # noqa: N802

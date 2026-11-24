@@ -6131,6 +6131,11 @@ class TimelineWidget(QWidget):
         if m_ is not None and m_.kind == KIND_VIDEO and clip.text is None and \
                 proj.track(clip.track_id).kind == TRACK_VIDEO:
             ai.addAction("Recortar sujeto / quitar el fondo…", lambda: self.cutout_requested.emit(clip.id))
+        if has("open_compare"):                     # (24/11: «Comparación», antes en la pestaña IA)
+            ai.addAction("Comparación (lado a lado)…", win.open_compare)
+        es_video = m_ is not None and m_.kind == KIND_VIDEO and clip.text is None and \
+            proj.track(clip.track_id).kind == TRACK_VIDEO
+        if es_video:
             if has("open_subject_fx"):
                 ai.addAction("Efectos solo al personaje…", lambda: win.open_subject_fx(clip.id))
             ai.addAction("Enseñar este personaje (silueta)…", lambda: self.silhouette_requested.emit(clip.id))

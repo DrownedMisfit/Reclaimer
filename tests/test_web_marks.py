@@ -222,8 +222,9 @@ def main():
     # Espacio: la cuadrícula manda; «¿Es esto?» y «Aparición seleccionada» compactas (pero con su imagen)
     # (con un panel de ancho normal: en la pantalla sin ventana, de 800 px, el panel acoplado se queda en su mínimo y,
     # desde el 17/11, lo de «Aparición seleccionada» baja debajo de la imagen en vez de cortarse; suelto, a 560 px)
-    win.docks["moments"].setFloating(True)
-    win.docks["moments"].resize(560, 760)
+    # (23/11: Buscar momentos vive en Medios, modo «Lo que se ve»: se suelta y agranda el panel de Medios)
+    win.docks["media"].setFloating(True)
+    win.docks["media"].resize(560, 760)
     pump(app, 0.4)
     box = mp.frame.parentWidget()
     assert mp.grid.height() > box.height() and not mp.ask_card.isVisible()

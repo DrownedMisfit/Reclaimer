@@ -48,6 +48,10 @@ ACCIONES = (
      "Quitar las bandas negras grabadas dentro del video (se detectan solas). Otra vez = devolverlas."),
     ("fundidos", "fundidos", "Fundidos",
      "Fundido de entrada y de salida del clip. Abre Inspector → Efectos → Fundidos."),
+    ("comparacion", "columns-2", "Comparación",
+     "Dos clips lado a lado (antes / después, versiones), desde el cabezal. Se abre en el panel de herramientas."),
+    ("sujeto", "scissors", "Recortar sujeto",
+     "Separar un personaje, una roca o un vehículo del fondo en todo el clip (IA). Solo en videos."),
 )
 MODOS = {"transformar": "transform", "recortar": "crop", "zoom": "dynzoom"}
 
@@ -147,6 +151,7 @@ class MenuRapido(QWidget):
         self.botones["encuadrar"].setVisible(p.height > p.width)
         self.botones["velocidad"].setVisible(es_video)
         self.botones["bandas"].setVisible(es_video)
+        self.botones["sujeto"].setVisible(es_video)
         aviso = False
         if es_video:                       # ▭ ¿ya se sabe que trae bandas grabadas (y no se han quitado)?
             from ..core import black_bars as BB
@@ -283,6 +288,10 @@ class MenuRapido(QWidget):
         elif clave == "fundidos":
             sp = ins.fx_spins.get("fade_in")
             win.abrir_para_usar(ins.effects_box, sp)
+        elif clave == "comparacion":              # (24/11: desde la pestaña IA de antes)
+            win.open_compare()
+        elif clave == "sujeto":
+            win.open_subject_cut(c.id)
         self._marcar_modo()
         self.pedir()
 

@@ -478,6 +478,15 @@ class LibraryPanel(QWidget):
         pl = QVBoxLayout(pag)
         pl.setContentsMargins(0, 4, 0, 0)
         pl.addLayout(srow)
+        self.fila_buscar = srow
+        # (🔎 23/11: los resultados de «Lo que se ve» y «Lo que se dice», justo debajo de la caja: los pone
+        #  buscador_medios con poner_resultados(widget); vacío, no ocupa nada)
+        self.zona_resultados = QWidget()
+        zr = QVBoxLayout(self.zona_resultados)
+        zr.setContentsMargins(0, 0, 0, 0)
+        zr.setSpacing(4)
+        self.zona_resultados.setVisible(False)
+        pl.addWidget(self.zona_resultados, 1)
         # (las bandejas de material repetido —«No usados» / «Usados 2+ veces»— van aquí, bajo el buscador: las pone
         #  repetidos_ui con poner_bandejas(widget); vacío, no ocupa nada)
         self.zona_bandejas = QWidget()
@@ -1044,6 +1053,8 @@ class LibraryPanel(QWidget):
         if self.analyzer.status and self.analyzer.job is not None:
             text += f"\n{self.analyzer.status}"
         self.footer.setText(text)
+        if getattr(self, "_lista_oculta", False):    # (🔎 modo «Lo que se ve» / «Lo que se dice»: sin la lista)
+            return
         hay = self.tree.topLevelItemCount() > 0
         if self.tree.isHidden() == hay:
             self.tree.setVisible(hay)

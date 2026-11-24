@@ -283,8 +283,9 @@ def main():
                                                      "debajo)"), ins.secciones["color"], None, False, None, ()),
         ("Ctrl+F buscar clips por contenido", accion("IA/Buscar clips por contenido"), win.library.search,
          win.library.search, False, None, ()),
-        ("Ctrl+Shift+F buscar momentos", accion("IA/🔎 Buscar momentos en mis medios…"), win.moments.query,
-         win.moments.query, False, None, ()),
+        # (23/11: Buscar momentos es el modo «Lo que se ve» del buscador de Medios: el foco, en su caja)
+        ("Ctrl+Shift+F buscar momentos", accion("IA/🔎 Buscar momentos en mis medios…"), win.library.search,
+         win.library.search, False, None, ()),
         ("Ctrl+Alt+F buscar en lo que dijiste", accion("Voz/🔎 Buscar en lo que dijiste"), win.transcript.search,
          win.transcript.search, False, None, ()),
         ("R velocidad del clip", accion("Editar/Velocidad del clip…"), ins.speed, ins.speed, False, None, (cid,)),

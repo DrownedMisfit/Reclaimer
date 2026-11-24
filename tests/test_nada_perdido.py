@@ -93,7 +93,7 @@ def main():
     print("— la fila de paneles —")
     izq = [k for k, _n in win.INTERRUPTORES_IZQ]
     der = [k for k, _n in win.INTERRUPTORES_DER]
-    for k in ("media", "effects", "sounds", "ai", "moments", "memes", "descargas_web", "voz_texto"):
+    for k in ("media", "effects", "sounds", "memes", "descargas_web", "voz_texto"):   # (24/11: sin IA ni Momentos)
         chk(k in izq and not win.interruptores[k].isHidden(), f"interruptor «{dict(win.INTERRUPTORES_IZQ)[k]}» a la vista")
     for k in ("palabras", "audio", "inspector"):
         chk(k in der and not win.interruptores[k].isHidden(), f"interruptor «{dict(win.INTERRUPTORES_DER)[k]}» a la vista")
@@ -239,7 +239,8 @@ def main():
     chk([a.text() for a in win.menu_cambios_plano.actions() if a.text()] and
         win.btn_more.menu() is not None and win.menu_cambios_plano.menuAction() in win.btn_more.menu().actions(),
         "«✂ Cambios de plano» (cortar donde cambia la imagen) en ⋯ Más")
-    chk("broll" in win.ai_panel._tab_of, "B-roll sigue en IA ✨")
+    chk("broll" in dict((h[0], h) for h in __import__("editoria.ui.mas_herramientas", fromlist=["x"]).HERRAMIENTAS),
+        "B-roll sigue (Edita desde tu voz › Más herramientas)")
     chk(win.btn_undo.isVisible() and win.btn_redo.isVisible(), "↶ Deshacer y ↷ Rehacer a la vista")
     win.ctrl.undo_stack.clear()
     pump(app, 0.2)

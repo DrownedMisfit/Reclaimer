@@ -70,30 +70,14 @@ def main():
         assert names(ia)[0] == "Inicio" and "B-roll" in names(ia) and "🎙 Transcribir" not in names(ia), names(ia)
         assert win.voz_texto.widget_de("transcribir") is not None and \
             win.voz_texto.widget_de("transcribir").isAncestorOf(win.ai_panel.tr_status), "Transcribir en Voz y texto"
-        win.show_panel(win.ai_panel)
-        i_broll = names(ia).index("B-roll")
-        sec = ia.secciones()[i_broll]
-        clave = "secciones/ia/Broll"
-        _QS("EditorIA", "EditorIA").remove(clave)
-        sec.set_open(False, save=False)
-        pump(app, 0.1)
-        assert not sec.is_open() and not win.ai_panel._groups["broll"].isVisible()
-        win.ai_panel._card("broll")
+        # (24/11: sin pestaña IA: «B-roll» se abre desde «Edita desde tu voz» › Más herramientas, como pestaña del
+        #  panel de herramientas, con su MISMO bloque)
+        win.abrir_herramienta_ia("broll")
         pump(app, 0.3)
-        assert ia.tabText(ia.currentIndex()) == "B-roll"
-        assert sec.is_open() and win.ai_panel._groups["broll"].isVisible(), "la tarjeta abre la sección B-roll"
-        zona = win.docks["ai"].widget()
-        r = sec.head.geometry().translated(sec.mapTo(zona.widget(), sec.rect().topLeft()))
-        vis = zona.viewport().rect().translated(0, zona.verticalScrollBar().value())
-        assert vis.intersects(r), (vis, r)
-        assert _QS("EditorIA", "EditorIA").value(clave) is None, "abrirla el código no se recuerda como tuya"
-        sec.head.click()                         # (clic tuyo: se cierra y se recuerda)
-        pump(app, 0.1)
-        assert not sec.is_open() and str(_QS("EditorIA", "EditorIA").value(clave)).lower() in ("false", "0")
-        sec.head.click()
-        assert sec.is_open() and str(_QS("EditorIA", "EditorIA").value(clave)).lower() in ("true", "1")
-        print("✓ Efectos, Limpieza, Subtítulos e IA ✨ en secciones plegables; la tarjeta «B-roll» abre la suya y la "
-              "trae a la vista (solo se recuerda lo que abres o cierras tú)")
+        g = win.ai_panel._groups["broll"]
+        assert g.isVisible() and win.herramientas.widget("ia_broll").isAncestorOf(g), "B-roll, a la vista"
+        print("✓ Efectos, Limpieza y Subtítulos en secciones plegables; «B-roll» (Más herramientas) se abre como "
+              "pestaña del panel de herramientas")
 
         ctrl = win.ctrl
         wav = os.path.join(out, "narracion.wav")

@@ -141,7 +141,7 @@ def main():
     (mid,) = ctrl.import_now([png])
     pump(app, 0.3)
     casos = [("letra", win.open_font_size), ("descripcion", win.open_chapters),
-             ("buscar_dicho", win.open_keywords), ("cola", win.open_queue),
+             ("cola", win.open_queue),     # («Buscar lo que se dice» es ya un modo del buscador de Medios)
              ("shorts", lambda: shorts_dialog.open_shorts_dialog(win)),
              ("animar", lambda: image_anim_dialog.abrir(win, mid)),
              ("intro_outro", lambda: intro_outro_dialog.open_dialog(win)),

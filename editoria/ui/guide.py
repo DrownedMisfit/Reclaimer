@@ -45,8 +45,8 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "(la primera vez descarga el modelo).", "w:voice.btn_transcribe", None),
         ("<b>2. Quita los silencios</b>: «✂ Eliminar silencio». La narración tiene pausas largas a propósito; se "
          "marcan en naranja antes de cortarlas.", "w:preview.quick.silence", None),
-        ("<b>3. Pide B-roll</b>: en <b>IA ✨ → B-roll</b>, «🎬 Proponer B-roll» propone clips para cada frase según "
-         "lo que dices.", "w:ai_panel.btn_propose", None),
+        ("<b>3. Pide B-roll</b>: en <b>«Edita desde tu voz» › Más herramientas › B-roll</b>, «🎬 Proponer B-roll» "
+         "propone clips para cada frase según lo que dices.", "w:ai_panel.btn_propose", "abrir_broll_ia"),
         ("<b>4. La música</b>: haz clic en ella (A2) y espera a que 🥁 termine: verás sus golpes en la regla y el drop "
          "en rojo (segundo 16). Con el imán (N) los cortes se pegan a esos golpes.", "w:timeline", None),
         ("<b>5. Exporta</b>: «🚀 Entrega» (abajo) o <b>Ctrl+E</b>. Los créditos de los clips de Pexels se escriben "
@@ -204,26 +204,24 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
         ("Todo queda como clips normales: cámbialos a tu gusto o deshazlo con <b>Ctrl+Z</b>.", "w:timeline", None),
     ]),
     ("momentos", "🔎 Encontrar un momento concreto", "buscar momento escena aparece imagen referencia", [
-        ("<b>«🔎 Buscar momentos»</b> (Ctrl+Mayús+F): describe lo que buscas o dale una imagen de referencia.",
-         "w:ai_panel.btn_moments", None),
+        ("En <b>Medios</b>, el modo <b>«Lo que se ve»</b> junto a la caja (Ctrl+Mayús+F): describe lo que buscas y "
+         "pulsa Enter, o dale una imagen de referencia.", "w:buscador_medios.btn_ve", None),
         ("Cada resultado es una aparición con su inicio y su fin: <b>Insertar</b>, <b>Reemplazar</b> el clip "
          "elegido o <b>Añadir después</b>.", "w:moments", None),
         ("<b>Enséñale qué buscas</b>: en la esquina de cada resultado (tus videos o internet), <b>✓</b> = «aquí está» y "
          "<b>✗</b> = «no es». Con ✓ busca más momentos parecidos; con ✗ aparta los parecidos. La tarjeta <b>«🤔 ¿Es "
          "esto?»</b> te pregunta por lo que más le ayuda a aprender. Se recuerda, y si es un nombre que la IA conoce "
          "(«el protagonista»), también lo usa el B-roll automático.", "w:moments.grid", None),
-        ("<b>Imágenes de internet</b>: en «Buscar en» elige 🌐 Internet. La IA esconde las que no se parecen a lo que "
-         "pides. En la esquina de cada imagen: <b>✓</b> = «esta es» (suben las parecidas) y <b>✗</b> = «no es» (se "
-         "quita, y también las casi iguales). <b>«✨ Buscar más como las ✓»</b> trae más. Se recuerda para la próxima.",
-         "w:moments.grid", None),
+        ("<b>¿No está en tus medios?</b> Si no encuentra nada, <b>«Buscar en internet»</b> abre <b>Descargas</b> con "
+         "lo que escribiste.", "w:moments.grid", None),
     ]),
     ("edit", "🎵 Edit musical", "edit música ritmo beats drop vertical phonk velocity blanco negro estilo", [
-        ("Pestaña <b>IA ✨ → «🎵 Edit musical»</b> (<b>Ctrl+M</b>): eliges la canción, el <b>estilo</b> "
-         "(Agresivo / Intenso, Épico en blanco y negro, Hype gaming, Cinemático…), la duración (30/45/60 s) y tus clips.",
-         "w:docks.ai", None),
+        ("Pestaña de proyecto <b>Edits</b> → panel <b>«🎵 Edit musical»</b> (<b>Ctrl+M</b>): eliges la canción, el "
+         "<b>estilo</b> (Agresivo / Intenso, Épico en blanco y negro, Hype gaming, Cinemático…), la duración (30/45/60 s) "
+         "y tus clips.", "w:docks.edit_opts", "open_edit_maker"),
         ("La IA escucha el bombo, la caja, la subida y el drop: los cortes se aceleran antes del drop, llega "
          "el golpe y luego van al ritmo. Cada efecto (velocity, temblor, glitch, barras de cine…) se puede "
-         "quitar o poner en la ventana.", "w:docks.ai", None),
+         "quitar o poner en el panel.", "w:docks.edit_opts", None),
     ]),
     ("efectos", "🎆 Efectos", "efectos sonido whoosh blanco negro viñeta destello fundido", [
         ("El panel <b>«Transiciones y efectos»</b> (su interruptor, arriba a la izquierda) es solo lo visual: <b>⧉ Transiciones"
@@ -270,7 +268,7 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "descarta, <b>🎯</b> la pone en los clips que elijas. Aprende de cada respuesta.", "w:effects.prop_tree", None),
     ]),
     ("ejemplo", "🎯 Buscar con un ejemplo", "ejemplo buscar personaje objeto recuadro aprender palomita referencia", [
-        ("En <b>🔎 Momentos</b>, «🎯 Ejemplo» usa el clip seleccionado en la línea de tiempo (o clic derecho en un "
+        ("En <b>Medios</b>, modo «Lo que se ve», «🎯 Ejemplo» usa el clip seleccionado en la línea de tiempo (o clic derecho en un "
          "clip o en Medios → «🎯 Usar como ejemplo»): eliges el momento, dibujas un recuadro si quieres y "
          "escribes qué es.", "w:moments.b_example", None),
     ]),
@@ -291,8 +289,8 @@ LESSONS: list[tuple[str, str, str, list[tuple[str, str, str | None]]]] = [
          "ed:fmt", "open_thumbnail"),
     ]),
     ("final", "🚀 Revisar y exportar", "exportar revisar render entrega errores", [
-        ("Pestaña <b>IA ✨ → «⚕ Revisión»</b> (<b>Ctrl+R</b>): pantallas negras, silencios, audio "
-         "saturado, clips repetidos…", "w:docks.ai", None),
+        ("<b>«⚕ Revisión»</b> (<b>Ctrl+R</b>; también sale sola antes de exportar si hay avisos): pantallas negras, "
+         "silencios, audio saturado, clips repetidos…", "w:timeline", "open_audit"),
         ("<b>«🚀 Entrega»</b> (<b>Ctrl+E</b>): elige el preset y exporta.", "w:page_buttons.deliver", None),
     ]),
     ("mejoras2", "🛠 Ruido, estabilizar, cortes de escena y cámara lenta suave",
@@ -366,6 +364,9 @@ def _abrir_seccion(acordeon, clave: str, traer_panel: bool):
 def reveal(widget: QWidget, traer_panel: bool = True):
     """Hace visible un control: abre su panel y las pestañas y secciones que lo contienen. traer_panel=False: el panel
     no se muestra ni se pone delante (solo se abren su pestaña o su sección y se lleva a la vista)."""
+    bm = getattr(widget.window(), "buscador_medios", None)     # 🔎 (23/11) dentro de un modo del buscador de Medios
+    if bm is not None and bm.contiene(widget):
+        bm.mostrar_para(widget)
     chain = []
     w = widget
     while w is not None:

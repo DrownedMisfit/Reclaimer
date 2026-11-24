@@ -480,7 +480,36 @@ def analizar(words: list, samples: np.ndarray | None = None, sr: int = 16000, gu
     out += _pausas(words, levels, sr, ocupado)
     if levels is not None:
         out += _ruidos(words, levels, samples, sr, ocupado)
+    out += sugerencias_visuales(words, ocupado)
     out.sort(key=lambda d: d["t"])
+    return out
+
+
+TOPE_SUGERENCIAS = 4      # como mucho, las más claras (que no inunden la lista)
+
+
+def sugerencias_visuales(words: list, ocupado=()) -> list[dict]:
+    """«¿Zoom aquí?» (miren, fíjense, este detalle…) y «¿Comparación aquí?» (comparado con, antes y después, la
+    diferencia entre…), de ai/visual_suggestions. No quitan nada: ✓ pone el zoom o marca el momento y abre
+    Comparación. Como mucho TOPE_SUGERENCIAS, las más claras; nunca dentro de lo que otra duda ya quita."""
+    from .visual_suggestions import find_compare_moments, find_zoom_moments
+    cand = []
+    try:
+        for d in find_compare_moments(words):
+            cand.append((1.2, "comparacion", d))          # (comparar pide más trabajo a mano: primero)
+        for d in find_zoom_moments(words):
+            cand.append((float(d.get("strength", 0.5)), "zoom", d))
+    except Exception:  # noqa: BLE001 - sin sugerencias, el resto de dudas sigue
+        return []
+    cand = [c for c in cand if not _ocupa(ocupado, c[2]["start"], c[2]["end"])]
+    cand.sort(key=lambda c: -c[0])
+    out = []
+    for fuerza, tipo, d in cand[:TOPE_SUGERENCIAS]:
+        titulo = "¿Comparación aquí?" if tipo == "comparacion" else "¿Zoom aquí?"
+        out.append({"clave": f"{tipo}:{round(d['start'], 2)}", "tipo": tipo, "titulo": titulo,
+                    "detalle": (d.get("detail") or "") + " " + (d.get("label") or ""), "t": float(d["start"]),
+                    "fin": float(d["end"]), "quitar": [], "marcada": False, "cara": bool(d.get("face")),
+                    "fuerza": fuerza})
     return out
 
 

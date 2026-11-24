@@ -97,9 +97,7 @@ def test_panel(out):
     for cid in [i for i in made if p.clips[i].track_id != v1.id]:
         ctrl.delete_clips([cid]) if hasattr(ctrl, "delete_clips") else None
     assert SP.gaps_over_audio(p, v1.id) == [(3.0, 12.0)], SP.gaps_over_audio(p, v1.id)
-    t = win.ai_panel.tabs                      # (la pestaña «Inicio»: delante va «🎙 Transcribir»)
-    t.setCurrentIndex(next(i for i in range(t.count()) if t.tabText(i) == "Inicio"))
-    win.show_panel(win.ai_panel)
+    win.abrir_herramienta_ia("escenas")        # (24/11: Edita desde tu voz › Más herramientas › Escenas)
     us = win.ai_panel.unused_scenes
     pump(app, 0.3)
     us.scan()

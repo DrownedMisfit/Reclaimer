@@ -99,7 +99,9 @@ def narracion():
                  "Y por eso,", "y por eso la consola vende tanto.", 1.0,
                  "Y otra vez,", "y otra vez salta el personaje.", 1.0,
                  "El el problema es la música.", 60.0,
-                 "El combate se siente demasiado lento, sobre todo al final del juego.", 1.0, "Nada más."]:
+                 "El combate se siente demasiado lento, sobre todo al final del juego.", 1.0, "Nada más.", 1.0,
+                 "Fíjense en este detalle del mapa.", 1.0,
+                 "Comparado con el original el remake se ve mucho mejor."]:
         if isinstance(item, float):
             t += item
             continue
@@ -180,9 +182,19 @@ def main():
     from editoria.ui.pule_voz import MapaMinutos
     assert t_tomas.findChild(MapaMinutos) is not None
     win.grab().save(os.path.join(out, "paso2_lista.png"))
-    pb, pp = pg.b_seguir, ev.panel.parentWidget()
-    abajo = pb.mapTo(pp, pb.rect().bottomLeft()).y()
-    assert abajo <= pp.height(), ("«Seguir: arma tu video» se ve entero", abajo, pp.height())
+    # «Seguir: arma tu video» entero en lo que DE VERDAD se ve (la zona con desplazamiento del panel de
+    # herramientas), también con las dudas de zoom y comparación en la lista (23/11: se cortaba)
+    assert {"zoom", "comparacion"} <= {d["tipo"] for d in ds}, [d["titulo"] for d in ds]
+    from PySide6.QtWidgets import QScrollArea
+    pb, vp = pg.b_seguir, ev.panel.parentWidget()
+    w_ = ev.panel
+    while w_ is not None:
+        if isinstance(w_.parentWidget(), QScrollArea) and w_ is w_.parentWidget().viewport():
+            vp = w_
+            break
+        w_ = w_.parentWidget()
+    abajo = vp.mapFromGlobal(pb.mapToGlobal(pb.rect().bottomLeft())).y()
+    assert pb.isVisible() and abajo <= vp.height(), ("«Seguir: arma tu video» se ve entero", abajo, vp.height())
     print("✓ la lista: orden «quita esto» ya marcada (desde la vez anterior), tomas con una lejana y la última completa "
           "elegida, retomar a mitad de frase, traba y «¿repetición a propósito?» sin marcar")
 

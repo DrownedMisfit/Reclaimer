@@ -28,7 +28,8 @@ from . import diseno as D
 AJ_SOLAS = "edita_voz/ordenes_solas"
 AJ_ORDENES = "edita_voz/ordenes"
 ICONO_TIPO = {"tomas": "copy", "orden": "megaphone", "traba": "scissors", "frase": "scissors", "pausa": "pause",
-              "ruido": "audio-waveform", "intencion": "list-music", "queda": "triangle-alert"}
+              "ruido": "audio-waveform", "intencion": "list-music", "queda": "triangle-alert",
+              "zoom": "zoom-in", "comparacion": "columns-2"}
 ICONO_ESTADO = {"completa": "circle-check", "traba": "triangle-alert", "incompleta": "circle-dashed"}
 NOMBRE_ESTADO = {"completa": "completa y sin trabas", "traba": "con una traba o muletilla",
                  "incompleta": "incompleta (a medias)"}
@@ -164,7 +165,7 @@ def _breve(d: dict) -> str:
     det = d.get("detalle") or ""
     if d["tipo"] in ("orden", "frase") and "«" in det:
         return det[det.index("«"):]
-    if d["tipo"] == "traba" and "«" in det:
+    if d["tipo"] in ("traba", "zoom", "comparacion") and "«" in det:
         return det[det.index("«"):]
     return ""
 
@@ -286,6 +287,15 @@ class ListaDudas(QScrollArea):
         self.vl.setSpacing(D.px(5))
         self.vl.addStretch(1)
         self.setWidget(self.caja)
+
+    TOPE_ALTO = 260
+
+    def sizeHint(self):                  # noqa: N802
+        """(regresión del 23/11) El alto que PIDE la lista tiene tope: las dudas se desplazan dentro y así el panel
+        nunca pasa del visor ni deja «Seguir» fuera de la vista; si sobra sitio, la lista crece (estira)."""
+        s = super().sizeHint()
+        c = self.widget().sizeHint().height() if self.widget() is not None else s.height()
+        return QSize(s.width(), max(self.minimumHeight(), min(c, D.px(self.TOPE_ALTO))))
 
     TECLAS = {Qt.Key_Up: "arriba", Qt.Key_Down: "abajo", Qt.Key_Return: "si", Qt.Key_Enter: "si",
               Qt.Key_Delete: "no", Qt.Key_Space: "oir"}
@@ -611,8 +621,64 @@ class PaginaPule(QWidget):
         d = self._duda(clave)
         if d is None or d.get("estado", "pendiente") != "pendiente":
             return
-        self._aplicar_varias([d], f"🎙 {d['titulo']} · {PV.minuto(d['t'])}")
+        if d["tipo"] in ("zoom", "comparacion"):
+            self._aceptar_visual(d)
+        else:
+            self._aplicar_varias([d], f"🎙 {d['titulo']} · {PV.minuto(d['t'])}")
         self._siguiente(clave)
+
+    def _aceptar_visual(self, d: dict):
+        """✓ en «¿Zoom aquí?»: el zoom de ese momento en el clip que se ve (un Ctrl+Z). ✓ en «¿Comparación aquí?»:
+        un marcador en ese momento (un Ctrl+Z) y se abre Comparación con ese momento elegido."""
+        from ..ai import toques_finales as TF
+        from ..core import mapping
+        p = self.ctrl.project
+        t = mapping.map_time(p, d["media_id"], d["t"])
+        if t is None:
+            self.ctrl.message.emit("Ese momento ya no está en la línea de tiempo.")
+            return
+        c = TF.video_en(self.ctrl, t)
+        texto = f"🎙 {d['titulo']} · {PV.minuto(d['t'])}"
+        pila, antes = self.ctrl.undo_stack, self.ctrl.undo_stack.index()
+        if d["tipo"] == "zoom":
+            m = p.media_of(c) if c is not None else None
+            if c is None or m is None:
+                self.ctrl.message.emit("En ese momento no se ve ningún clip al que hacer zoom.")
+                return
+            from ..ai.transform_helpers import punch_keyframes
+            es_img = m.kind == "image"
+            cin = 0.0 if es_img else c.source_in
+            src = self.ctrl.clip_source_time(c.id, t)
+            z, x, y = 1.5, 0.5, 0.5
+            if d.get("cara") and not es_img:              # (si nombra una cara, a ella)
+                try:
+                    from ..ai import tracking
+                    caras = tracking.detect_faces(tracking.grab_frame(m.path, src, 640, m.width, m.height))
+                    if caras:
+                        fx, fy, fw, fh, _c = caras[0]
+                        x, y, z = fx + fw / 2, fy + fh / 2, max(1.6, min(3.0, 0.4 / max(fh, 1e-3)))
+                except Exception:  # noqa: BLE001
+                    pass
+            self.ctrl.batch_clip_props({c.id: {"zoom_kf": punch_keyframes(src, cin, cin + c.duration, z, x, y)}},
+                                       texto)
+        else:
+            self.ctrl.add_marker(t, "Comparación")
+        if pila.index() == antes:
+            return
+        d["estado"] = "hecha"
+        self._aplicadas[d["clave"]] = (pila, pila.index(), pila.command(pila.index() - 1).text())
+        self.ctrl._set_media_dirty()
+        self.pintar()
+        if d["tipo"] == "comparacion":
+            eng = getattr(self.win, "engine", None)
+            if eng is not None:
+                eng.seek(t)
+            tl = getattr(self.win, "timeline", None)
+            if c is not None and tl is not None and hasattr(tl, "set_selection"):
+                tl.set_selection([c.id])
+            abrir = getattr(self.win, "open_compare", None)
+            if abrir is not None:
+                abrir()
 
     def _aplicar_varias(self, ds: list, texto: str):
         por_media: dict[str, list] = {}
@@ -718,7 +784,8 @@ class PaginaPule(QWidget):
             e = max(0, d.get("elegida", 0))
             r = [[d["versiones"][e]["a"], d["versiones"][e]["b"]]]
         else:
-            r = [[max(0.0, a - 1.0), b + 1.0] for a, b in d.get("quitar") or []]
+            r = [[max(0.0, a - 1.0), b + 1.0] for a, b in d.get("quitar") or []] or \
+                [[max(0.0, d["t"] - 0.5), float(d.get("fin", d["t"] + 3.0)) + 0.5]]   # (zoom / comparación: el momento)
         self._reproducir(self._tramos_linea(d["media_id"], r))
 
     def escuchar_seguidas(self, clave: str):

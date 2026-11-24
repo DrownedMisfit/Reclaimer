@@ -77,7 +77,7 @@ def punch_in(start_src: float, clip_in: float, clip_out: float, z: float, x: flo
 
 COMPARE = re.compile(r"\b(el original|la original|juego original|version original|el remake|en el remake|"
                      r"comparad[oa]s? con|en comparacion|si (lo )?comparamos|a diferencia de|frente a|"
-                     r"respecto a|versus|vs|mientras que en|antes y (despues|ahora))\b")
+                     r"respecto a|versus|vs|mientras que en|antes y (despues|ahora)|la diferencia entre)\b")
 
 
 def find_compare_moments(words: list, min_gap: float = 8.0) -> list[dict]:

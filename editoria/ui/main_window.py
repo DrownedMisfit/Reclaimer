@@ -624,8 +624,11 @@ class MainWindow(QMainWindow):
         self.herramientas = herramientas.de(self)
         from . import edita_voz                         # 🎙 «Edita desde tu voz»: el botón de arriba y su panel (23/11)
         self.edita_voz = edita_voz.instalar(self)
+        QTimer.singleShot(2500, self._aviso_mudanza_ia)  # 📦 la pestaña «IA» ya no está: dónde está cada cosa (una vez)
         from . import borde_alto                        # ◧ arrastrar el borde de un lado = todo el alto (fase 6)
         self.borde_alto = borde_alto.instalar(self)
+        from . import buscador_medios                   # 🔎 un solo buscador en Medios: Nombre · Lo que se ve · Lo que se dice
+        self.buscador_medios = buscador_medios.instalar(self)
         self.preview.canvas.subtitle_edit.connect(self._subtitle_edit_from_viewer)
         self.engine.time_changed.connect(lambda _t: self._update_transform_edit())
         self.ctrl.project_changed.connect(self._update_transform_edit)
@@ -1358,7 +1361,8 @@ class MainWindow(QMainWindow):
                 and (p.media_of(p.clips[i]) is not None and p.media_of(p.clips[i]).kind == "video")]
 
     def _toolbar_broll(self):
-        self.show_panel(self.ai_panel)
+        from .mas_herramientas import abrir as _abrir_ia     # (24/11: sin pestaña IA: su pestaña de herramientas)
+        _abrir_ia(self, "broll")
         self.ai_panel.propose()
 
     def _toolbar_scenes(self, sensitivity: str = "normal", markers: bool = False):
@@ -1741,7 +1745,9 @@ class MainWindow(QMainWindow):
     PAGINA_FX = ("fx_trans", "fx_efectos", "fx_filtros", "fx_figuras")
     # (agrupación 20/11) paneles que ya no salen sueltos: viven dentro de «Voz y texto», «Audio» o el Inspector
     MOVIDOS = ("clips", "kw_folders", "kw_buscar", "transcript", "subtitles", "voz_ia", "voice", "audio_mix",
-               "material")     # (su contenido se mudó: ver _agrupar_paneles)
+               "material",     # (su contenido se mudó: ver _agrupar_paneles)
+               "ai", "moments")  # (24/11: la pestaña «IA» ya no está —cada cosa en su sitio, ver mas_herramientas—;
+    #                             «Momentos» vive en Medios, modo «Lo que se ve»)
     ABSORBIDOS = MOVIDOS + PAGINA_FX
     _OCULTOS_AL_INICIO = ("guide", "tasks", "guided", "cortes", "history", "scopes") + PAGINA_KW + PAGINA_FX + \
         ABSORBIDOS    # se abren cuando se pide (Historial y Gráficas: ☰ Paneles)
@@ -2214,6 +2220,9 @@ class MainWindow(QMainWindow):
         desplaza a la vista. True si quedó visible."""
         if w is None:
             return False
+        bm = getattr(self, "buscador_medios", None)    # 🔎 (23/11) dentro de un modo del buscador de Medios: ese modo
+        if bm is not None and bm.contiene(w):
+            bm.mostrar_para(w)
         from PySide6.QtWidgets import QDockWidget, QScrollArea, QTabWidget
         from .inspector_secciones import Seccion       # (las plegables del Inspector: Velocidad, Color…)
         from .tabs import Section
@@ -2549,6 +2558,9 @@ class MainWindow(QMainWindow):
     def show_panel(self, widget: QWidget):
         """Muestra y pone delante el panel que contiene ese widget (esté donde esté). Los que viven dentro de «Voz y
         texto», «Audio» o el Inspector (agrupación 20/11) abren su sección."""
+        bm = getattr(self, "buscador_medios", None)    # 🔎 Buscar momentos / lo que se dice: modos de Medios (23/11)
+        if bm is not None and bm.contiene(widget):
+            return bm.mostrar_para(widget)
         destino = self._destino_absorbido(widget)
         if destino is not None:
             dk = self.abrir_seccion(*destino)
@@ -2742,8 +2754,8 @@ class MainWindow(QMainWindow):
     #  confundía con la pestaña Texto del Inspector, que es el texto en pantalla)
     # (agrupación 20/11: «Voz y texto» y «Audio» reúnen lo que antes eran 9 interruptores; Historial y Gráficas,
     #  en ☰ Paneles; Material del clip, en Inspector → Archivo)
-    INTERRUPTORES_IZQ = (("media", "Medios"), ("effects", "Transiciones y efectos"), ("sounds", "Sonidos"), ("ai", "IA"),
-                         ("moments", "Momentos"), ("memes", "Memes"), ("descargas_web", "Descargas"),
+    INTERRUPTORES_IZQ = (("media", "Medios"), ("effects", "Transiciones y efectos"), ("sounds", "Sonidos"),
+                         ("memes", "Memes"), ("descargas_web", "Descargas"),
                          ("voz_texto", "Voz y texto"), ("edit_clips", "Clips del edit"))
     # (22/11: «Voz y texto» a la izquierda; a la derecha, «Palabras clave» y «Limpieza» con todo su sitio)
     INTERRUPTORES_DER = (("palabras", "Palabras clave"), ("audio", "Limpieza y mezcla"),
@@ -3472,9 +3484,9 @@ class MainWindow(QMainWindow):
         self._ai_hidden_menu = m
         act(m, "◈ Analizar el contenido de los clips", None, self.library._analyze_clicked)
         act(m, "◎ Detectar temas de la narración", None,
-            lambda: (self.right_tabs.setCurrentWidget(self.ai_panel), self.ai_panel.detect_topics()))
+            lambda: (self.abrir_herramienta_ia("temas"), self.ai_panel.detect_topics()))
         act(m, "🎬 Proponer B-roll", None,
-            lambda: (self.right_tabs.setCurrentWidget(self.ai_panel), self.ai_panel.propose()))
+            lambda: (self.abrir_herramienta_ia("broll"), self.ai_panel.propose()))
         act(m, "◈ Analizar a fondo lo seleccionado en Medios", None, self.analyze_selected_full)
         act(m, "🔎 Buscar momentos en mis medios…", "Ctrl+Shift+F", lambda: self.open_moments(""))
         act(m, "⧉ Comparación…", None, self.open_compare)
@@ -4221,7 +4233,8 @@ class MainWindow(QMainWindow):
         i = ap.track.findData(track_id)
         if i >= 0:
             ap.track.setCurrentIndex(i)
-        self.show_panel(ap)
+        from .mas_herramientas import abrir as _abrir_ia
+        _abrir_ia(self, "broll")
         ap.propose((a, b), apply=apply)
 
     def make_compound(self, ids):
@@ -4616,7 +4629,13 @@ class MainWindow(QMainWindow):
         abrir_fallos(self)
 
     def open_keywords(self, media_ids: list | None = None, scope: str = "timeline"):
-        """🗣 Buscar lo que se dice en el audio (ligero). (No confundir con 🔑 Palabras clave = tus carpetas.)"""
+        """🗣 Buscar lo que se dice en el audio (ligero). (No confundir con 🔑 Palabras clave = tus carpetas.) 🔎 (23/11)
+        Es el modo «Lo que se dice» del buscador de Medios, con el foco en su caja."""
+        bm = getattr(self, "buscador_medios", None)
+        if bm is not None:
+            bm.poner_modo("dice", foco=True, media_ids=media_ids, scope=scope)
+            self._kw_dialog = bm.kw
+            return
         from .keywords_dialog import KeywordsDialog
         # 🧰 (lote 1, 23/11) pestaña del panel de herramientas; si ya estaba con otro «En…», se rehace con el nuevo
         h = self.herramientas
@@ -4779,6 +4798,28 @@ class MainWindow(QMainWindow):
             SubjectCutDialog(self.ctrl, clip_id, self.engine.time, self, fx_mode=fx_mode).exec()
         except RuntimeError as exc:
             QMessageBox.warning(self, "Recortar sujeto", str(exc))
+
+    def abrir_herramienta_ia(self, clave: str):
+        """🧰 (24/11) Lo de la pestaña «IA» de antes, como pestaña del panel de herramientas (ui/mas_herramientas.py):
+        broll, temas, director, zooms, autocompletar, escenas; voz y audio abren su sección de «Limpieza y mezcla»."""
+        from .mas_herramientas import abrir
+        return abrir(self, clave)
+
+    def abrir_broll_ia(self):                    # (la guía: «3. Pide B-roll»)
+        return self.abrir_herramienta_ia("broll")
+
+    AJ_MUDANZA_IA = "avisos/mudanza_ia"
+    TEXTO_MUDANZA_IA = ("La pestaña IA ya no está: Transcribir → Voz y texto · Comparación y Recortar sujeto → menú "
+                        "del clip · Edit musical → Edits · lo demás → Edita desde tu voz › Más herramientas")
+
+    def _aviso_mudanza_ia(self):
+        """📦 (24/11) La primera vez con la mudanza de la pestaña «IA»: dónde está cada cosa, en la barra de estado
+        (sin ventanas). Sale una sola vez (ajuste avisos/mudanza_ia)."""
+        if str(self.settings.value(self.AJ_MUDANZA_IA, "false")).lower() == "true":
+            return False
+        self.settings.setValue(self.AJ_MUDANZA_IA, "true")
+        self.statusBar().showMessage(self.TEXTO_MUDANZA_IA, 30000)
+        return True
 
     def _ai_card(self, key: str):
         """Tarjetas del mapa de la IA que abren otra herramienta."""
@@ -4995,7 +5036,15 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.timeline.setFocus)          # (las teclas, al editor; no al nombre del proyecto)
 
     def open_moments(self, text: str = "", at: float | None = None):
-        """Abre el buscador de momentos (y busca, si se da un texto). at = dónde insertar lo elegido."""
+        """Abre el buscador de momentos (y busca, si se da un texto). at = dónde insertar lo elegido. 🔎 (23/11) Es el
+        modo «Lo que se ve» del buscador de Medios, con el foco en su caja."""
+        bm = getattr(self, "buscador_medios", None)
+        if bm is not None:
+            bm.poner_modo("ve", foco=not text)
+            if text:
+                self.library.search.setText(text)
+                self.moments.search_for(text, at)
+            return
         self.show_panel(self.moments)
         if text:
             self.moments.search_for(text, at)

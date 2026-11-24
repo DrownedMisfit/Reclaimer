@@ -528,7 +528,31 @@ class Herramientas(QObject):
         self._herramienta_pedida = False
 
     def poner_clip(self, si: bool) -> bool:
-        """El menú rápido pide ir delante (si=True: hay un clip elegido). Devuelve si va DENTRO del panel."""
+        """El menú rápido pide ir delante (si=True: hay un clip elegido). Devuelve si va DENTRO del panel. Sin otra
+        herramienta abierta también: el panel sale solo con su pestaña «Clip», pegado arriba (si cabe en el hueco)."""
+        if self.columna is not None:
+            return False
+        if not self._ts:
+            if si and self.cabe():
+                if not self._clip_delante:
+                    self._clip_delante = True
+                    self.panel.pila.setCurrentWidget(self.panel.vacia)
+                if self.donde != "hueco" or self.marco.isHidden():
+                    self._soltar_dock()
+                    self.marco.layout().addWidget(self.panel)
+                    self.donde = "hueco"
+                    self.panel.show()
+                    self.marco.show()
+                    self.marco.raise_()
+                self.rehacer_pestanas()
+                self.recolocar()
+                return True
+            if self._clip_delante:
+                self._clip_delante = False
+                if self.donde == "hueco":
+                    self.marco.hide()
+                self.rehacer_pestanas()
+            return False
         if not (self.donde == "hueco" and self.visible and self._ts):
             if self._clip_delante:
                 self._clip_delante = False
@@ -747,6 +771,8 @@ class Herramientas(QObject):
             QVBoxLayout(self.caja_dock).setContentsMargins(0, 0, 0, 0)
             self.dock = self.win._dock("herramientas", "Herramienta", self.caja_dock)
             self.win.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+            self.dock.toggleViewAction().setVisible(False)     # (no es un panel de «Ventana»: sale con su herramienta)
+            self.dock.visibilityChanged.connect(self._dock_visible)
             ins = getattr(self.win, "docks", {}).get("inspector")
             if ins is not None:
                 self.win.tabifyDockWidget(ins, self.dock)
@@ -766,6 +792,13 @@ class Herramientas(QObject):
         self._t.start()                                  # (ya pulida y colocada, ¿cabe junto al visor? se mira otra vez)
 
     _ancho_previo = None
+
+    def _dock_visible(self, on: bool):
+        """La pestaña junto al Inspector solo con una herramienta en ella: si algo la enseña vacía («Restablecer
+        distribución», volver de una página…), se vuelve a esconder."""
+        if on and (not self._ts or self.donde != "pestana"):
+            QTimer.singleShot(0, lambda: (self.dock is not None and (not self._ts or self.donde != "pestana")
+                                          and self.dock.hide()))
 
     def _soltar_dock(self):
         """Fuera de la pestaña junto al Inspector: escondida y el lado derecho, al ancho que tenía (si no, el visor
@@ -811,9 +844,14 @@ class Herramientas(QObject):
             if self.cabe():                             # (ya cabe junto al visor —p. ej. tras pulirse y partir sus
                 self.mostrar()                          #  textos, o al cerrar la ancha—: a su sitio, el hueco)
             return
-        if self.donde != "hueco" or not self._ts or self.marco.isHidden() and not self.panel.isVisibleTo(self.marco):
+        if self.donde != "hueco" or not (self._ts or self._clip_delante) or                 self.marco.isHidden() and not self.panel.isVisibleTo(self.marco):
             return
         if not self.cabe():                             # (se estrechó el visor: a la pestaña junto al Inspector)
+            if not self._ts:                            # (solo el menú rápido: vuelve a ir suelto)
+                self._clip_delante = False
+                self.marco.hide()
+                self._avisar_menu()
+                return
             self.mostrar()
             return
         h = self._hueco()
@@ -831,7 +869,7 @@ class Herramientas(QObject):
                 self._t.start()
             return False
         if obj is self.vp:
-            if ev.type() == QEvent.Resize and self.donde in ("hueco", "pestana") and self._ts:
+            if ev.type() == QEvent.Resize and self.donde in ("hueco", "pestana") and (self._ts or self._clip_delante):
                 self._t.start()
             return False
         if self._interno or not isinstance(obj, QWidget):

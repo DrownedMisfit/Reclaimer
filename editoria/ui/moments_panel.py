@@ -313,7 +313,8 @@ class MomentsPanel(QWidget):
 
         # --- dónde buscas: tus archivos o internet (separados)
         src = QHBoxLayout()
-        src.addWidget(QLabel("Buscar en:"))
+        self._lbl_src = QLabel("Buscar en:")
+        src.addWidget(self._lbl_src)
         self.source = QComboBox()
         self.source.addItem("📁 Mis archivos", "local")
         self.source.addItem("🌐 Internet (imágenes libres para uso comercial)", "web")
@@ -353,6 +354,7 @@ class MomentsPanel(QWidget):
         b_img.clicked.connect(self.search_image_file)
         row.addWidget(self.query, 1)
         row.addWidget(b_go)
+        self._b_go = b_go
         row.addWidget(self.b_example)
         row.addWidget(b_img)
         lay.addLayout(row)
@@ -457,6 +459,7 @@ class MomentsPanel(QWidget):
         wb.addWidget(self.b_top)
         self.web_bar.hide()
         gl.addWidget(self.web_bar)
+        self._gl = gl
         split.addWidget(gw)
 
         # --- qué puedes hacer
@@ -564,6 +567,37 @@ class MomentsPanel(QWidget):
             data[mid] = {"times": times, "vecs": vecs, "kind": m.kind, "duration": m.duration}
             meta[mid] = " ".join([m.name, m.category] + list(m.tags)).replace("_", " ")
         return data, meta
+
+    def incrustar(self):
+        """🔎 (23/11) Dentro de Medios, modo «Lo que se ve»: la caja y el «Buscar» de Medios mandan; aquí solo lo
+        encontrado, lo que se hace con ello, «🎯 Ejemplo» y «🖼 Por imagen». Siempre en tus archivos (internet va en
+        Descargas)."""
+        self.incrustado = True
+        self.source.setCurrentIndex(max(0, self.source.findData("local")))
+        for w in (self._lbl_src, self.source, self.b_google, self.b_paste, self.query, self._b_go):
+            w.hide()
+        self.layout().setContentsMargins(0, 2, 0, 0)
+        self._gl.addStretch(1)                    # (la rejilla mide lo que sus filas: lo de abajo sube, sin hueco)
+        self.grid.installEventFilter(self)
+        mod = self.grid.model()                   # (más o menos resultados: otro alto)
+        for sig in (mod.rowsInserted, mod.rowsRemoved, mod.modelReset):
+            sig.connect(lambda *_a: QTimer.singleShot(0, self._ajustar_rejilla))
+        self._ajustar_rejilla()
+
+    TOPE_REJILLA = 420
+
+    def _ajustar_rejilla(self):
+        """Dentro de Medios: la rejilla de resultados, del alto de sus filas (hasta un tope); lo de abajo, pegado."""
+        if not getattr(self, "incrustado", False):
+            return
+        g = self.grid
+        celda = g.gridSize()
+        por_fila = max(1, (g.viewport().width() or g.width()) // max(1, celda.width()))
+        filas = max(1, -(-g.count() // por_fila))
+        alto = filas * celda.height() + 2 * g.frameWidth() + g.spacing() * 2 + 4
+        from . import diseno as D
+        g.setMaximumHeight(min(alto, D.px(self.TOPE_REJILLA)))
+
 
     def refresh_known(self):
         u = self.ctrl.understanding or {}
@@ -1040,6 +1074,8 @@ class MomentsPanel(QWidget):
 
     def eventFilter(self, obj, e):
         from PySide6.QtCore import QEvent
+        if obj is getattr(self, "grid", None) and e.type() == QEvent.Resize:
+            self._ajustar_rejilla()              # (dentro de Medios: la rejilla, del alto de sus filas)
         if obj is getattr(self, "video", None):
             if e.type() == QEvent.MouseButtonPress and e.button() == Qt.LeftButton:
                 self._vpress = e.position().toPoint()

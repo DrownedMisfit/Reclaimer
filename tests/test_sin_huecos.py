@@ -477,7 +477,7 @@ def caso_paneles(app, win):
                ("Medios", lambda: win.show_panel(win.library), lambda: win.library),
                ("Memes", lambda: win.show_panel(d["memes"].panel), lambda: d["memes"].panel),
                ("Descargas", lambda: win.show_panel(d["descargas_web"].panel), lambda: d["descargas_web"].panel),
-               ("IA", lambda: win.show_panel(win.ai_panel), lambda: win.ai_panel))
+               ("IA", lambda: win.abrir_herramienta_ia("broll"), lambda: win.herramientas.widget("ia_broll")))
     for nombre, abrir, panel_de in paneles:
         abrir()
         pump(app, 0.8)
@@ -503,10 +503,7 @@ def caso_paneles(app, win):
                    if tw.isVisibleTo(pan) and tw.topLevelItemCount() == 0 and tw.height() > VACIO_MAX]
         ok(not vacias, f"{nombre}: ninguna lista vacía de más de {VACIO_MAX} px (estado vacío en una línea)",
            str(vacias))
-        if nombre == "IA":                        # (todas sus secciones abiertas: ningún botón estirado)
-            for s_ in win.ai_panel.tabs.secciones():
-                s_.set_open(True, save=False)
-            pump(app, 0.6)
+        # (24/11: «IA» = la pestaña de herramientas de B-roll, de «Edita desde tu voz» › Más herramientas)
         estirados = []
         for b in pan.findChildren(QAbstractButton):
             if not b.isVisibleTo(pan) or b.height() <= 0:
@@ -515,6 +512,8 @@ def caso_paneles(app, win):
             if b.height() > max(40, natural + 10):
                 estirados.append(f"«{(b.text() or b.toolTip())[:30]}» {b.height()} px (pide {natural})")
         ok(not estirados, f"{nombre}: ningún botón estirado a lo alto", str(estirados))
+    win.herramientas.cerrar("ia_broll")             # (que su pestaña junto al Inspector no cambie las columnas de luego)
+    pump(app, 0.4)
     from editoria.ui import library as L
     deleg = win.library.tree.itemDelegateForColumn(0)
     ok(isinstance(deleg, getattr(L, "_AccionesFila", ())), "Medios: cada archivo con «poner en el cabezal» y "
